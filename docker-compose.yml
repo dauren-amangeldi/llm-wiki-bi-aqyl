@@ -1,0 +1,72 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ${ENV_FILE:-.env.testing}
+    volumes:
+      - app_data:/app/data
+      - ./src:/app/src  # live-reload in dev
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      uv run uvicorn llm_wiki.main:app
+      --host 0.0.0.0 --port 8000
+      --reload
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - ${ENV_FILE:-.env.testing}
+    volumes:
+      - app_data:/app/data
+      - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=1
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - ${ENV_FILE:-.env.testing}
+    volumes:
+      - app_data:/app/data
+      - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      uv run celery -A llm_wiki.orchestrator.tasks.celery_app beat
+      --loglevel=info
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  app_data:

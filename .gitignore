@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+uv.lock
+
+# Environment files — staging has real API keys, never commit
+.env.staging
+.env.local
+.env
+
+# Data directories — gitignored, mounted as Docker volumes
+data/raw/
+data/wiki/
+data/chroma/
+data/metadata.db
+data/usage.log
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+*.env.bak

@@ -1,0 +1,33 @@
+# Testing profile — adds Ollama for local LLM inference.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.testing.yml \
+#     --env-file .env.testing up
+
+services:
+  api:
+    depends_on:
+      ollama:
+        condition: service_started
+
+  worker:
+    depends_on:
+      ollama:
+        condition: service_started
+
+  beat:
+    depends_on:
+      ollama:
+        condition: service_started
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    # Pull model on first start:
+    #   docker compose exec ollama ollama pull qwen2.5-coder:14b
+
+volumes:
+  ollama_models:

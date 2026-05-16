@@ -1,0 +1,28 @@
+# Staging profile — uses OpenAI API directly (no Ollama service).
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml \
+#     --env-file .env.staging up
+
+services:
+  api:
+    command: >
+      uv run uvicorn llm_wiki.main:app
+      --host 0.0.0.0 --port 8000
+      --workers 2
+    environment:
+      - LOG_LEVEL=INFO
+    volumes:
+      - app_data:/app/data
+      # No src mount in staging — use the built image
+
+  worker:
+    command: >
+      uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=1
+    volumes:
+      - app_data:/app/data
+
+  beat:
+    volumes:
+      - app_data:/app/data
