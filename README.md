@@ -70,15 +70,24 @@ User → POST /files → FastAPI → Celery Queue
 | ID | Task | Status |
 |----|------|--------|
 | LW-1 | Repository skeleton | ✅ Done |
-| LW-2 | Storage layer | 🔲 |
-| LW-3 | Parsers (PDF + MD) | 🔲 |
-| LW-4 | LLM client wrapper | 🔲 |
+| LW-2 | Storage layer | ✅ Done |
+| LW-3 | Parsers (PDF + MD) | ✅ Done |
+| LW-4 | LLM client wrapper | ✅ Done |
 | LW-5 | POST /files endpoint | 🔲 |
 | LW-6 | Search Agent v1 | 🔲 |
 | LW-7 | Writer Agent (create) | 🔲 |
 | LW-8 | Writer Agent (update) | 🔲 |
 | LW-9 | Orchestrator | 🔲 |
 | LW-10 | GET /files/{id} | 🔲 |
+| LW-11 | ChromaDB + embeddings | 🔲 |
+| LW-12 | Search Agent v2 (embedding pre-filter) | 🔲 |
+| LW-13 | Backlink mechanics | 🔲 |
+| LW-14 | Lint Agent v1 (rule-based) | 🔲 |
+| LW-15 | Lint Agent v2 (LLM checks) + Celery Beat | 🔲 |
+| LW-16 | GET /wiki, /log, /stats endpoints | 🔲 |
+| LW-17 | Observability (structlog + OpenTelemetry) | 🔲 |
+| LW-18 | Runbook | 🔲 |
+| LW-19 | Rate limiting + budget alerts | 🔲 |
 
 ## API Docs
 

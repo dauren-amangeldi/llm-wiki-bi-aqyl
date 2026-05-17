@@ -2,10 +2,12 @@
 
 Strategy: try pypdf first (fast); if result is empty or garbled (<50 chars),
 fall back to pdfplumber which handles tables and multi-column layouts better.
-Implemented in LW-3.
 """
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class ParseError(Exception):
@@ -29,6 +31,7 @@ def parse_pdf(path: Path) -> str:
     """
     text = _try_pypdf(path)
     if not text or len(text.strip()) < 50:
+        logger.warning("pypdf produced insufficient text, falling back to pdfplumber", path=str(path))
         text = _try_pdfplumber(path)
     if not text:
         raise ParseError(f"Both pypdf and pdfplumber failed for {path}")
@@ -42,9 +45,22 @@ def _try_pypdf(path: Path) -> str:
         path: Path to the PDF file.
 
     Returns:
-        Extracted text, or empty string on failure.
+        Extracted plain text stripped of leading/trailing whitespace,
+        or an empty string on any failure.
     """
-    raise NotImplementedError("Implemented in LW-3")
+    try:
+        import pypdf  # local import — avoids hard dep at module level
+
+        reader = pypdf.PdfReader(str(path))
+        pages_text: list[str] = []
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                pages_text.append(page_text)
+        return "\n".join(pages_text).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pypdf failed", path=str(path), error=str(exc))
+        return ""
 
 
 def _try_pdfplumber(path: Path) -> str:
@@ -54,6 +70,19 @@ def _try_pdfplumber(path: Path) -> str:
         path: Path to the PDF file.
 
     Returns:
-        Extracted text, or empty string on failure.
+        Extracted plain text stripped of leading/trailing whitespace,
+        or an empty string on any failure.
     """
-    raise NotImplementedError("Implemented in LW-3")
+    try:
+        import pdfplumber  # local import — avoids hard dep at module level
+
+        with pdfplumber.open(str(path)) as pdf:
+            pages_text: list[str] = []
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    pages_text.append(page_text)
+        return "\n".join(pages_text).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pdfplumber failed", path=str(path), error=str(exc))
+        return ""

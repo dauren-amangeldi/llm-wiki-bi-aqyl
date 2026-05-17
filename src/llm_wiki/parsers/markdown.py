@@ -1,7 +1,6 @@
 """Markdown parser using markdown-it-py for AST-based extraction.
 
 Extracts headings, wiki-links ([[slug]]), and plain text from Markdown files.
-Implemented in LW-3.
 """
 
 import re
@@ -29,13 +28,47 @@ class ParsedMarkdown:
 def parse_markdown(source: str) -> ParsedMarkdown:
     """Parse Markdown source into headings, links, and plain text.
 
+    Uses markdown-it-py's token stream for robust heading detection.
+    All inline token content is concatenated into ``plain_text``;
+    wiki-links (``[[slug]]``) are extracted from that text.
+
     Args:
         source: Raw Markdown string.
 
     Returns:
         ParsedMarkdown with headings, wiki-link slugs, and plain text.
     """
-    raise NotImplementedError("Implemented in LW-3")
+    if not source.strip():
+        return ParsedMarkdown()
+
+    from markdown_it import MarkdownIt  # local import — optional dep in tests
+
+    md = MarkdownIt()
+    tokens = md.parse(source)
+
+    headings: list[Heading] = []
+    inline_parts: list[str] = []
+
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.type == "heading_open":
+            level = int(token.tag[1:])  # "h1" → 1, "h2" → 2, …
+            # The very next token in the stream is always `inline` for headings
+            if i + 1 < len(tokens) and tokens[i + 1].type == "inline":
+                text = tokens[i + 1].content
+                headings.append(Heading(level=level, text=text))
+                inline_parts.append(text)
+                i += 2  # consume both heading_open and its inline child
+                continue
+        elif token.type == "inline" and token.content:
+            inline_parts.append(token.content)
+        i += 1
+
+    plain_text = "\n".join(inline_parts)
+    links = extract_wiki_links(plain_text)
+
+    return ParsedMarkdown(headings=headings, links=links, plain_text=plain_text)
 
 
 def parse_markdown_file(path: Path) -> ParsedMarkdown:
@@ -55,12 +88,14 @@ _WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 def extract_wiki_links(text: str) -> list[str]:
-    """Return all [[slug]] references found in *text*.
+    """Return all [[slug]] references found in *text*, deduplicated.
+
+    Preserves first-seen order while removing duplicates.
 
     Args:
         text: Raw Markdown string.
 
     Returns:
-        List of slug strings (the text inside the double brackets).
+        Deduplicated list of slug strings (the text inside the double brackets).
     """
-    return _WIKI_LINK_RE.findall(text)
+    return list(dict.fromkeys(_WIKI_LINK_RE.findall(text)))

@@ -19,9 +19,6 @@ coverage.xml
 venv/
 env/
 
-# uv
-uv.lock
-
 # Environment files — staging has real API keys, never commit
 .env.staging
 .env.local
