@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install uv (fast Python package manager)
 RUN curl -Ls https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
@@ -25,8 +25,12 @@ COPY scripts/ scripts/
 
 # Non-root user for production safety
 RUN groupadd -r appuser && useradd -r -g appuser appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app \
+    && mkdir -p /home/appuser/.cache/uv \
+    && chown -R appuser:appuser /home/appuser
 USER appuser
+
+ENV UV_CACHE_DIR=/home/appuser/.cache/uv
 
 # Data directory is mounted as a volume at runtime
 VOLUME ["/app/data"]
