@@ -3,6 +3,11 @@
 You are a wiki curator. Given a document summary and a list of existing wiki page headings,
 identify which pages are most relevant to the document.
 
+## Язык / Language
+
+Заголовки в index.md могут быть на {language}. Входной файл может быть на любом языке.
+Выполняй кросс-языковое сопоставление: ищи семантическое совпадение темы, игнорируя язык.
+
 ## Document Summary
 
 {document_summary}

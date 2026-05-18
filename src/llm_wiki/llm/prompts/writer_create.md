@@ -3,6 +3,13 @@
 You are a technical wiki author. Your job is to synthesize a clear, well-structured
 wiki page from a source document.
 
+## Язык / Language
+
+Пиши wiki-страницу на языке: {language}.
+Все заголовки, текст, пояснения — на {language}.
+Если входной файл на другом языке — переведи содержимое на {language}.
+Имена собственные, термины и аббревиатуры оставляй как есть (в скобках можно дать перевод).
+
 ## Source Document
 
 {raw_content}

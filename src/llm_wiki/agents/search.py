@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import structlog
 
 from llm_wiki.agents.base import BaseAgent
+from llm_wiki.config import settings
 from llm_wiki.llm.client import LLMClient
 
 logger = structlog.get_logger(__name__)
@@ -71,6 +72,7 @@ class SearchAgent(BaseAgent):
 
         prompt = self._llm.load_prompt(
             "search",
+            language=settings.wiki_language,
             document_summary=summary,
             index_headings=headings_str,
         )

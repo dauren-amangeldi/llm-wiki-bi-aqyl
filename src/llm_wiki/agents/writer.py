@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import structlog
 
 from llm_wiki.agents.base import BaseAgent
+from llm_wiki.config import settings
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.utils.slugify import is_valid_slug, to_slug
 
@@ -73,7 +74,11 @@ class WriterAgent(BaseAgent):
             ValueError: If the LLM response is invalid JSON, missing content,
                 or if a valid slug cannot be produced.
         """
-        prompt = self._llm.load_prompt("writer_create", raw_content=raw_content)
+        prompt = self._llm.load_prompt(
+            "writer_create",
+            language=settings.wiki_language,
+            raw_content=raw_content,
+        )
         system = "You are a technical wiki author. Return only valid JSON."
 
         text, _usage = await self._llm.complete(
@@ -147,6 +152,7 @@ class WriterAgent(BaseAgent):
         for page in existing_pages:
             prompt = self._llm.load_prompt(
                 "writer_update",
+                language=settings.wiki_language,
                 slug=page.slug,
                 existing_content=page.content,
                 raw_content=raw_content,

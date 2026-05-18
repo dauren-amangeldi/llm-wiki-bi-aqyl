@@ -3,6 +3,12 @@
 You are a technical wiki editor. A new document has arrived that contains information
 relevant to an existing wiki page. Integrate the new information without destroying existing content.
 
+## Язык / Language
+
+Обновлённая wiki-страница должна быть на языке: {language}.
+Сохраняй язык существующей страницы. Новые разделы пиши на {language}.
+Если входной файл на другом языке — переведи новое содержимое на {language}.
+
 ## Existing Wiki Page
 
 Slug: {slug}

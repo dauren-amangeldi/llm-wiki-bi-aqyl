@@ -24,18 +24,17 @@ COPY src/ src/
 COPY scripts/ scripts/
 COPY tests/ tests/
 
-# Non-root user for production safety
-RUN groupadd -r appuser && useradd -r -g appuser appuser \
-    && chown -R appuser:appuser /app \
-    && mkdir -p /home/appuser/.cache/uv \
-    && chown -R appuser:appuser /home/appuser
-USER appuser
+# Copy entrypoint and make it executable
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-ENV UV_CACHE_DIR=/home/appuser/.cache/uv
-
-# Data directory is mounted as a volume at runtime
-VOLUME ["/app/data"]
+# Pre-create data directories so they exist even when no volume is mounted.
+# Running as root here (Variant A — MVP/dev mode).
+# TODO: switch to non-root user (appuser) for production hardening once the
+#       volume ownership strategy is decided (init-container or bind mount).
+RUN mkdir -p /app/data/raw /app/data/wiki /app/data/chroma
 
 EXPOSE 8000
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["uv", "run", "uvicorn", "llm_wiki.main:app", "--host", "0.0.0.0", "--port", "8000"]

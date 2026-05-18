@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 50
     allowed_extensions: frozenset[str] = frozenset({".pdf", ".md"})
 
+    # --- Wiki output language ---
+    wiki_language: str = "ru"
+
     # --- Observability ---
     log_level: str = "INFO"
     service_name: str = "llm-wiki"

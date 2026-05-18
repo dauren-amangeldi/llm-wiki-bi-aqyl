@@ -2,6 +2,10 @@
 
 You are a wiki quality auditor. Review the following wiki pages for consistency issues.
 
+## Язык / Language
+
+Wiki-страницы написаны на {language}. Отчёт об ошибках тоже пиши на {language}.
+
 ## Wiki Pages (Batch {batch_index} of {total_batches})
 
 {pages_content}

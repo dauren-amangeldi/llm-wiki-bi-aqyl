@@ -15,10 +15,15 @@ def main() -> None:
     dirs = [settings.raw_dir, settings.wiki_dir, settings.chroma_dir]
     ensure_dirs(*dirs)
 
+    lang = settings.wiki_language.lower()
+    index_header = "# Карта знаний\n" if lang == "ru" else "# Wiki Index\n"
+    log_header = "# Журнал изменений\n" if lang == "ru" else "# Ingestion Log\n"
+    issues_header = "# Отчёты проверок\n" if lang == "ru" else "# Lint Agent Issues\n"
+
     for path, content in [
-        (settings.index_path, "# Wiki Index\n"),
-        (settings.log_path, "# Ingestion Log\n"),
-        (settings.issues_path, "# Lint Agent Issues\n"),
+        (settings.index_path, index_header),
+        (settings.log_path, log_header),
+        (settings.issues_path, issues_header),
         (settings.usage_log_path, ""),
     ]:
         if not path.exists():
