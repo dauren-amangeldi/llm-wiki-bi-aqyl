@@ -4,10 +4,11 @@ Strategy: try pypdf first (fast); if result is empty or garbled (<50 chars),
 fall back to pdfplumber which handles tables and multi-column layouts better.
 """
 
-import logging
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 class ParseError(Exception):

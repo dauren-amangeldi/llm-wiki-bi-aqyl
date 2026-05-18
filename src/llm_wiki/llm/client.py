@@ -101,17 +101,17 @@ class LLMClient:
             case _:
                 raise ValueError(f"Unknown LLM_PROVIDER: {self._provider!r}")
 
-    def load_prompt(self, name: str, **variables: Any) -> str:
-        """Load a prompt from llm/prompts/{name}.md and interpolate variables.
+    def load_prompt(self, prompt_name: str, **variables: Any) -> str:
+        """Load a prompt from llm/prompts/{prompt_name}.md and interpolate variables.
 
         Args:
-            name: Prompt file stem (e.g. ``'search'``, ``'writer_create'``).
+            prompt_name: Prompt file stem (e.g. ``'search'``, ``'writer_create'``).
             **variables: Placeholder values substituted into the prompt text.
 
         Returns:
             Fully rendered prompt string ready to send to the LLM.
         """
-        template = (self.PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        template = (self.PROMPTS_DIR / f"{prompt_name}.md").read_text(encoding="utf-8")
         return template.format(**variables)
 
     async def complete(

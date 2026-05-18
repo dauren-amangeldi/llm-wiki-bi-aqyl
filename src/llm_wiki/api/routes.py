@@ -1,28 +1,85 @@
 """API route definitions — all endpoints under /api/v1/."""
 
-from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import JSONResponse
+from pathlib import Path
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from llm_wiki.api.deps import get_db
+from llm_wiki.api.schemas import FileUploadResponse
+from llm_wiki.config import settings
+from llm_wiki.orchestrator.tasks import process_file_task
+from llm_wiki.storage.metadata import create_file_record
+from llm_wiki.utils.ids import new_file_id
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
 
-# ---------------------------------------------------------------------------
-# Stub placeholders — implemented task-by-task in subsequent sprints.
-# Each endpoint raises 501 until its implementing task (LW-N) is merged.
-# ---------------------------------------------------------------------------
-
 @router.post(
     "/files",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Upload a PDF or Markdown file for ingestion (LW-5)",
+    response_model=FileUploadResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Upload a PDF or Markdown file for ingestion",
     tags=["files"],
 )
-async def upload_file() -> JSONResponse:
-    """Upload a file for async wiki ingestion.
+async def upload_file(
+    file: UploadFile,
+    session: AsyncSession = Depends(get_db),
+) -> FileUploadResponse:
+    """Accept a PDF or Markdown file and enqueue it for async wiki ingestion.
 
-    Implemented in LW-5. Returns 202 with file_id and task_id.
+    Validates file type (.pdf / .md only) and size (max 50 MB), saves the raw
+    file to ``/raw/``, creates a ``FileRecord`` in SQLite, and dispatches a
+    Celery task.
+
+    Args:
+        file: The uploaded file (multipart/form-data, field name ``file``).
+        session: Injected async SQLAlchemy session.
+
+    Returns:
+        202 with ``file_id``, ``task_id``, and ``status="queued"``.
+
+    Raises:
+        HTTPException 400: Unsupported file type (not .pdf or .md).
+        HTTPException 413: File exceeds the 50 MB size limit.
     """
-    raise HTTPException(status_code=501, detail="Not implemented yet — see LW-5")
+    filename = file.filename or "upload"
+    ext = Path(filename).suffix.lower()
+
+    if ext not in settings.allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type '{ext}'. Allowed: {sorted(settings.allowed_extensions)}",
+        )
+
+    # Read content to validate size (streaming would be better at scale, fine for MVP)
+    content = await file.read()
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds {settings.max_file_size_mb} MB limit.",
+        )
+
+    file_id = new_file_id()
+    dest = settings.raw_dir / f"{file_id}{ext}"
+    dest.write_bytes(content)
+
+    await create_file_record(session, file_id, filename)
+
+    task = process_file_task.delay(file_id)
+
+    logger.info("file_uploaded", file_id=file_id, filename=filename, size_bytes=len(content))
+
+    return FileUploadResponse(file_id=file_id, task_id=str(task.id), status="queued")
+
+
+# ---------------------------------------------------------------------------
+# Stub placeholders — implemented task-by-task in subsequent sprints.
+# ---------------------------------------------------------------------------
 
 
 @router.get(
@@ -31,7 +88,7 @@ async def upload_file() -> JSONResponse:
     summary="Get file processing status (LW-10)",
     tags=["files"],
 )
-async def get_file_status(file_id: str) -> JSONResponse:
+async def get_file_status(file_id: str) -> None:
     """Return processing state history and cost for a given file_id.
 
     Implemented in LW-10.
@@ -45,7 +102,7 @@ async def get_file_status(file_id: str) -> JSONResponse:
     summary="Get a wiki page by slug (LW-16)",
     tags=["wiki"],
 )
-async def get_wiki_page(slug: str) -> JSONResponse:
+async def get_wiki_page(slug: str) -> None:
     """Return a wiki page as markdown or JSON depending on Accept header.
 
     Implemented in LW-16.
@@ -59,7 +116,7 @@ async def get_wiki_page(slug: str) -> JSONResponse:
     summary="Manually trigger the Lint Agent (LW-15)",
     tags=["lint"],
 )
-async def run_lint() -> JSONResponse:
+async def run_lint() -> None:
     """Enqueue a Lint Agent run. Returns 202 with task_id.
 
     Implemented in LW-15.
@@ -73,7 +130,7 @@ async def run_lint() -> JSONResponse:
     summary="Get ingestion changelog with pagination (LW-16)",
     tags=["log"],
 )
-async def get_log(page: int = 1, per_page: int = 50) -> JSONResponse:
+async def get_log(page: int = 1, per_page: int = 50) -> None:
     """Return paginated entries from log.md.
 
     Implemented in LW-16.
@@ -87,7 +144,7 @@ async def get_log(page: int = 1, per_page: int = 50) -> JSONResponse:
     summary="Get usage statistics and costs (LW-16)",
     tags=["stats"],
 )
-async def get_stats() -> JSONResponse:
+async def get_stats() -> None:
     """Return aggregated stats: file counts, costs, last lint run.
 
     Implemented in LW-16.

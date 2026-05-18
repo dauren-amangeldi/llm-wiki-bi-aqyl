@@ -19,9 +19,10 @@ COPY pyproject.toml uv.lock* ./
 # Install all dependencies (including dev extras for the test/worker images)
 RUN uv sync --all-extras --frozen || uv sync --all-extras
 
-# Copy application source
+# Copy application source and tests
 COPY src/ src/
 COPY scripts/ scripts/
+COPY tests/ tests/
 
 # Non-root user for production safety
 RUN groupadd -r appuser && useradd -r -g appuser appuser \

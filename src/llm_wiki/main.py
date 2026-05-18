@@ -1,13 +1,34 @@
 """FastAPI application entry point."""
 
+from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator
+
 import structlog
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from llm_wiki.api.deps import _engine
 from llm_wiki.api.routes import router
 from llm_wiki.config import settings
+from llm_wiki.storage.filesystem import ensure_dirs
+from llm_wiki.storage.metadata import Base
 
 logger = structlog.get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Create DB tables and data directories on startup."""
+    # Ensure all data directories exist before any request comes in
+    ensure_dirs(settings.raw_dir, settings.wiki_dir, settings.chroma_dir)
+
+    async with _engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    logger.info("startup_complete", service=settings.service_name)
+    yield
+    logger.info("shutdown", service=settings.service_name)
+
 
 app = FastAPI(
     title="LLM Wiki",
@@ -15,6 +36,7 @@ app = FastAPI(
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 app.include_router(router, prefix="/api/v1")

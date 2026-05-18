@@ -175,9 +175,10 @@ async def test_complete_retries_on_rate_limit(tmp_path: Path) -> None:
     """complete retries up to 3 times on RateLimitError, then succeeds."""
     client = _make_client(tmp_path)
     mock_response = _make_openai_response("ok")
+    _req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     rate_limit_exc = openai.RateLimitError(
         "rate limited",
-        response=httpx.Response(429),
+        response=httpx.Response(429, request=_req),
         body={"error": {"message": "rate limit"}},
     )
     create_mock = AsyncMock(
@@ -197,9 +198,10 @@ async def test_complete_retries_on_rate_limit(tmp_path: Path) -> None:
 async def test_complete_raises_after_max_retries(tmp_path: Path) -> None:
     """complete raises after MAX_RETRIES consecutive transient failures."""
     client = _make_client(tmp_path)
+    _req2 = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     rate_limit_exc = openai.RateLimitError(
         "rate limited",
-        response=httpx.Response(429),
+        response=httpx.Response(429, request=_req2),
         body={"error": {"message": "rate limit"}},
     )
     create_mock = AsyncMock(side_effect=rate_limit_exc)
@@ -216,9 +218,10 @@ async def test_complete_raises_after_max_retries(tmp_path: Path) -> None:
 async def test_complete_no_retry_on_auth_error(tmp_path: Path) -> None:
     """complete raises immediately (no retry) on 401 AuthenticationError."""
     client = _make_client(tmp_path)
+    _req3 = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     auth_exc = openai.AuthenticationError(
         "401 Unauthorized",
-        response=httpx.Response(401),
+        response=httpx.Response(401, request=_req3),
         body={"error": {"message": "Invalid API key"}},
     )
     create_mock = AsyncMock(side_effect=auth_exc)
