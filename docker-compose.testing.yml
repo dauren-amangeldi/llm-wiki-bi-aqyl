@@ -1,23 +1,23 @@
 # Testing profile — adds Ollama for local LLM inference.
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.testing.yml \
-#     --env-file .env.testing up
+#     --env-file .env.testing up --build
 
 services:
   api:
     depends_on:
-      ollama:
-        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
 
   worker:
     depends_on:
-      ollama:
-        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
 
   beat:
     depends_on:
-      ollama:
-        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
 
   ollama:
     image: ollama/ollama:latest
@@ -26,8 +26,32 @@ services:
     ports:
       - "11434:11434"
     restart: unless-stopped
-    # Pull model on first start:
-    #   docker compose exec ollama ollama pull qwen2.5-coder:14b
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # One-shot init container: pulls the model before the app services start.
+  # Reads OLLAMA_MODEL from the environment (default: qwen2.5-coder:14b).
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:14b}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling model: $${OLLAMA_MODEL}"
+        ollama pull "$${OLLAMA_MODEL}"
+        echo "Model ready."
+    restart: "no"
 
 volumes:
   ollama_models:
