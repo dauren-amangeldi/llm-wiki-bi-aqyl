@@ -5,16 +5,22 @@
 
 services:
   api:
+    env_file:
+      - .env.testing
     depends_on:
       ollama-init:
         condition: service_completed_successfully
 
   worker:
+    env_file:
+      - .env.testing
     depends_on:
       ollama-init:
         condition: service_completed_successfully
 
   beat:
+    env_file:
+      - .env.testing
     depends_on:
       ollama-init:
         condition: service_completed_successfully
@@ -26,15 +32,20 @@ services:
     ports:
       - "11434:11434"
     restart: unless-stopped
+    # The ollama/ollama image does NOT ship with curl/wget, so a
+    # `curl .../api/tags` healthcheck always fails (ollama/ollama#9781).
+    # `ollama list` uses the CLI that IS in the image and exits 0 only
+    # once the daemon is actually serving.
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 5s
+      start_period: 15s
 
   # One-shot init container: pulls the model before the app services start.
-  # Reads OLLAMA_MODEL from the environment (default: qwen2.5-coder:14b).
+  # Reads OLLAMA_MODEL from the environment (default: qwen2.5-coder:3b —
+  # small enough to fit on a laptop; override for production-ish testing).
   ollama-init:
     image: ollama/ollama:latest
     depends_on:
@@ -44,12 +55,18 @@ services:
       - ollama_models:/root/.ollama
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:14b}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:3b}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        echo "Pulling model: $${OLLAMA_MODEL}"
-        ollama pull "$${OLLAMA_MODEL}"
+        set -e
+        echo "Checking for model: $${OLLAMA_MODEL}"
+        if ollama list | awk 'NR>1 {print $$1}' | grep -qx "$${OLLAMA_MODEL}"; then
+          echo "Model $${OLLAMA_MODEL} already present — skipping pull."
+        else
+          echo "Pulling model: $${OLLAMA_MODEL}"
+          ollama pull "$${OLLAMA_MODEL}"
+        fi
         echo "Model ready."
     restart: "no"
 

@@ -78,6 +78,9 @@ async def process_file(file_id: str) -> None:
 
         completed: set[str] = {e["state"] for e in (record.state_history or [])}
 
+        # One LLMClient for the whole pipeline run; closed in finally so its
+        # httpx connections are released before the event loop shuts down.
+        llm = LLMClient()
         try:
             # ----------------------------------------------------------------
             # STORED — parse raw file to plain text
@@ -91,7 +94,6 @@ async def process_file(file_id: str) -> None:
             # ----------------------------------------------------------------
             # SEARCHED — Search Agent finds relevant pages
             # ----------------------------------------------------------------
-            llm = LLMClient()
             index_storage = IndexStorage(settings.index_path)
             headings = index_storage.read_headings()
             heading_texts = [h.text for h in headings]
@@ -180,6 +182,12 @@ async def process_file(file_id: str) -> None:
             logger.error("pipeline_failed", file_id=file_id, error=str(exc))
             await update_file_status(session, file_id, "FAILED")
             raise
+        finally:
+            # Always close the SDK client within the active event loop so that
+            # httpx can release its connection pool cleanly.  Without this,
+            # GC would try to close the httpx.AsyncClient after the loop is
+            # gone, producing "RuntimeError: Event loop is closed" warnings.
+            await llm.aclose()
 
 
 # ---------------------------------------------------------------------------

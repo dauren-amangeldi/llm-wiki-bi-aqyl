@@ -6,33 +6,34 @@ synthesize wiki pages, maintain backlinks, and run weekly consistency checks.
 ## Quick Start (Testing — local Ollama)
 
 ```bash
-# 1. Start all services (api, worker, beat, redis, ollama)
+# 1. Start all services (api, worker, beat, redis, ollama).
+#    ollama-init pulls the model automatically on first run — no manual step needed.
 docker compose -f docker-compose.yml -f docker-compose.testing.yml \
   --env-file .env.testing up --build
 
-# 2. Pull the LLM model (first time only)
-docker compose exec ollama ollama pull qwen2.5-coder:14b
-
-# 3. Initialize the data directory
+# 2. Initialize the data directory (first time only)
 docker compose exec api uv run python scripts/init_wiki.py
 
-# 4. Upload a file
+# 3. Upload a file
 curl -X POST http://localhost:8000/api/v1/files \
   -F "file=@/path/to/document.pdf"
 
-# 5. Check processing status
+# 4. Check processing status  (LW-10, coming soon)
 curl http://localhost:8000/api/v1/files/{file_id}
 ```
+
+> **Model size:** the testing profile defaults to `qwen2.5-coder:3b` (~2 GB).
+> Override with `OLLAMA_MODEL=qwen2.5-coder:14b` in `.env.testing` for higher quality.
 
 ## Quick Start (Staging — OpenAI)
 
 ```bash
-# Copy and fill in your API key
-cp .env.staging .env.staging.local
+# 1. Copy the template and fill in your API key
+cp .env.staging.example .env.staging.local
 # edit OPENAI_API_KEY in .env.staging.local
 
-docker compose -f docker-compose.yml -f docker-compose.staging.yml \
-  --env-file .env.staging.local up --build
+# 2. Start (no --env-file flag needed — the staging override loads it directly)
+docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
 ```
 
 ## Development Commands (all inside Docker)
@@ -60,12 +61,12 @@ User → POST /files → FastAPI → Celery Queue
                         RECEIVED → STORED → SEARCHED → WRITTEN → LOGGED → DONE
                               ↓              ↓             ↓
                          parse file    Search Agent   Writer Agent
-                         (pypdf/md)    (GPT Mini)     (GPT Mini)
+                         (pypdf/md)    (LLM)          (LLM)
                                            ↓
-                                       ChromaDB
+                                       ChromaDB (LW-11)
 ```
 
-## Task Map (Sprint 1–2)
+## Task Map
 
 | ID | Task | Status |
 |----|------|--------|
@@ -73,12 +74,12 @@ User → POST /files → FastAPI → Celery Queue
 | LW-2 | Storage layer | ✅ Done |
 | LW-3 | Parsers (PDF + MD) | ✅ Done |
 | LW-4 | LLM client wrapper | ✅ Done |
-| LW-5 | POST /files endpoint | 🔲 |
-| LW-6 | Search Agent v1 | 🔲 |
-| LW-7 | Writer Agent (create) | 🔲 |
-| LW-8 | Writer Agent (update) | 🔲 |
-| LW-9 | Orchestrator | 🔲 |
-| LW-10 | GET /files/{id} | 🔲 |
+| LW-5 | POST /files endpoint + Celery task | ✅ Done |
+| LW-6 | Search Agent v1 | ✅ Done |
+| LW-7 | Writer Agent — create page | ✅ Done |
+| LW-8 | Writer Agent — update pages | ✅ Done |
+| LW-9 | Orchestrator (state machine) | ✅ Done |
+| LW-10 | GET /files/{id} status endpoint | 🔲 |
 | LW-11 | ChromaDB + embeddings | 🔲 |
 | LW-12 | Search Agent v2 (embedding pre-filter) | 🔲 |
 | LW-13 | Backlink mechanics | 🔲 |

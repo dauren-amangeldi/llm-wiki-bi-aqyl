@@ -29,8 +29,8 @@ class SearchAgent(BaseAgent):
     """Finds existing wiki pages relevant to the content of an incoming file.
 
     v1 implementation sends the full index.md heading list to the LLM for
-    relevance scoring.  Returns 3–10 results sorted by descending score, or
-    an empty list when all scores fall below the threshold (signals new topic).
+    relevance scoring.  Returns up to MAX_RESULTS sorted by descending score,
+    or an empty list when all scores fall below the threshold (new topic).
     """
 
     RELEVANCE_THRESHOLD: float = 0.3
@@ -86,16 +86,10 @@ class SearchAgent(BaseAgent):
             response_format="json",
         )
 
-        try:
-            results_raw = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Search Agent: invalid JSON from LLM: {exc}") from exc
-
-        if not isinstance(results_raw, list):
-            raise ValueError("Search Agent: expected a JSON array from LLM")
+        candidates = _parse_search_response(text)
 
         results: list[SearchResult] = []
-        for item in results_raw:
+        for item in candidates:
             if not isinstance(item, dict):
                 continue
             score = float(item.get("relevance_score", 0.0))
@@ -113,7 +107,62 @@ class SearchAgent(BaseAgent):
         logger.info(
             "search_complete",
             file_id=file_id,
-            candidates=len(results_raw),
+            candidates=len(candidates),
             returned=len(final),
         )
         return final
+
+
+def _parse_search_response(raw: str) -> list[dict]:  # type: ignore[type-arg]
+    """Extract the candidates array from an LLM response robustly.
+
+    Tolerates the following formats that LLMs produce in practice:
+
+    - ``{"candidates": [...]}``  — preferred (matches the prompt)
+    - ``{"results": [...]}``     — common alias
+    - ``[...]``                   — bare array (Ollama / older prompts)
+    - ````` ```json\\n...\\n``` `````  — markdown fence wrapper
+
+    Args:
+        raw: Raw string returned by the LLM.
+
+    Returns:
+        List of raw candidate dicts.
+
+    Raises:
+        ValueError: If *raw* is not valid JSON or contains no extractable list.
+    """
+    text = raw.strip()
+
+    # Strip markdown code fences (``` or ```json)
+    if text.startswith("```"):
+        parts = text.split("```")
+        # parts[1] is the content block
+        inner = parts[1] if len(parts) > 1 else text
+        if inner.startswith("json"):
+            inner = inner[4:]
+        text = inner.strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Search Agent: invalid JSON from LLM: {exc}") from exc
+
+    # Bare array — accepted for backward compatibility (e.g. Ollama)
+    if isinstance(data, list):
+        return data  # type: ignore[return-value]
+
+    if isinstance(data, dict):
+        # Check known wrapper keys in priority order
+        for key in ("candidates", "results", "items", "matches", "pages"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value  # type: ignore[return-value]
+
+        # Single candidate returned as a flat object {"slug": ..., ...}
+        if "slug" in data:
+            return [data]  # type: ignore[return-value]
+
+    raise ValueError(
+        f"Search Agent: cannot extract candidates array from LLM response: {raw[:300]!r}"
+    )

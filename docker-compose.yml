@@ -5,8 +5,6 @@ services:
       dockerfile: docker/Dockerfile
     ports:
       - "8000:8000"
-    env_file:
-      - ${ENV_FILE:-.env.testing}
     volumes:
       - app_data:/app/data
       - ./src:/app/src  # live-reload in dev
@@ -23,8 +21,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    env_file:
-      - ${ENV_FILE:-.env.testing}
     volumes:
       - app_data:/app/data
       - ./src:/app/src
@@ -41,8 +37,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    env_file:
-      - ${ENV_FILE:-.env.testing}
     volumes:
       - app_data:/app/data
       - ./src:/app/src

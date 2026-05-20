@@ -19,8 +19,9 @@ coverage.xml
 venv/
 env/
 
-# Environment files — staging has real API keys, never commit
+# Environment files — contain real API keys, never commit
 .env.staging
+.env.staging.local
 .env.local
 .env
 

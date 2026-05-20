@@ -5,6 +5,7 @@ Every test that exercises LLMClient.complete verifies that a JSON-line
 record is written to usage.log.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -253,3 +254,58 @@ def test_load_prompt_interpolates_variables(tmp_path: Path) -> None:
         assert result == "Hello Alice, you have 3 messages.\n"
     finally:
         test_prompt.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# aclose / event-loop lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_aclose_called_within_same_loop_no_runtime_error(tmp_path: Path) -> None:
+    """Calling aclose() inside the same asyncio.Runner avoids 'Event loop closed'.
+
+    This reproduces the production scenario where a Celery task creates an
+    LLMClient, runs complete(), then calls aclose() — all within one
+    asyncio.Runner context.  The critical assertion is that no RuntimeError
+    about a closed event loop is raised and no unraisable exception is queued.
+    """
+    import gc
+    import sys
+
+    client = _make_client(tmp_path)
+    create_mock = AsyncMock(return_value=_make_openai_response("hello"))
+    client._client.chat = MagicMock()
+    client._client.chat.completions.create = create_mock
+    # Ensure the mock SDK client has an awaitable aclose() method
+    client._client.aclose = AsyncMock()
+
+    unraisable_errors: list[BaseException] = []
+
+    original_unraisable = sys.unraisablehook
+
+    def _catch_sys_unraisable(args: sys.UnraisableHookArgs) -> None:  # type: ignore[attr-defined]
+        unraisable_errors.append(args.exc_value)
+
+    sys.unraisablehook = _catch_sys_unraisable  # type: ignore[attr-defined]
+    try:
+        # Simulate two sequential asyncio.Runner calls (two Celery tasks),
+        # each one completing() and then aclose()-ing within the same loop.
+        for _ in range(2):
+            with asyncio.Runner() as runner:
+                runner.run(client.complete("prompt", "system", "fid", "search"))
+                runner.run(client.aclose())
+            gc.collect()  # flush any pending GC __del__ callbacks
+
+        assert unraisable_errors == [], (
+            f"Unexpected unraisable exceptions after aclose(): {unraisable_errors}"
+        )
+    finally:
+        sys.unraisablehook = original_unraisable  # type: ignore[attr-defined]
+
+
+async def test_aclose_is_idempotent(tmp_path: Path) -> None:
+    """aclose() can be called multiple times without raising."""
+    client = _make_client(tmp_path)
+    client._client.aclose = AsyncMock()
+    await client.aclose()
+    await client.aclose()  # second call must not raise

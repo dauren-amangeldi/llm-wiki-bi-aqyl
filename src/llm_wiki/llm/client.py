@@ -101,6 +101,19 @@ class LLMClient:
             case _:
                 raise ValueError(f"Unknown LLM_PROVIDER: {self._provider!r}")
 
+    async def aclose(self) -> None:
+        """Close the underlying SDK client and release all HTTP connections.
+
+        Must be called when the LLMClient is no longer needed, **within the
+        same event loop** that was active when ``complete()`` was first called.
+        Calling this prevents the ``RuntimeError: Event loop is closed`` warning
+        that appears when GC later tries to clean up an open httpx.AsyncClient
+        on a dead loop.
+        """
+        close = getattr(self._client, "aclose", None)
+        if callable(close):
+            await close()
+
     def load_prompt(self, prompt_name: str, **variables: Any) -> str:
         """Load a prompt from llm/prompts/{prompt_name}.md and interpolate variables.
 
