@@ -114,6 +114,18 @@ class LLMClient:
         if callable(close):
             await close()
 
+        # httpx spawns fire-and-forget asyncio.Tasks to tear down TLS streams
+        # and clean up the connection pool.  If we return now, asyncio.Runner
+        # will close the event loop before those tasks finish, producing
+        # "RuntimeError: Event loop is closed".  Gather them explicitly.
+        loop = asyncio.get_running_loop()
+        pending = [
+            t for t in asyncio.all_tasks(loop)
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     def load_prompt(self, prompt_name: str, **variables: Any) -> str:
         """Load a prompt from llm/prompts/{prompt_name}.md and interpolate variables.
 

@@ -66,6 +66,23 @@ def process_file_task(self: Any, file_id: str) -> None:
         # asyncio.Runner keeps the loop alive across await points AND across
         # the context-manager lifetime, so httpx can close connections cleanly.
         with asyncio.Runner() as runner:
+            # Suppress harmless "Event loop is closed" from httpx's TLS
+            # cleanup tasks that may outlive the Runner's loop.
+            _original_handler = runner.get_loop().get_exception_handler()
+
+            def _suppress_loop_closed(
+                loop: asyncio.AbstractEventLoop,
+                context: dict,  # type: ignore[type-arg]
+            ) -> None:
+                exc = context.get("exception")
+                if isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc):
+                    return
+                if _original_handler is not None:
+                    _original_handler(loop, context)
+                else:
+                    loop.default_exception_handler(context)
+
+            runner.get_loop().set_exception_handler(_suppress_loop_closed)
             runner.run(process_file(file_id))
     except _PERMANENT_ERRORS as exc:
         # No point retrying — log and fail permanently.
