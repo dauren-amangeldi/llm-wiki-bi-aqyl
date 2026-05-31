@@ -102,7 +102,7 @@ User → POST /files → FastAPI → Celery Queue
 | LW-11 | ChromaDB + embeddings infrastructure | ✅ Done |
 | LW-12.1 | SHA-256 file deduplication (POST /files) | ✅ Done |
 | LW-12 | Search Agent v2 (embedding pre-filter + LLM re-rank) | ✅ Done |
-| LW-13 | Backlink mechanics | 🔲 |
+| LW-13 | Backlink mechanics (bidirectional ## Backlinks sync) | ✅ Done |
 | LW-14 | Lint Agent v1 (rule-based) | 🔲 |
 | LW-15 | Lint Agent v2 (LLM checks) + Celery Beat | 🔲 |
 | LW-16 | GET /wiki, /log, /stats endpoints | 🔲 |

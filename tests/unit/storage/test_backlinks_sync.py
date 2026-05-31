@@ -1,0 +1,308 @@
+"""Unit tests for llm_wiki.storage.backlinks_sync (LW-13).
+
+Covers: new-page sync, update diff, self-reference, missing target,
+idempotency, concurrent writes, and no-write-when-unchanged.
+"""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
+from llm_wiki.utils.backlinks import extract_backlinks
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _make_wiki(tmp_path: Path, pages: dict[str, str]) -> Path:
+    """Create wiki_dir with the given {slug: content} pages."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    for slug, content in pages.items():
+        _write(wiki / f"{slug}.md", content)
+    return wiki
+
+
+# ===========================================================================
+# Basic injection
+# ===========================================================================
+
+
+def test_new_page_adds_backlink_to_target(tmp_path: Path) -> None:
+    """Creating page A that links [[B]] → B.md gets ## Backlinks with [[A]]."""
+    wiki = _make_wiki(tmp_path, {
+        "target-b": "# Target B\n\nSome content.\n",
+    })
+
+    sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="page-a",
+        new_content="# Page A\n\nLinks to [[target-b]].\n",
+        previous_outgoing=(),
+        file_id="test-f1",
+    )
+
+    b_content = (wiki / "target-b.md").read_text()
+    backlinks = extract_backlinks(b_content)
+    assert "page-a" in backlinks
+
+
+def test_new_page_multiple_targets(tmp_path: Path) -> None:
+    """All targets of a new page receive a backlink injection."""
+    wiki = _make_wiki(tmp_path, {
+        "b": "# B\n\n",
+        "c": "# C\n\n",
+    })
+
+    sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="a",
+        new_content="# A\n\n[[b]] and [[c]].\n",
+        previous_outgoing=(),
+    )
+
+    assert "a" in extract_backlinks((wiki / "b.md").read_text())
+    assert "a" in extract_backlinks((wiki / "c.md").read_text())
+
+
+# ===========================================================================
+# Update diff
+# ===========================================================================
+
+
+def test_update_removes_old_adds_new(tmp_path: Path) -> None:
+    """When A's link changes from [[B]] to [[C]], B loses backlink, C gains it."""
+    wiki = _make_wiki(tmp_path, {
+        "b": "# B\n\n## Backlinks\n\n- [[page-a]]\n",
+        "c": "# C\n\nContent.\n",
+    })
+
+    sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="page-a",
+        new_content="# A\n\nNow links to [[c]] instead.\n",
+        previous_outgoing=["b"],
+    )
+
+    assert "page-a" not in extract_backlinks((wiki / "b.md").read_text())
+    assert "page-a" in extract_backlinks((wiki / "c.md").read_text())
+
+
+def test_update_partial_change(tmp_path: Path) -> None:
+    """Link added to C while link to B is retained — only C is updated."""
+    wiki = _make_wiki(tmp_path, {
+        "b": "# B\n\n## Backlinks\n\n- [[source]]\n",
+        "c": "# C\n\nContent.\n",
+    })
+
+    # B was already linked, C is new
+    sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="source",
+        new_content="# S\n\n[[b]] and [[c]].\n",
+        previous_outgoing=["b"],
+    )
+
+    # B still has backlink (no removal)
+    assert "source" in extract_backlinks((wiki / "b.md").read_text())
+    # C now has backlink (addition)
+    assert "source" in extract_backlinks((wiki / "c.md").read_text())
+
+
+# ===========================================================================
+# Self-reference
+# ===========================================================================
+
+
+def test_self_reference_ignored(tmp_path: Path) -> None:
+    """A page that links to itself does not get a ## Backlinks entry for itself."""
+    wiki = _make_wiki(tmp_path, {
+        "self-page": "# Self\n\nContent here.\n",
+    })
+
+    sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="self-page",
+        new_content="# Self\n\nLinks to [[self-page]] itself.\n",
+        previous_outgoing=(),
+    )
+
+    content = (wiki / "self-page.md").read_text()
+    # The sync must NOT have injected a self-backlink
+    assert "## Backlinks" not in content or "self-page" not in extract_backlinks(content)
+
+
+# ===========================================================================
+# Missing target
+# ===========================================================================
+
+
+def test_missing_target_no_exception(tmp_path: Path) -> None:
+    """Linking to a non-existent page logs a warning but does not raise."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+
+    # Should complete without exception even though nonexistent.md doesn't exist
+    result = sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="source",
+        new_content="# Source\n\n[[nonexistent]].\n",
+        previous_outgoing=(),
+    )
+
+    assert "nonexistent" in result["added"]  # detected as added
+    assert not (wiki / "nonexistent.md").exists()  # no file created
+
+
+# ===========================================================================
+# Idempotency
+# ===========================================================================
+
+
+def test_idempotent_double_call(tmp_path: Path) -> None:
+    """Calling sync_backlinks_for_page twice with the same args → same on-disk state."""
+    wiki = _make_wiki(tmp_path, {
+        "target": "# Target\n\nContent.\n",
+    })
+    args = dict(
+        wiki_dir=wiki,
+        source_slug="source",
+        new_content="# Source\n\n[[target]].\n",
+        previous_outgoing=(),
+    )
+
+    sync_backlinks_for_page(**args)
+    after_first = (wiki / "target.md").read_text()
+
+    sync_backlinks_for_page(**args)
+    after_second = (wiki / "target.md").read_text()
+
+    assert after_first == after_second
+
+
+# ===========================================================================
+# No-write when unchanged
+# ===========================================================================
+
+
+def test_no_write_when_unchanged(tmp_path: Path) -> None:
+    """atomic_write is NOT called when the content would not change."""
+    wiki = _make_wiki(tmp_path, {
+        "target": "# Target\n\n## Backlinks\n\n- [[source]]\n",
+    })
+
+    with patch("llm_wiki.storage.backlinks_sync.atomic_write") as mock_write:
+        sync_backlinks_for_page(
+            wiki_dir=wiki,
+            source_slug="source",
+            new_content="# Source\n\n[[target]].\n",
+            previous_outgoing=["target"],  # unchanged — target was and still is linked
+        )
+        mock_write.assert_not_called()
+
+
+def test_no_write_when_no_diff(tmp_path: Path) -> None:
+    """No writes if previous_outgoing == new outgoing (nothing changed)."""
+    wiki = _make_wiki(tmp_path, {
+        "page-b": "# B\n\n## Backlinks\n\n- [[page-a]]\n",
+    })
+
+    with patch("llm_wiki.storage.backlinks_sync.atomic_write") as mock_write:
+        sync_backlinks_for_page(
+            wiki_dir=wiki,
+            source_slug="page-a",
+            new_content="# A\n\n[[page-b]].\n",
+            previous_outgoing=["page-b"],  # identical
+        )
+        mock_write.assert_not_called()
+
+
+# ===========================================================================
+# Return value
+# ===========================================================================
+
+
+def test_return_value_added_removed(tmp_path: Path) -> None:
+    """sync_backlinks_for_page returns correct added/removed lists."""
+    wiki = _make_wiki(tmp_path, {
+        "old-target": "# Old\n\n## Backlinks\n\n- [[page-a]]\n",
+        "new-target": "# New\n\nContent.\n",
+    })
+
+    result = sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="page-a",
+        new_content="# A\n\n[[new-target]].\n",
+        previous_outgoing=["old-target"],
+    )
+
+    assert result["added"] == ["new-target"]
+    assert result["removed"] == ["old-target"]
+
+
+def test_return_value_empty_when_no_diff(tmp_path: Path) -> None:
+    """Return value has empty lists when nothing changed."""
+    wiki = _make_wiki(tmp_path, {
+        "b": "# B\n\n## Backlinks\n\n- [[a]]\n",
+    })
+
+    result = sync_backlinks_for_page(
+        wiki_dir=wiki,
+        source_slug="a",
+        new_content="# A\n\n[[b]].\n",
+        previous_outgoing=["b"],
+    )
+    assert result == {"added": [], "removed": []}
+
+
+# ===========================================================================
+# Concurrency
+# ===========================================================================
+
+
+def test_concurrent_writes_to_same_target(tmp_path: Path) -> None:
+    """8 threads all inject a backlink into the same target — all slugs present, no dups."""
+    wiki = _make_wiki(tmp_path, {
+        "popular": "# Popular\n\nContent.\n",
+    })
+    n_threads = 8
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        try:
+            sync_backlinks_for_page(
+                wiki_dir=wiki,
+                source_slug=f"source-{i:02d}",
+                new_content=f"# Source {i}\n\n[[popular]].\n",
+                previous_outgoing=(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"Thread errors: {errors}"
+
+    content = (wiki / "popular.md").read_text()
+    backlinks = extract_backlinks(content)
+
+    assert len(backlinks) == n_threads, f"Expected {n_threads} backlinks, got {len(backlinks)}"
+    assert len(set(backlinks)) == n_threads, "Duplicate backlinks found"
+    expected = sorted(f"source-{i:02d}" for i in range(n_threads))
+    assert sorted(backlinks) == expected

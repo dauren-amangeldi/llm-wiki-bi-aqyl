@@ -188,6 +188,13 @@ class IndexStorage:
         captures inline cross-references written into section entries, e.g.
         ``- [[page-a]] — see also [[slug]]``.
 
+        .. note::
+            **Legacy line-scan over index.md.**  LW-13 uses
+            ``extract_backlinks()`` from ``llm_wiki.utils.backlinks`` on the
+            page file itself (``wiki/{slug}.md``) as the source of truth for
+            the ``GET /api/v1/wiki/{slug}`` API.  This method is retained for
+            index-level co-occurrence queries only.
+
         Args:
             slug: The target page slug.
 

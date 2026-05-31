@@ -21,8 +21,10 @@ from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 from llm_wiki.parsers.markdown import parse_markdown_file
 from llm_wiki.parsers.pdf import parse_pdf
+from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
 from llm_wiki.storage.filesystem import atomic_write
 from llm_wiki.storage.index import IndexStorage
+from llm_wiki.utils.backlinks import extract_outgoing_links
 from llm_wiki.storage.log import append_log_entry
 from llm_wiki.storage.metadata import (
     FileRecord,
@@ -127,21 +129,49 @@ async def process_file(file_id: str) -> None:
                     _save_wiki_page(settings.wiki_dir, page)
                     index_storage.add_page(page.slug, "General", title=page.title)
                     created_pages.append(page.slug)
+                    # Synchronise backlinks: new page has no previous outgoing links
+                    sync_backlinks_for_page(
+                        wiki_dir=settings.wiki_dir,
+                        source_slug=page.slug,
+                        new_content=page.content,
+                        previous_outgoing=(),
+                        file_id=file_id,
+                    )
                 else:
                     # Scenario B — update existing pages (up to 5)
                     existing = _load_existing_pages(settings.wiki_dir, search_results[:5])
 
                     if existing:
+                        # Capture outgoing links BEFORE the Writer Agent rewrites pages
+                        previous_outgoing_by_slug: dict[str, list[str]] = {
+                            p.slug: extract_outgoing_links(p.content) for p in existing
+                        }
                         pages_out = await writer.update_pages(file_text, existing, file_id)
                         for p in pages_out:
                             _save_wiki_page(settings.wiki_dir, p)
                             updated_pages.append(p.slug)
+                            # Synchronise backlinks using pre-write outgoing links as baseline
+                            sync_backlinks_for_page(
+                                wiki_dir=settings.wiki_dir,
+                                source_slug=p.slug,
+                                new_content=p.content,
+                                previous_outgoing=previous_outgoing_by_slug.get(p.slug, []),
+                                file_id=file_id,
+                            )
                     else:
                         # Search found headings but files are absent — create new
                         page = await writer.create_page(file_text, file_id)
                         _save_wiki_page(settings.wiki_dir, page)
                         index_storage.add_page(page.slug, "General", title=page.title)
                         created_pages.append(page.slug)
+                        # Synchronise backlinks: new page has no previous outgoing links
+                        sync_backlinks_for_page(
+                            wiki_dir=settings.wiki_dir,
+                            source_slug=page.slug,
+                            new_content=page.content,
+                            previous_outgoing=(),
+                            file_id=file_id,
+                        )
 
                 # Persist page lists to DB
                 from sqlalchemy import update as sa_update
