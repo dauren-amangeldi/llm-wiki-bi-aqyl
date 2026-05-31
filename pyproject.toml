@@ -37,6 +37,9 @@ dev = [
     "anyio>=4.4.0",
     "fpdf2>=2.7.0",   # generates sample.pdf fixture for parser tests
 ]
+viewer = [
+    "streamlit>=1.36.0",
+]
 
 [build-system]
 requires = ["hatchling"]

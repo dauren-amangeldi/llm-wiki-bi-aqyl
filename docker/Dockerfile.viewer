@@ -12,9 +12,10 @@ WORKDIR /app
 # The lock-file may be missing on the very first checkout, hence the glob.
 COPY pyproject.toml uv.lock* ./
 
-# Install the llm_wiki package and its dependencies.
-# --no-dev: viewer does not need pytest, mypy, etc.
-RUN uv sync --no-dev --frozen || uv sync --no-dev
+# Install the llm_wiki package + viewer extras (streamlit).
+# --no-dev: skip pytest/mypy/vcrpy and other dev tooling.
+# --extra viewer: pulls in streamlit (declared in [project.optional-dependencies]).
+RUN uv sync --no-dev --extra viewer --frozen || uv sync --no-dev --extra viewer
 
 # Copy the package source so the installed editable reference resolves.
 COPY src/ src/
