@@ -11,7 +11,7 @@ from llm_wiki.api.deps import _engine
 from llm_wiki.api.routes import router
 from llm_wiki.config import settings
 from llm_wiki.storage.filesystem import ensure_dirs
-from llm_wiki.storage.metadata import Base
+from llm_wiki.storage.metadata import Base, run_schema_migrations
 
 logger = structlog.get_logger(__name__)
 
@@ -23,7 +23,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ensure_dirs(settings.raw_dir, settings.wiki_dir, settings.chroma_dir)
 
     async with _engine.begin() as conn:
+        # Create all tables for a fresh database
         await conn.run_sync(Base.metadata.create_all)
+        # Apply backward-compatible column additions to existing databases
+        await run_schema_migrations(conn)
 
     logger.info("startup_complete", service=settings.service_name)
     yield
