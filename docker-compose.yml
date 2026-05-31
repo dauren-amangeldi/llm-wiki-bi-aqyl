@@ -48,6 +48,18 @@ services:
       --loglevel=info
     restart: unless-stopped
 
+  viewer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.viewer
+    ports:
+      - "8501:8501"
+    volumes:
+      - app_data:/data:ro  # read-only — viewer never writes
+    depends_on:
+      - api
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     ports:

@@ -7,10 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
-from llm_wiki.api.schemas import FileUploadResponse
+from llm_wiki.api.schemas import FileStatusResponse, FileUploadResponse, StateEntry
 from llm_wiki.config import settings
 from llm_wiki.orchestrator.tasks import process_file_task
-from llm_wiki.storage.metadata import create_file_record
+from llm_wiki.storage.metadata import create_file_record, get_file_record
 from llm_wiki.utils.ids import new_file_id
 
 logger = structlog.get_logger(__name__)
@@ -84,16 +84,42 @@ async def upload_file(
 
 @router.get(
     "/files/{file_id}",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Get file processing status (LW-10)",
+    response_model=FileStatusResponse,
+    summary="Get file processing status",
     tags=["files"],
 )
-async def get_file_status(file_id: str) -> None:
-    """Return processing state history and cost for a given file_id.
+async def get_file_status(
+    file_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> FileStatusResponse:
+    """Return processing state, state history, affected pages, and cost.
 
-    Implemented in LW-10.
+    Args:
+        file_id: UUID of the file to query.
+        session: Injected async SQLAlchemy session.
+
+    Returns:
+        Full status record including state transitions and cost.
+
+    Raises:
+        HTTPException 404: No file with the given ``file_id`` exists.
     """
-    raise HTTPException(status_code=501, detail="Not implemented yet — see LW-10")
+    record = await get_file_record(session, file_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"File {file_id!r} not found")
+
+    return FileStatusResponse(
+        file_id=record.file_id,
+        original_name=record.original_name,
+        status=record.status,
+        state_history=[
+            StateEntry(state=e["state"], at=e["at"])
+            for e in (record.state_history or [])
+        ],
+        created_pages=list(record.created_pages or []),
+        updated_pages=list(record.updated_pages or []),
+        cost_usd=record.cost_usd,
+    )
 
 
 @router.get(

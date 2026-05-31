@@ -208,3 +208,52 @@ async def test_upload_creates_db_record(test_app: tuple, db_engine) -> None:  # 
     assert record is not None
     assert record.original_name == "page.md"
     assert record.status == "RECEIVED"
+
+
+# ---------------------------------------------------------------------------
+# GET /files/{file_id}
+# ---------------------------------------------------------------------------
+
+
+async def test_get_file_status_not_found(test_app: tuple) -> None:  # type: ignore[type-arg]
+    """GET /files/{file_id} returns 404 for an unknown file_id."""
+    app, _, _raw_dir = test_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/v1/files/nonexistent-id")
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
+
+
+async def test_get_file_status_returns_record(test_app: tuple) -> None:  # type: ignore[type-arg]
+    """GET /files/{file_id} returns full status after a successful upload."""
+    app, _, raw_dir = test_app
+    mock_settings = _mock_settings(raw_dir)
+
+    # Upload a file to create the DB record
+    with (
+        patch("llm_wiki.api.routes.process_file_task") as mock_task,
+        patch("llm_wiki.api.routes.settings", mock_settings),
+    ):
+        mock_task.delay.return_value = MagicMock(id="task-1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            upload_resp = await client.post(
+                "/api/v1/files",
+                files=_make_upload(b"%PDF-1.4 test", "report.pdf"),
+            )
+
+    assert upload_resp.status_code == 202
+    file_id = upload_resp.json()["file_id"]
+
+    # Query status — no pipeline ran, so history/pages/cost are empty/null
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/v1/files/{file_id}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["file_id"] == file_id
+    assert body["original_name"] == "report.pdf"
+    assert body["status"] == "RECEIVED"
+    assert body["state_history"] == []
+    assert body["created_pages"] == []
+    assert body["updated_pages"] == []
+    assert body["cost_usd"] is None

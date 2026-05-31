@@ -1,9 +1,9 @@
 """Pydantic request/response models for the API layer."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class FileUploadResponse(BaseModel):
@@ -19,6 +19,18 @@ class StateEntry(BaseModel):
 
     state: str
     at: datetime
+
+    @field_validator("at", mode="before")
+    @classmethod
+    def parse_at(cls, v: Any) -> datetime:
+        """Accept ISO-8601 strings as well as datetime objects.
+
+        The DB stores ``at`` as a string; Pydantic receives it before
+        the normal datetime coercion runs.
+        """
+        if isinstance(v, str):
+            return datetime.fromisoformat(v)
+        return v  # type: ignore[return-value]
 
 
 class FileStatusResponse(BaseModel):

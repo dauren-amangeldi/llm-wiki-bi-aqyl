@@ -36,6 +36,24 @@ cp .env.staging.example .env.staging.local
 docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
 ```
 
+## 🌐 Wiki Viewer
+
+A lightweight Streamlit UI for browsing the wiki without entering the Docker container.
+
+### Access
+
+After `docker compose up`, open: **http://localhost:8501**
+
+### Features
+
+- **Wiki Index** — clickable tree of all ingested pages
+- **Wiki Page** — rendered markdown with internal link navigation
+- **Changelog** — ingestion history from `log.md`, filterable by type
+- **Stats** — page count, raw file count, total wiki size, cost summary
+- Read-only — does not modify any data
+
+> **Note:** This is a temporary dev/demo tool. A full Next.js UI is planned for Sprint 3.
+
 ## Development Commands (all inside Docker)
 
 ```bash
@@ -79,7 +97,8 @@ User → POST /files → FastAPI → Celery Queue
 | LW-7 | Writer Agent — create page | ✅ Done |
 | LW-8 | Writer Agent — update pages | ✅ Done |
 | LW-9 | Orchestrator (state machine) | ✅ Done |
-| LW-10 | GET /files/{id} status endpoint | 🔲 |
+| LW-10 | GET /files/{id} status endpoint | ✅ Done |
+| LW-10.1 | Streamlit wiki viewer (read-only UI for wiki, index, log) | ✅ Done |
 | LW-11 | ChromaDB + embeddings | 🔲 |
 | LW-12 | Search Agent v2 (embedding pre-filter) | 🔲 |
 | LW-13 | Backlink mechanics | 🔲 |
