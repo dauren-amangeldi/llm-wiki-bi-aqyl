@@ -18,12 +18,13 @@ def main() -> None:
     lang = settings.wiki_language.lower()
     index_header = "# Карта знаний\n" if lang == "ru" else "# Wiki Index\n"
     log_header = "# Журнал изменений\n" if lang == "ru" else "# Ingestion Log\n"
-    issues_header = "# Отчёты проверок\n" if lang == "ru" else "# Lint Agent Issues\n"
+
+    from llm_wiki.quality.issues_writer import _bootstrap_issues_md  # type: ignore[attr-defined]
+    issues_template = _bootstrap_issues_md()
 
     for path, content in [
         (settings.index_path, index_header),
         (settings.log_path, log_header),
-        (settings.issues_path, issues_header),
         (settings.usage_log_path, ""),
     ]:
         if not path.exists():
@@ -31,6 +32,12 @@ def main() -> None:
             print(f"Created {path}")
         else:
             print(f"Already exists: {path}")
+
+    if not settings.issues_path.exists():
+        settings.issues_path.write_text(issues_template, encoding="utf-8")
+        print(f"Created {settings.issues_path}")
+    else:
+        print(f"Already exists: {settings.issues_path}")
 
     print("Done. data/ structure is ready.")
 

@@ -63,11 +63,49 @@ class WikiPageResponse(BaseModel):
     source_files: list[str]
 
 
+class IssueResponse(BaseModel):
+    """A single quality issue (serialised for API responses)."""
+
+    kind: str
+    section: str
+    page_slug: str
+    description: str
+    related_slugs: list[str]
+
+
 class LintRunResponse(BaseModel):
-    """Response body for POST /lint/run."""
+    """Response body for POST /api/v1/lint/run."""
+
+    issues_found: int
+    by_kind: dict[str, int]
+    issues: list[IssueResponse]
+    issues_md_updated: bool
+
+
+class AuditRunRequest(BaseModel):
+    """Request body for POST /api/v1/audit/run."""
+
+    mode: Literal["sync", "batch"] = "batch"
+    dry_run: bool = False
+    sample: int | None = None
+    slugs: list[str] | None = None
+
+
+class AuditRunResponse(BaseModel):
+    """Response body for POST /api/v1/audit/run (202 Accepted)."""
 
     task_id: str
-    status: Literal["queued"]
+    mode: str
+    estimated_cost_usd: float | None = None
+    estimated_completion_at: datetime | None = None
+
+
+class AuditStatusResponse(BaseModel):
+    """Response body for GET /api/v1/audit/{task_id}."""
+
+    task_id: str
+    status: str
+    result: dict[str, Any] | None = None
 
 
 class LogResponse(BaseModel):

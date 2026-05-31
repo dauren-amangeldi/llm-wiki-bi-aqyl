@@ -26,8 +26,9 @@ celery_app.conf.update(
     enable_utc=True,
     worker_concurrency=1,  # MVP: single worker to avoid index.md race conditions
     beat_schedule={
-        "weekly-lint": {
-            "task": "llm_wiki.orchestrator.tasks.run_lint",
+        # LW-15: weekly semantic audit via OpenAI Batch API (-50% cost, 24 h SLA)
+        "weekly-audit": {
+            "task": "llm_wiki.orchestrator.tasks.run_weekly_audit",
             "schedule": crontab(minute=0, hour=3, day_of_week=1),  # Mon 03:00 UTC
         },
     },
@@ -108,10 +109,121 @@ def process_file_task(self: Any, file_id: str) -> None:
         raise self.retry(exc=exc, countdown=4**retry_count)
 
 
-@celery_app.task(name="llm_wiki.orchestrator.tasks.run_lint")
-def run_lint() -> None:
-    """Celery task: trigger the weekly Lint Agent run.
+@celery_app.task(name="llm_wiki.orchestrator.tasks.run_weekly_audit")
+def run_weekly_audit(
+    mode: str = "batch",
+    dry_run: bool = False,
+    sample: int | None = None,
+    slugs: list[str] | None = None,
+) -> dict[str, object]:
+    """Celery task: run the LLM Auditor over the entire wiki.
 
-    Implemented in LW-14/LW-15.
+    Triggered weekly by Celery Beat (Monday 03:00 UTC) using Batch API for
+    -50% cost.  Also callable manually from the API or CLI (with ``mode="sync"``
+    for immediate results).
+
+    Args:
+        mode: ``"batch"`` (Batch API, 24 h SLA) or ``"sync"`` (completions).
+        dry_run: If True, run the auditor but do not write to ``issues.md``.
+        sample: If set, only audit this many randomly-selected pages.
+        slugs: If set, only audit these specific page slugs.
+
+    Returns:
+        ``{"issues_found": int, "mode": str, "dry_run": bool}``
     """
-    raise NotImplementedError("Implemented in LW-14 / LW-15")
+    import asyncio
+    import random
+    from pathlib import Path
+    from typing import Literal
+
+    from llm_wiki.agents.auditor import AuditorAgent
+    from llm_wiki.config import settings
+    from llm_wiki.llm.client import LLMClient
+    from llm_wiki.quality.issues_writer import upsert_section
+    from llm_wiki.quality.models import IssueSection
+
+    wiki_dir: Path = settings.wiki_dir
+    wiki_pages: list[tuple[str, str]] = []
+    if wiki_dir.exists():
+        for md_file in sorted(wiki_dir.glob("*.md")):
+            wiki_pages.append((md_file.stem, md_file.read_text(encoding="utf-8")))
+
+    # Optional filtering
+    if slugs:
+        wiki_pages = [(s, c) for s, c in wiki_pages if s in set(slugs)]
+    if sample and len(wiki_pages) > sample:
+        wiki_pages = random.sample(wiki_pages, sample)
+
+    if not wiki_pages:
+        logger.info("weekly_audit_no_pages")
+        return {"issues_found": 0, "mode": mode, "dry_run": dry_run}
+
+    # Build related pairs from ChromaDB (cosine > 0.6)
+    related_pairs: list[tuple[str, str]] = []
+    try:
+        from llm_wiki.llm.embeddings import EmbeddingStore
+
+        llm_tmp = LLMClient()
+        emb_store = EmbeddingStore(
+            chroma_path=settings.chroma_dir, llm_client=llm_tmp
+        )
+        for slug, _ in wiki_pages:
+            hits = emb_store.query(
+                slug,
+                top_k=5,
+                file_id="weekly-audit",
+            )
+            for hit in hits:
+                if hit.score >= 0.6 and hit.slug != slug:
+                    pair = tuple(sorted([slug, hit.slug]))
+                    if pair not in related_pairs:
+                        related_pairs.append(pair)  # type: ignore[arg-type]
+    except Exception as emb_exc:  # noqa: BLE001
+        logger.warning("weekly_audit_embedding_pairs_failed", error=str(emb_exc))
+
+    llm = LLMClient()
+
+    def _run() -> list[object]:
+        async def _inner() -> list[object]:
+            agent = AuditorAgent(llm)
+            return await agent.run(
+                wiki_pages=wiki_pages,
+                related_pairs=related_pairs,  # type: ignore[arg-type]
+                mode=mode,  # type: ignore[arg-type]
+            )
+
+        with asyncio.Runner() as runner:
+            return runner.run(_inner())
+
+    try:
+        issues = _run()
+    except Exception as exc:
+        logger.error("weekly_audit_failed", error=str(exc))
+        raise
+    finally:
+        # Close LLM client synchronously — we are not in async context here
+        try:
+            asyncio.run(llm.aclose())
+        except RuntimeError:
+            pass
+
+    if not dry_run:
+        upsert_section(
+            issues_path=settings.issues_path,
+            section=IssueSection.LLM_FLAGGED,
+            issues=list(issues),  # type: ignore[arg-type]
+        )
+
+    counts: dict[str, int] = {}
+    for issue in issues:
+        k = str(getattr(issue, "kind", "unknown"))
+        counts[k] = counts.get(k, 0) + 1
+
+    logger.info(
+        "weekly_audit_done",
+        issues_found=len(issues),
+        mode=mode,
+        dry_run=dry_run,
+        **counts,
+    )
+    return {"issues_found": len(issues), "mode": mode, "dry_run": dry_run}

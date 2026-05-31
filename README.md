@@ -68,6 +68,10 @@ docker compose exec api uv run mypy --strict src/
 
 # Open a shell
 docker compose exec api bash
+
+# Run quality checks against current wiki
+docker compose exec api uv run python scripts/run_linter.py
+docker compose exec api uv run python scripts/run_auditor.py --sync --sample 5
 ```
 
 ## Architecture
@@ -76,12 +80,15 @@ docker compose exec api bash
 User → POST /files → FastAPI → Celery Queue
                               ↓
                         Orchestrator (state machine)
-                        RECEIVED → STORED → SEARCHED → WRITTEN → LOGGED → DONE
-                              ↓              ↓             ↓
-                         parse file    Search Agent   Writer Agent
-                         (pypdf/md)    (LLM)          (LLM)
+                        RECEIVED → STORED → SEARCHED → WRITTEN → LINTED → LOGGED → DONE
+                              ↓              ↓             ↓          ↓
+                         parse file    Search Agent   Writer Agent  Linter
+                         (pypdf/md)    (LLM)          (LLM)         (pure Python)
                                            ↓
                                        ChromaDB (LW-11)
+
+Weekly Celery Beat (Mon 03:00 UTC):
+                        Auditor Agent (LLM, Batch API) → issues.md ## LLM-flagged
 ```
 
 ## Task Map
@@ -103,8 +110,8 @@ User → POST /files → FastAPI → Celery Queue
 | LW-12.1 | SHA-256 file deduplication (POST /files) | ✅ Done |
 | LW-12 | Search Agent v2 (embedding pre-filter + LLM re-rank) | ✅ Done |
 | LW-13 | Backlink mechanics (bidirectional ## Backlinks sync) | ✅ Done |
-| LW-14 | Lint Agent v1 (rule-based) | 🔲 |
-| LW-15 | Lint Agent v2 (LLM checks) + Celery Beat | 🔲 |
+| LW-14 | Deterministic Linter (dead links, orphan pages, stale dates) | ✅ Done |
+| LW-15 | LLM Auditor (contradictions, duplicates, suspected stale) + Celery Beat | ✅ Done |
 | LW-16 | GET /wiki, /log, /stats endpoints | 🔲 |
 | LW-17 | Observability (structlog + OpenTelemetry) | 🔲 |
 | LW-18 | Runbook | 🔲 |
@@ -128,6 +135,69 @@ docker compose exec api uv run python scripts/reindex.py --dry-run
 
 > **Note:** If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, the service will refuse
 > to start until you run `reindex.py` to rebuild the collection with the new model.
+
+## Wiki Quality System (LW-14 + LW-15)
+
+The quality system has two layers:
+
+| Layer | What | When | Cost |
+|-------|------|------|------|
+| **Linter** (LW-14) | Dead links, orphan pages, stale dates | After every ingest | Zero (pure Python) |
+| **Auditor** (LW-15) | Contradictions, duplicates, suspected stale | Weekly (Mon 03:00 UTC) | ~$0.003/page sync, ~$0.0015/page batch |
+
+Both write to `data/issues.md` in separate sections (`## 🔎 Auto-detected` and `## 🤖 LLM-flagged`).
+
+### Manual Linter run
+
+```bash
+# Preview findings without modifying issues.md
+docker compose exec api uv run python scripts/run_linter.py --dry-run
+
+# Run all checks and update issues.md
+docker compose exec api uv run python scripts/run_linter.py
+
+# Only specific checks
+docker compose exec api uv run python scripts/run_linter.py --checks dead_link,orphan_page
+
+# JSON output for CI
+docker compose exec api uv run python scripts/run_linter.py --json
+
+# Run against a fixture wiki
+docker compose exec api uv run python scripts/run_linter.py \
+  --wiki-dir tests/fixtures/sample_wikis/dead_links/ --dry-run
+```
+
+### Manual Auditor run
+
+```bash
+# Sync mode (immediate, for debugging) — DEFAULT
+docker compose exec api uv run python scripts/run_auditor.py --sync --sample 10 --dry-run
+
+# Specific pages
+docker compose exec api uv run python scripts/run_auditor.py --sync --slugs llm,agents
+
+# Production batch run (OpenAI Batch API, -50% cost, ~24 h)
+docker compose exec api uv run python scripts/run_auditor.py --batch
+
+# Guard against expensive accidental runs
+docker compose exec api uv run python scripts/run_auditor.py --sync --max-cost-usd 0.50
+```
+
+### API endpoints
+
+```bash
+# Run Linter via API (synchronous, < 1 s)
+curl -X POST http://localhost:8000/api/v1/lint/run
+curl -X POST http://localhost:8000/api/v1/lint/run?dry_run=true
+
+# Enqueue Auditor via API (async Celery task)
+curl -X POST http://localhost:8000/api/v1/audit/run \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "sync", "dry_run": true, "sample": 5}'
+
+# Poll Auditor task status
+curl http://localhost:8000/api/v1/audit/{task_id}
+```
 
 ## Cost Tracking
 

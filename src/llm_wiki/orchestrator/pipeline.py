@@ -1,7 +1,7 @@
 """Ingestion pipeline state machine.
 
 State transitions:
-    RECEIVED → STORED → SEARCHED → WRITTEN → LOGGED → DONE
+    RECEIVED → STORED → SEARCHED → WRITTEN → LINTED → LOGGED → DONE
                                 ↘ FAILED (with step + error)
 
 Each step is idempotent: safe to re-run with the same file_id.
@@ -43,6 +43,7 @@ class FileState(StrEnum):
     STORED = "STORED"
     SEARCHED = "SEARCHED"
     WRITTEN = "WRITTEN"
+    LINTED = "LINTED"
     LOGGED = "LOGGED"
     DONE = "DONE"
     FAILED = "FAILED"
@@ -64,6 +65,10 @@ async def process_file(file_id: str) -> None:
 
     On any unhandled exception the record is transitioned to FAILED and the
     exception is re-raised for Celery to handle retry logic.
+
+    The LINTED step runs the deterministic Linter after WRITTEN.  A Linter
+    failure **does not** fail the pipeline — quality checks are important but
+    less critical than the ingestion itself.
 
     Args:
         file_id: UUID of the file to process (must exist in the DB).
@@ -183,6 +188,22 @@ async def process_file(file_id: str) -> None:
                 )
                 await session.commit()
                 await _transition(session, file_id, "WRITTEN")
+
+            # ----------------------------------------------------------------
+            # LINTED — deterministic quality checks on the whole wiki
+            # Failure here is non-fatal: wrap in try/except and continue.
+            # ----------------------------------------------------------------
+            if "LINTED" not in completed:
+                try:
+                    _run_linter_step(file_id=file_id)
+                except Exception as lint_exc:  # noqa: BLE001
+                    logger.error(
+                        "linter_failed",
+                        file_id=file_id,
+                        error=str(lint_exc),
+                    )
+                else:
+                    await _transition(session, file_id, "LINTED")
 
             # ----------------------------------------------------------------
             # LOGGED — append to log.md, persist cost
@@ -341,3 +362,66 @@ def _sum_cost(usage_log_path: Path, file_id: str) -> float:
         except (json.JSONDecodeError, TypeError):
             continue
     return round(total, 6)
+
+
+def _run_linter_step(file_id: str) -> None:
+    """Read all wiki pages and run the deterministic Linter.
+
+    Writes the result to ``data/issues.md`` (AUTO_DETECTED section).  This
+    is intentionally a *synchronous* helper so it can be called from the
+    async pipeline without requiring an extra event loop context.
+
+    Args:
+        file_id: Used only for log correlation.
+
+    Raises:
+        Any exception is **not** caught here; the caller wraps this in
+        try/except and decides whether to continue the pipeline.
+    """
+    from llm_wiki.quality.issues_writer import upsert_section
+    from llm_wiki.quality.linter import run_linter
+    from llm_wiki.quality.models import IssueSection
+    from llm_wiki.storage.index import IndexStorage
+
+    wiki_dir = settings.wiki_dir
+    wiki_pages: dict[str, str] = {}
+    if wiki_dir.exists():
+        for md_file in wiki_dir.glob("*.md"):
+            slug = md_file.stem
+            wiki_pages[slug] = md_file.read_text(encoding="utf-8")
+
+    # Derive root sections from index.md headings (level-2 headings = sections)
+    index_storage = IndexStorage(settings.index_path)
+    headings = index_storage.read_headings()
+    # Root sections are those whose heading level is 2 (## Section Name)
+    index_root_sections: set[str] = set()
+    for h in headings:
+        # Treat the first heading per section as a root slug placeholder
+        # (slugified lower-case version of the section name)
+        section_slug = h.section.lower().replace(" ", "-")
+        index_root_sections.add(section_slug)
+
+    from datetime import datetime, timezone
+
+    current_year = datetime.now(timezone.utc).year
+    issues = run_linter(
+        wiki_pages=wiki_pages,
+        index_root_sections=index_root_sections,
+        current_year=current_year,
+    )
+
+    upsert_section(
+        issues_path=settings.issues_path,
+        section=IssueSection.AUTO_DETECTED,
+        issues=issues,
+    )
+
+    counts = {}
+    for issue in issues:
+        counts[str(issue.kind)] = counts.get(str(issue.kind), 0) + 1
+    logger.info(
+        "linter_done",
+        file_id=file_id,
+        issues_found=len(issues),
+        **counts,
+    )

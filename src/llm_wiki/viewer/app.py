@@ -14,6 +14,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from llm_wiki.ui.markdown_safe import escape_dollars_for_streamlit
+
 # ---------------------------------------------------------------------------
 # Paths (configurable via environment for Docker flexibility)
 # ---------------------------------------------------------------------------
@@ -180,7 +182,7 @@ if nav == "index":
                             unsafe_allow_html=False,
                         )
                     elif ln.strip() and not ln.startswith("<!--") and not ln.startswith(">"):
-                        st.markdown(ln)
+                        st.markdown(escape_dollars_for_streamlit(ln))
 
             for line in lines:
                 if line.startswith("#"):
@@ -238,8 +240,10 @@ elif nav == "page":
 
             # Render markdown — replace [[links]] with inline code so they're
             # visible; clickable buttons are shown separately below.
+            # escape_dollars_for_streamlit prevents currency signs from being
+            # parsed as LaTeX math delimiters.
             rendered = _WIKI_LINK_RE.sub(r"`[[\1]]`", content)
-            st.markdown(rendered)
+            st.markdown(escape_dollars_for_streamlit(rendered))
 
             # Internal links section
             linked_slugs = list(dict.fromkeys(_WIKI_LINK_RE.findall(content)))
