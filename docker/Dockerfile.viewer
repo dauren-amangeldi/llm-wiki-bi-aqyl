@@ -1,16 +1,30 @@
 FROM python:3.11-slim
+
+# Install uv (same version strategy as the main API image)
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -Ls https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
 WORKDIR /app
 
-RUN pip install "streamlit==1.45.*" --no-cache-dir
+# Copy dependency manifests first so Docker can cache the install layer.
+# The lock-file may be missing on the very first checkout, hence the glob.
+COPY pyproject.toml uv.lock* ./
 
-COPY src/llm_wiki/viewer/app.py .
+# Install the llm_wiki package and its dependencies.
+# --no-dev: viewer does not need pytest, mypy, etc.
+RUN uv sync --no-dev --frozen || uv sync --no-dev
 
-# DATA_DIR is the read-only volume mount point; default matches docker-compose
+# Copy the package source so the installed editable reference resolves.
+COPY src/ src/
+
+# DATA_DIR is the read-only volume mount point; default matches docker-compose.
 ENV DATA_DIR=/data
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "app.py", \
+CMD ["uv", "run", "streamlit", "run", "src/llm_wiki/viewer/app.py", \
      "--server.port=8501", \
      "--server.headless=true", \
      "--server.address=0.0.0.0"]
