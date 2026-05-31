@@ -33,7 +33,7 @@ class LLMUsage:
     """Usage record written to data/usage.log after every LLM call."""
 
     file_id: str
-    agent_type: Literal["search", "writer", "lint"]
+    agent_type: Literal["search", "writer", "lint", "embed"]
     model: str
     input_tokens: int
     output_tokens: int
@@ -125,6 +125,97 @@ class LLMClient:
         ]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+    def embed(self, texts: list[str], file_id: str = "") -> list[list[float]]:
+        """Generate embeddings for *texts* using the OpenAI embeddings API.
+
+        Embeddings always use OpenAI's ``text-embedding-3-small`` regardless of
+        the configured chat provider (Anthropic/Ollama do not have standalone
+        embedding APIs comparable to OpenAI).
+
+        Retries up to ``_MAX_RETRIES`` times with exponential backoff on
+        transient errors.  Non-retryable 4xx errors are raised immediately.
+        Usage is appended to ``data/usage.log`` after each successful call.
+
+        Args:
+            texts: Strings to embed.  Empty list returns immediately.
+            file_id: Correlation ID for usage tracking.
+
+        Returns:
+            List of embedding vectors (one per input string), ordered
+            to match the input.
+
+        Raises:
+            openai.OpenAIError: Re-raised after ``_MAX_RETRIES`` failures, or
+                immediately for non-retryable auth/bad-request errors.
+            ValueError: If ``OPENAI_API_KEY`` is not configured.
+        """
+        if not texts:
+            return []
+
+        from llm_wiki.config import settings
+
+        if not settings.openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is required for embeddings (text-embedding-3-small)."
+            )
+
+        sync_client = openai.OpenAI(api_key=settings.openai_api_key)
+        model = settings.embedding_model
+        batch_size = settings.embedding_batch_size
+
+        all_vectors: list[list[float]] = []
+        # Process in batches to stay within OpenAI's input limit
+        for batch_start in range(0, len(texts), batch_size):
+            batch = texts[batch_start : batch_start + batch_size]
+            last_exc: Exception | None = None
+
+            for attempt in range(self._MAX_RETRIES):
+                start = time.monotonic()
+                try:
+                    response = sync_client.embeddings.create(
+                        model=model,
+                        input=batch,
+                        dimensions=settings.embedding_dimensions,
+                    )
+                    duration_ms = int((time.monotonic() - start) * 1000)
+                    input_tokens: int = (
+                        response.usage.total_tokens if response.usage else len(batch) * 5
+                    )
+                    cost = self._compute_cost(model, input_tokens, 0)
+                    usage = LLMUsage(
+                        file_id=file_id,
+                        agent_type="embed",
+                        model=model,
+                        input_tokens=input_tokens,
+                        output_tokens=0,
+                        cached_input_tokens=0,
+                        cost_usd=cost,
+                        timestamp=datetime.now(timezone.utc),
+                        duration_ms=duration_ms,
+                    )
+                    self._write_usage(usage)
+                    all_vectors.extend(item.embedding for item in response.data)
+                    break  # success — move to next batch
+                except Exception as exc:  # noqa: BLE001
+                    if isinstance(exc, self._non_retryable):
+                        raise
+                    last_exc = exc
+                    if attempt < self._MAX_RETRIES - 1:
+                        backoff = 4**attempt
+                        logger.warning(
+                            "embed_retry",
+                            file_id=file_id,
+                            batch_start=batch_start,
+                            attempt=attempt + 1,
+                            backoff_s=backoff,
+                            error=str(exc),
+                        )
+                        time.sleep(backoff)
+            else:
+                raise last_exc or RuntimeError("embed() failed after retries")
+
+        return all_vectors
 
     def load_prompt(self, prompt_name: str, **variables: Any) -> str:
         """Load a prompt from llm/prompts/{prompt_name}.md and interpolate variables.

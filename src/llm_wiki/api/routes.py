@@ -10,7 +10,8 @@ from llm_wiki.api.deps import get_db
 from llm_wiki.api.schemas import FileStatusResponse, FileUploadResponse, StateEntry
 from llm_wiki.config import settings
 from llm_wiki.orchestrator.tasks import process_file_task
-from llm_wiki.storage.metadata import create_file_record, get_file_record
+from llm_wiki.storage.metadata import create_file_record, get_by_sha256, get_file_record
+from llm_wiki.utils.hashing import sha256_stream
 from llm_wiki.utils.ids import new_file_id
 
 logger = structlog.get_logger(__name__)
@@ -31,21 +32,25 @@ async def upload_file(
 ) -> FileUploadResponse:
     """Accept a PDF or Markdown file and enqueue it for async wiki ingestion.
 
-    Validates file type (.pdf / .md only) and size (max 50 MB), saves the raw
-    file to ``/raw/``, creates a ``FileRecord`` in SQLite, and dispatches a
-    Celery task.
+    Validates file type (.pdf / .md only), size (max 50 MB), and content hash
+    (SHA-256) to detect duplicates.  Identical content that was already
+    successfully ingested returns 200 with ``status="duplicate"`` so clients
+    can display the original result without re-running the pipeline.
 
     Args:
         file: The uploaded file (multipart/form-data, field name ``file``).
         session: Injected async SQLAlchemy session.
 
     Returns:
-        202 with ``file_id``, ``task_id``, and ``status="queued"``.
+        | HTTP 202  ``{"file_id", "task_id", "status": "queued"}``     — new upload
+        | HTTP 200  ``{"file_id", "duplicate_of", "status": "duplicate"}`` — exact dupe
 
     Raises:
-        HTTPException 400: Unsupported file type (not .pdf or .md).
-        HTTPException 413: File exceeds the 50 MB size limit.
+        HTTPException 400: Empty file, or unsupported extension (.pdf / .md only).
+        HTTPException 413: File exceeds the 50 MB limit.
     """
+    import io
+
     filename = file.filename or "upload"
     ext = Path(filename).suffix.lower()
 
@@ -55,8 +60,14 @@ async def upload_file(
             detail=f"Unsupported file type '{ext}'. Allowed: {sorted(settings.allowed_extensions)}",
         )
 
-    # Read content to validate size (streaming would be better at scale, fine for MVP)
     content = await file.read()
+
+    if len(content) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty file is not allowed.",
+        )
+
     max_bytes = settings.max_file_size_mb * 1024 * 1024
     if len(content) > max_bytes:
         raise HTTPException(
@@ -64,11 +75,33 @@ async def upload_file(
             detail=f"File exceeds {settings.max_file_size_mb} MB limit.",
         )
 
+    # ------------------------------------------------------------------
+    # SHA-256 deduplication — check BEFORE writing to disk or DB
+    # ------------------------------------------------------------------
+    sha = sha256_stream(io.BytesIO(content))
+    existing = await get_by_sha256(session, sha)
+    if existing is not None:
+        logger.info(
+            "dedup_hit",
+            sha256=sha[:16] + "…",
+            original_file_id=existing.file_id,
+            filename=filename,
+        )
+        return FileUploadResponse(
+            file_id=existing.file_id,
+            task_id=None,
+            status="duplicate",
+            duplicate_of=existing.file_id,
+        )
+
+    # ------------------------------------------------------------------
+    # New file — persist and enqueue
+    # ------------------------------------------------------------------
     file_id = new_file_id()
     dest = settings.raw_dir / f"{file_id}{ext}"
     dest.write_bytes(content)
 
-    await create_file_record(session, file_id, filename)
+    await create_file_record(session, file_id, filename, content_sha256=sha)
 
     task = process_file_task.delay(file_id)
 

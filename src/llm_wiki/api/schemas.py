@@ -7,11 +7,18 @@ from pydantic import BaseModel, field_validator
 
 
 class FileUploadResponse(BaseModel):
-    """Response body for POST /files."""
+    """Response body for POST /files.
+
+    ``status="queued"``     — file accepted, pipeline started.
+    ``status="duplicate"``  — identical content already exists; no new pipeline run.
+    When *status* is ``"duplicate"``, *task_id* is ``None`` and *duplicate_of*
+    contains the original ``file_id``.
+    """
 
     file_id: str
-    task_id: str
-    status: Literal["queued"]
+    task_id: str | None
+    status: Literal["queued", "duplicate"]
+    duplicate_of: str | None = None
 
 
 class StateEntry(BaseModel):

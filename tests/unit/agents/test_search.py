@@ -1,17 +1,23 @@
-"""Unit tests for the Search Agent (LW-6).
+"""Unit tests for the Search Agent v2 (LW-12).
 
 Covers:
-  - SearchAgent.run() integration (mocked LLM)
-  - _parse_search_response() defensive parser for all known response shapes
+  - search() with all important edge cases
+  - Fallback behaviour on LLM timeout
+  - Hallucinated slug filtering
+  - _parse_rerank_response() for all known response shapes
 """
 
+from __future__ import annotations
+
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from llm_wiki.agents.search import SearchAgent, SearchResult, _parse_search_response
+from llm_wiki.agents.search import SearchAgent, SearchAgentError, _parse_rerank_response
 from llm_wiki.llm.client import LLMClient
+from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 
 
 # ---------------------------------------------------------------------------
@@ -19,200 +25,314 @@ from llm_wiki.llm.client import LLMClient
 # ---------------------------------------------------------------------------
 
 
-def _mock_llm(raw_response: str | object) -> LLMClient:
-    """Build a mock LLMClient that returns *raw_response* (stringified if needed)."""
-    if not isinstance(raw_response, str):
-        raw_response = json.dumps(raw_response)
+def _mock_llm(raw_response: str | object | None = None) -> LLMClient:
+    """Return a mock LLMClient.
+
+    If *raw_response* is given the mock's complete() will return it (stringified).
+    """
     mock = MagicMock(spec=LLMClient)
     mock.load_prompt.return_value = "formatted prompt"
-    mock.complete = AsyncMock(return_value=(raw_response, MagicMock()))
+    if raw_response is not None:
+        if not isinstance(raw_response, str):
+            raw_response = json.dumps(raw_response)
+        mock.complete = AsyncMock(return_value=(raw_response, MagicMock()))
     return mock  # type: ignore[return-value]
 
 
-def _candidates(*items: dict) -> str:  # type: ignore[type-arg]
-    """Build the canonical `{"candidates": [...]}` JSON string."""
-    return json.dumps({"candidates": list(items)})
+def _mock_store(
+    count: int = 5,
+    query_results: list[SearchHit] | None = None,
+) -> EmbeddingStore:
+    """Return a mock EmbeddingStore."""
+    mock = MagicMock(spec=EmbeddingStore)
+    mock.count.return_value = count
+    if query_results is not None:
+        mock.query.return_value = query_results
+    else:
+        mock.query.return_value = [
+            SearchHit(slug=f"page-{i}", title=f"Page {i}", section="General", similarity=0.9 - i * 0.05)
+            for i in range(min(count, 5))
+        ]
+    return mock  # type: ignore[return-value]
 
 
-def _item(slug: str, score: float, title: str = "") -> dict:  # type: ignore[type-arg]
-    return {"slug": slug, "title": title or slug.replace("-", " ").title(), "relevance_score": score}
+def _hit(slug: str, score: float = 0.9, section: str = "General") -> SearchHit:
+    return SearchHit(slug=slug, title=slug.replace("-", " ").title(), section=section, similarity=score)
+
+
+def _rerank_resp(*slugs_scores: tuple[str, float]) -> str:
+    """Build a canonical rerank JSON response."""
+    hits = [{"slug": s, "rerank_score": r, "reason": f"reason for {s}"} for s, r in slugs_scores]
+    return json.dumps({"hits": hits})
 
 
 # ===========================================================================
-# SearchAgent.run() integration tests
+# search() edge cases
 # ===========================================================================
 
 
-async def test_search_agent_finds_relevant_pages() -> None:
-    """SearchAgent.run returns results whose score meets the threshold."""
-    llm = _mock_llm(_candidates(
-        _item("transformers", 0.87),
-        _item("bert", 0.72),
-    ))
-    agent = SearchAgent(llm)
-    results = await agent.run("some text about transformers", ["Transformers", "BERT"], file_id="t1")
+async def test_empty_wiki_returns_empty_no_llm_call() -> None:
+    """Empty EmbeddingStore → [] without calling the LLM."""
+    llm = _mock_llm()
+    store = _mock_store(count=0)
+    agent = SearchAgent(llm, store)
 
-    assert len(results) == 2
-    assert results[0].slug == "transformers"
-    assert results[0].relevance_score == pytest.approx(0.87)
-    assert isinstance(results[0], SearchResult)
-
-
-async def test_search_agent_bare_array_still_accepted() -> None:
-    """Bare JSON array (Ollama / legacy) is accepted by the defensive parser."""
-    llm = _mock_llm([
-        {"slug": "transformers", "title": "Transformers", "relevance_score": 0.87},
-        {"slug": "bert", "title": "BERT", "relevance_score": 0.72},
-    ])
-    agent = SearchAgent(llm)
-    results = await agent.run("text", ["Transformers", "BERT"])
-    assert len(results) == 2
-
-
-async def test_search_agent_returns_empty_for_new_topic() -> None:
-    """SearchAgent.run returns [] when all scores are below 0.3."""
-    llm = _mock_llm(_candidates(
-        _item("transformers", 0.1),
-        _item("bert", 0.05),
-    ))
-    agent = SearchAgent(llm)
-    results = await agent.run("something completely unrelated", ["Transformers", "BERT"])
-    assert results == []
-
-
-async def test_search_agent_empty_index() -> None:
-    """SearchAgent.run returns [] immediately when index_headings is empty."""
-    llm = MagicMock(spec=LLMClient)
-    agent = SearchAgent(llm)
-
-    results = await agent.run("some text", [], file_id="f1")
+    results = await agent.search("some text about AI", file_id="f1")
 
     assert results == []
     llm.complete.assert_not_called()  # type: ignore[attr-defined]
 
 
-async def test_search_agent_llm_error_raises() -> None:
-    """SearchAgent.run propagates exceptions from the LLM so Celery can retry."""
-    mock = MagicMock(spec=LLMClient)
-    mock.load_prompt.return_value = "prompt"
-    mock.complete = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
-    agent = SearchAgent(mock)  # type: ignore[arg-type]
+async def test_all_below_threshold_returns_empty_no_llm_call() -> None:
+    """All candidates below similarity threshold → [] without LLM call."""
+    llm = _mock_llm()
+    # All similarities below default threshold of 0.3
+    low_hits = [_hit(f"page-{i}", score=0.1) for i in range(3)]
+    store = _mock_store(count=3, query_results=low_hits)
 
-    with pytest.raises(RuntimeError, match="LLM unavailable"):
-        await agent.run("text", ["SomePage"])
+    agent = SearchAgent(llm, store)
+
+    with MagicMock() as settings_mock:
+        import llm_wiki.agents.search as search_module
+        original_settings = search_module.settings
+        search_module.settings = MagicMock(
+            search_top_k=20,
+            search_similarity_threshold=0.3,
+            search_final_k_max=10,
+            search_summary_max_chars=8000,
+            wiki_language="en",
+        )
+        results = await agent.search("unrelated content", file_id="f2")
+        search_module.settings = original_settings
+
+    assert results == []
+    llm.complete.assert_not_called()  # type: ignore[attr-defined]
 
 
-async def test_search_agent_sorted_by_score() -> None:
-    """SearchAgent returns results sorted by descending relevance_score."""
-    llm = _mock_llm(_candidates(
-        _item("b-page", 0.5),
-        _item("a-page", 0.9),
-        _item("c-page", 0.7),
+async def test_happy_path_returns_sorted_hits() -> None:
+    """20 candidates from embedding → LLM returns 5 reranked hits in order."""
+    candidates = [_hit(f"page-{i}", score=0.8 - i * 0.01) for i in range(20)]
+    llm = _mock_llm(_rerank_resp(
+        ("page-3", 0.95),
+        ("page-0", 0.90),
+        ("page-7", 0.85),
+        ("page-1", 0.80),
+        ("page-5", 0.75),
     ))
-    agent = SearchAgent(llm)
-    results = await agent.run("text", ["A Page", "B Page", "C Page"])
+    store = _mock_store(count=20, query_results=candidates)
 
-    scores = [r.relevance_score for r in results]
+    import llm_wiki.agents.search as search_module
+    original_settings = search_module.settings
+    search_module.settings = MagicMock(
+        search_top_k=20,
+        search_similarity_threshold=0.3,
+        search_final_k_max=10,
+        search_summary_max_chars=8000,
+        wiki_language="en",
+    )
+    try:
+        agent = SearchAgent(llm, store)
+        results = await agent.search("file content", file_id="f3")
+    finally:
+        search_module.settings = original_settings
+
+    assert len(results) == 5
+    scores = [r.rerank_score for r in results]
     assert scores == sorted(scores, reverse=True)
-    assert results[0].slug == "a-page"
+    assert results[0].slug == "page-3"
 
 
-async def test_search_agent_respects_max_results() -> None:
-    """SearchAgent caps output at MAX_RESULTS entries."""
-    items = [_item(f"page-{i}", 0.9 - i * 0.01) for i in range(20)]
-    llm = _mock_llm({"candidates": items})
-    agent = SearchAgent(llm)
-    results = await agent.run("text", [f"Page {i}" for i in range(20)])
-    assert len(results) <= SearchAgent.MAX_RESULTS
+async def test_llm_returns_more_than_max_trimmed() -> None:
+    """LLM returns more hits than SEARCH_FINAL_K_MAX → silently trimmed."""
+    candidates = [_hit(f"page-{i}", score=0.9) for i in range(15)]
+    hits_from_llm = [(f"page-{i}", 0.9 - i * 0.01) for i in range(15)]
+    llm = _mock_llm(_rerank_resp(*hits_from_llm))
+    store = _mock_store(count=15, query_results=candidates)
+
+    import llm_wiki.agents.search as search_module
+    original = search_module.settings
+    search_module.settings = MagicMock(
+        search_top_k=20,
+        search_similarity_threshold=0.3,
+        search_final_k_max=5,  # max=5
+        search_summary_max_chars=8000,
+        wiki_language="en",
+    )
+    try:
+        agent = SearchAgent(llm, store)
+        results = await agent.search("text", file_id="f4")
+    finally:
+        search_module.settings = original
+
+    assert len(results) <= 5
 
 
-async def test_search_agent_invalid_json_raises() -> None:
-    """SearchAgent raises ValueError when the LLM returns non-JSON."""
-    mock = MagicMock(spec=LLMClient)
-    mock.load_prompt.return_value = "prompt"
-    mock.complete = AsyncMock(return_value=("not valid json at all", MagicMock()))
-    agent = SearchAgent(mock)  # type: ignore[arg-type]
+async def test_llm_returns_zero_hits_valid() -> None:
+    """LLM can legitimately return empty hits — not an error."""
+    candidates = [_hit("page-0", score=0.9)]
+    llm = _mock_llm(json.dumps({"hits": []}))
+    store = _mock_store(count=1, query_results=candidates)
 
-    with pytest.raises(ValueError, match="invalid JSON"):
-        await agent.run("text", ["SomePage"])
+    import llm_wiki.agents.search as search_module
+    original = search_module.settings
+    search_module.settings = MagicMock(
+        search_top_k=20,
+        search_similarity_threshold=0.3,
+        search_final_k_max=10,
+        search_summary_max_chars=8000,
+        wiki_language="en",
+    )
+    try:
+        agent = SearchAgent(llm, store)
+        results = await agent.search("unrelated text", file_id="f5")
+    finally:
+        search_module.settings = original
+
+    assert results == []
 
 
-async def test_search_agent_unextractable_json_raises() -> None:
-    """SearchAgent raises ValueError when the LLM returns a JSON dict with no array."""
-    mock = MagicMock(spec=LLMClient)
-    mock.load_prompt.return_value = "prompt"
-    mock.complete = AsyncMock(return_value=('{"status": "ok"}', MagicMock()))
-    agent = SearchAgent(mock)  # type: ignore[arg-type]
+async def test_llm_returns_unknown_slug_filtered() -> None:
+    """Hallucinated slugs from LLM that weren't in candidates are silently dropped."""
+    candidates = [_hit("real-page", score=0.9)]
+    llm = _mock_llm(json.dumps({"hits": [
+        {"slug": "hallucinated-slug", "rerank_score": 0.99, "reason": "invented"},
+        {"slug": "real-page", "rerank_score": 0.85, "reason": "valid"},
+    ]}))
+    store = _mock_store(count=1, query_results=candidates)
 
-    with pytest.raises(ValueError, match="cannot extract candidates"):
-        await agent.run("text", ["SomePage"])
+    import llm_wiki.agents.search as search_module
+    original = search_module.settings
+    search_module.settings = MagicMock(
+        search_top_k=20,
+        search_similarity_threshold=0.3,
+        search_final_k_max=10,
+        search_summary_max_chars=8000,
+        wiki_language="en",
+    )
+    try:
+        agent = SearchAgent(llm, store)
+        results = await agent.search("text", file_id="f6")
+    finally:
+        search_module.settings = original
+
+    slugs = [r.slug for r in results]
+    assert "hallucinated-slug" not in slugs
+    assert "real-page" in slugs
+
+
+async def test_llm_timeout_fallback_returns_top_5_embedding() -> None:
+    """LLM raises TimeoutError → fallback returns top-5 by similarity, rerank_score=None."""
+    candidates = [_hit(f"page-{i}", score=0.9 - i * 0.05) for i in range(10)]
+    llm = _mock_llm()
+    llm.complete = AsyncMock(side_effect=TimeoutError("LLM timeout"))
+    store = _mock_store(count=10, query_results=candidates)
+
+    import llm_wiki.agents.search as search_module
+    original = search_module.settings
+    search_module.settings = MagicMock(
+        search_top_k=20,
+        search_similarity_threshold=0.0,  # all above threshold
+        search_final_k_max=10,
+        search_summary_max_chars=8000,
+        wiki_language="en",
+    )
+    try:
+        agent = SearchAgent(llm, store)
+        results = await agent.search("text", file_id="f7")
+    finally:
+        search_module.settings = original
+
+    assert len(results) <= 5
+    for r in results:
+        assert r.rerank_score is None
+
+
+async def test_run_shim_delegates_to_search() -> None:
+    """SearchAgent.run() produces the same result as search() (shim compatibility)."""
+    candidates = [_hit("page-0", score=0.9)]
+    llm = _mock_llm(_rerank_resp(("page-0", 0.9)))
+    store = _mock_store(count=1, query_results=candidates)
+
+    import llm_wiki.agents.search as search_module
+    original = search_module.settings
+    search_module.settings = MagicMock(
+        search_top_k=20,
+        search_similarity_threshold=0.3,
+        search_final_k_max=10,
+        search_summary_max_chars=8000,
+        wiki_language="en",
+    )
+    try:
+        agent = SearchAgent(llm, store)
+        via_run = await agent.run("text", ["old heading list ignored"], file_id="f8")
+        via_search = await agent.search("text", file_id="f8")
+    finally:
+        search_module.settings = original
+
+    assert [r.slug for r in via_run] == [r.slug for r in via_search]
 
 
 # ===========================================================================
-# _parse_search_response — unit tests for every accepted shape
+# _parse_rerank_response — unit tests for all accepted shapes
 # ===========================================================================
 
 
-def test_parse_candidates_wrapper() -> None:
-    """{"candidates": [...]} — canonical OpenAI json_object format."""
-    raw = json.dumps({"candidates": [{"slug": "x", "relevance_score": 0.8}]})
-    items = _parse_search_response(raw)
-    assert len(items) == 1
+def test_parse_hits_wrapper() -> None:
+    """{"hits": [...]} — canonical format."""
+    raw = json.dumps({"hits": [{"slug": "x", "rerank_score": 0.8, "reason": "ok"}]})
+    items = _parse_rerank_response(raw)
     assert items[0]["slug"] == "x"
 
 
-def test_parse_results_alias() -> None:
-    """{"results": [...]} — common LLM alias for candidates."""
-    raw = json.dumps({"results": [{"slug": "y", "relevance_score": 0.7}]})
-    items = _parse_search_response(raw)
+def test_parse_candidates_alias() -> None:
+    """{"candidates": [...]} — common alias."""
+    raw = json.dumps({"candidates": [{"slug": "y", "rerank_score": 0.7}]})
+    items = _parse_rerank_response(raw)
     assert items[0]["slug"] == "y"
 
 
-def test_parse_bare_array() -> None:
-    """[...] — bare array produced by Ollama and legacy prompts."""
-    raw = json.dumps([{"slug": "z", "relevance_score": 0.6}])
-    items = _parse_search_response(raw)
+def test_parse_results_alias() -> None:
+    """{"results": [...]} — second common alias."""
+    raw = json.dumps({"results": [{"slug": "z", "rerank_score": 0.6}]})
+    items = _parse_rerank_response(raw)
     assert items[0]["slug"] == "z"
 
 
-def test_parse_markdown_fence_candidates() -> None:
-    """```json\\n{"candidates": [...]}\\n``` — fenced block from some models."""
-    payload = {"candidates": [{"slug": "fenced", "relevance_score": 0.9}]}
+def test_parse_bare_array() -> None:
+    """[...] — bare array accepted for Ollama / fallback."""
+    raw = json.dumps([{"slug": "a", "rerank_score": 0.9}])
+    items = _parse_rerank_response(raw)
+    assert items[0]["slug"] == "a"
+
+
+def test_parse_markdown_fenced_json() -> None:
+    """```json\\n{...}\\n``` — markdown fence stripped."""
+    payload = {"hits": [{"slug": "fenced", "rerank_score": 0.8}]}
     raw = "```json\n" + json.dumps(payload) + "\n```"
-    items = _parse_search_response(raw)
+    items = _parse_rerank_response(raw)
     assert items[0]["slug"] == "fenced"
 
 
-def test_parse_markdown_fence_bare_array() -> None:
-    """```json\\n[...]\\n``` — fenced bare array."""
-    payload = [{"slug": "fenced-arr", "relevance_score": 0.5}]
-    raw = "```\n" + json.dumps(payload) + "\n```"
-    items = _parse_search_response(raw)
-    assert items[0]["slug"] == "fenced-arr"
-
-
-def test_parse_single_candidate_flat_object() -> None:
-    """{"slug": ..., ...} — single candidate returned as flat dict."""
-    raw = json.dumps({"slug": "solo", "title": "Solo", "relevance_score": 0.55})
-    items = _parse_search_response(raw)
+def test_parse_single_flat_object() -> None:
+    """{"slug": ..., ...} — flat dict wraps itself as a single-item list."""
+    raw = json.dumps({"slug": "solo", "rerank_score": 0.7, "reason": "only one"})
+    items = _parse_rerank_response(raw)
     assert items[0]["slug"] == "solo"
 
 
-def test_parse_empty_candidates_list() -> None:
-    """{"candidates": []} — valid response meaning no relevant pages."""
-    raw = json.dumps({"candidates": []})
-    items = _parse_search_response(raw)
+def test_parse_empty_hits_list() -> None:
+    """{"hits": []} — valid empty response."""
+    items = _parse_rerank_response(json.dumps({"hits": []}))
     assert items == []
 
 
 def test_parse_invalid_json_raises() -> None:
-    """Non-JSON input must raise ValueError."""
+    """Non-JSON string must raise ValueError."""
     with pytest.raises(ValueError, match="invalid JSON"):
-        _parse_search_response("this is not json")
+        _parse_rerank_response("not json at all")
 
 
 def test_parse_unextractable_dict_raises() -> None:
-    """A dict with no list values and no slug key must raise ValueError."""
-    raw = json.dumps({"status": "ok", "count": 3})
-    with pytest.raises(ValueError, match="cannot extract candidates"):
-        _parse_search_response(raw)
+    """Dict without list values and no slug key raises ValueError."""
+    with pytest.raises(ValueError):
+        _parse_rerank_response(json.dumps({"status": "ok", "count": 3}))

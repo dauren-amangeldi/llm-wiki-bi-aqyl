@@ -14,10 +14,11 @@ from pathlib import Path
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from llm_wiki.agents.search import SearchAgent, SearchResult
+from llm_wiki.agents.search import SearchAgent
 from llm_wiki.agents.writer import WikiPage, WriterAgent
 from llm_wiki.config import settings
 from llm_wiki.llm.client import LLMClient
+from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 from llm_wiki.parsers.markdown import parse_markdown_file
 from llm_wiki.parsers.pdf import parse_pdf
 from llm_wiki.storage.filesystem import atomic_write
@@ -92,14 +93,20 @@ async def process_file(file_id: str) -> None:
                 await _transition(session, file_id, "STORED")
 
             # ----------------------------------------------------------------
-            # SEARCHED — Search Agent finds relevant pages
+            # SEARCHED — Search Agent v2 (embedding pre-filter + LLM re-rank)
             # ----------------------------------------------------------------
-            index_storage = IndexStorage(settings.index_path)
+            embedding_store = EmbeddingStore(
+                chroma_path=settings.chroma_dir, llm_client=llm
+            )
+            index_storage = IndexStorage(
+                settings.index_path, embedding_store=embedding_store
+            )
+            # heading_texts kept for backward-compat with SearchAgent.run() signature
             headings = index_storage.read_headings()
             heading_texts = [h.text for h in headings]
 
-            search_agent = SearchAgent(llm)
-            search_results: list[SearchResult] = await search_agent.run(
+            search_agent = SearchAgent(llm, embedding_store)
+            search_results: list[SearchHit] = await search_agent.run(
                 file_text, heading_texts, file_id=file_id
             )
 
@@ -118,7 +125,7 @@ async def process_file(file_id: str) -> None:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
                     _save_wiki_page(settings.wiki_dir, page)
-                    index_storage.add_page(page.slug, "General")
+                    index_storage.add_page(page.slug, "General", title=page.title)
                     created_pages.append(page.slug)
                 else:
                     # Scenario B — update existing pages (up to 5)
@@ -133,7 +140,7 @@ async def process_file(file_id: str) -> None:
                         # Search found headings but files are absent — create new
                         page = await writer.create_page(file_text, file_id)
                         _save_wiki_page(settings.wiki_dir, page)
-                        index_storage.add_page(page.slug, "General")
+                        index_storage.add_page(page.slug, "General", title=page.title)
                         created_pages.append(page.slug)
 
                 # Persist page lists to DB
@@ -260,7 +267,7 @@ def _save_wiki_page(wiki_dir: Path, page: WikiPage) -> None:
 
 
 def _load_existing_pages(
-    wiki_dir: Path, search_results: list[SearchResult]
+    wiki_dir: Path, search_results: list[SearchHit]
 ) -> list[WikiPage]:
     """Read wiki files for *search_results* that actually exist on disk.
 

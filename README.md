@@ -99,8 +99,9 @@ User → POST /files → FastAPI → Celery Queue
 | LW-9 | Orchestrator (state machine) | ✅ Done |
 | LW-10 | GET /files/{id} status endpoint | ✅ Done |
 | LW-10.1 | Streamlit wiki viewer (read-only UI for wiki, index, log) | ✅ Done |
-| LW-11 | ChromaDB + embeddings | 🔲 |
-| LW-12 | Search Agent v2 (embedding pre-filter) | 🔲 |
+| LW-11 | ChromaDB + embeddings infrastructure | ✅ Done |
+| LW-12.1 | SHA-256 file deduplication (POST /files) | ✅ Done |
+| LW-12 | Search Agent v2 (embedding pre-filter + LLM re-rank) | ✅ Done |
 | LW-13 | Backlink mechanics | 🔲 |
 | LW-14 | Lint Agent v1 (rule-based) | 🔲 |
 | LW-15 | Lint Agent v2 (LLM checks) + Celery Beat | 🔲 |
@@ -112,6 +113,21 @@ User → POST /files → FastAPI → Celery Queue
 ## API Docs
 
 Available at http://localhost:8000/docs after starting the stack.
+
+## Embedding Index
+
+Wiki headings are indexed into ChromaDB (`data/chroma/`) using `text-embedding-3-small`.
+The Search Agent pre-filters candidates via cosine similarity before LLM re-ranking.
+
+**Rebuild the index** (after first import or after changing `EMBEDDING_MODEL`):
+```bash
+docker compose exec api uv run python scripts/reindex.py
+# Preview without writing:
+docker compose exec api uv run python scripts/reindex.py --dry-run
+```
+
+> **Note:** If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, the service will refuse
+> to start until you run `reindex.py` to rebuild the collection with the new model.
 
 ## Cost Tracking
 

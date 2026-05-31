@@ -21,6 +21,11 @@ class FileRecord(Base):
     __tablename__ = "files"
 
     file_id: Mapped[str] = mapped_column(String, primary_key=True)
+    # SHA-256 hex digest of the raw file content (nullable for legacy rows
+    # created before LW-12.1; new uploads always populate this column).
+    content_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     original_name: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="RECEIVED")
     state_history: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
@@ -43,10 +48,42 @@ class FileRecord(Base):
 # ---------------------------------------------------------------------------
 
 
+async def get_by_sha256(
+    session: AsyncSession,
+    sha256: str,
+) -> FileRecord | None:
+    """Return the most recent non-FAILED FileRecord with *sha256*, or None.
+
+    Duplicate detection logic:
+    - If a record exists with status != ``"FAILED"`` → caller should treat this
+      as a duplicate and return the existing file_id without re-running the pipeline.
+    - If only FAILED records exist for this hash → the previous run errored out;
+      allow a fresh upload so the user can retry after fixing the underlying issue.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        sha256: SHA-256 hex digest (64 characters) of the file content.
+
+    Returns:
+        The matching FileRecord, or None.
+    """
+    result = await session.execute(
+        select(FileRecord)
+        .where(
+            FileRecord.content_sha256 == sha256,
+            FileRecord.status != "FAILED",  # allow re-upload after failure
+        )
+        .order_by(FileRecord.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def create_file_record(
     session: AsyncSession,
     file_id: str,
     original_name: str,
+    content_sha256: str | None = None,
 ) -> FileRecord:
     """Insert a new FileRecord in RECEIVED state and return it.
 
@@ -60,6 +97,7 @@ async def create_file_record(
     """
     record = FileRecord(
         file_id=file_id,
+        content_sha256=content_sha256,
         original_name=original_name,
         status="RECEIVED",
         state_history=[],

@@ -46,12 +46,24 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     service_name: str = "llm-wiki"
 
+    # --- Embeddings (always OpenAI, regardless of chat provider) ---
+    embedding_model: str = "text-embedding-3-small"
+    embedding_batch_size: int = 100
+    embedding_dimensions: int = 1536
+
+    # --- Search tuning ---
+    search_top_k: int = 20
+    search_similarity_threshold: float = 0.3
+    search_final_k_max: int = 10
+    search_summary_max_chars: int = 8_000  # ~2 000 tokens at 4 chars/token
+
     # --- Cost tracking (USD per 1M tokens, May 2026) ---
     price_table: dict[str, dict[str, float]] = Field(
         default={
             "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
             "gpt-5.4": {"input": 2.50, "output": 15.00},
             "ollama": {"input": 0.00, "output": 0.00},
+            "text-embedding-3-small": {"input": 0.02, "output": 0.00},
         }
     )
 
