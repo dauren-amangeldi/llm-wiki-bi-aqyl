@@ -115,6 +115,7 @@ Weekly Celery Beat (Mon 03:00 UTC):
 | LW-16 | GET /wiki/{slug}, /log, /stats + Streamlit deep-linking | ✅ Done |
 | LW-17 | Observability (structlog JSON logs + request_id) — OTel deferred | ✅ Done |
 | LW-18 | Runbook | 🔲 |
+| LW-20 | POST /api/v1/ask + Streamlit Q&A (AnswerAgent) | ✅ Done |
 | LW-19 | Rate limiting + budget alerts | 🔲 |
 
 ## API Docs
@@ -198,6 +199,22 @@ curl -X POST http://localhost:8000/api/v1/audit/run \
 # Poll Auditor task status
 curl http://localhost:8000/api/v1/audit/{task_id}
 ```
+
+## Q&A endpoint
+
+Ask the wiki a question and get a synthesised answer with citations:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Что такое LoRA?", "top_k": 5}'
+```
+
+Or use the Streamlit UI: open http://localhost:8501 and click **❓ Спросить** in the sidebar.
+
+The AnswerAgent never invents facts — if the wiki does not cover the question, the response has `confidence: "low"` and an empty `sources` list. All citations in the answer body are validated against the retrieved sources; hallucinated `[[slug]]` references are stripped automatically.
+
+**Known limitation (v1):** retrieval uses heading-only embeddings (LW-11) plus a lightweight keyword fallback over full page bodies (with Russian/Kazakh stop-word filtering and prefix matching). Questions whose answer lives in the body of a page with an unrelated title may still miss. A chunk-level RAG upgrade is tracked as LW-20.1.
 
 ## Logging
 

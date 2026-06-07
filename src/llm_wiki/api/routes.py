@@ -13,6 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.schemas import (
+    AskRequest,
+    AskResponse,
+    AskSource,
     AuditRunRequest,
     AuditRunResponse,
     AuditStatusResponse,
@@ -561,4 +564,46 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
         cost_this_month_usd=round(cost_this_month, 4),
         avg_cost_per_ingestion_usd=avg_cost,
         last_lint_run=last_lint_run,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q&A
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/ask",
+    response_model=AskResponse,
+    summary="Ask a question against the wiki",
+    tags=["ask"],
+)
+async def ask_question(body: AskRequest) -> AskResponse:
+    """Run retrieval + LLM synthesis and return a cited answer.
+
+    Stateless — each request spawns its own ``LLMClient`` so connections are
+    not leaked across the event loop.  For a high-throughput server, refactor
+    to a shared client behind a dependency injector later.
+    """
+    from llm_wiki.agents.answer import AnswerAgent
+    from llm_wiki.llm.client import LLMClient
+    from llm_wiki.llm.embeddings import EmbeddingStore
+
+    llm = LLMClient()
+    try:
+        store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        agent = AnswerAgent(llm, store)
+        result = await agent.answer(question=body.question, top_k=body.top_k)
+    finally:
+        await llm.aclose()
+
+    return AskResponse(
+        question=body.question,
+        answer=result.answer,
+        confidence=result.confidence,
+        sources=[
+            AskSource(slug=h.slug, title=h.title, similarity=h.similarity)
+            for h in result.sources
+        ],
+        cost_usd=round(result.cost_usd, 6),
     )

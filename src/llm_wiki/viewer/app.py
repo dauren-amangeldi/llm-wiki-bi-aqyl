@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import streamlit as st
 
 from llm_wiki.ui.markdown_safe import escape_dollars_for_streamlit
@@ -25,6 +26,72 @@ WIKI_DIR = DATA_DIR / "wiki"
 INDEX_PATH = DATA_DIR / "index.md"
 LOG_PATH = DATA_DIR / "log.md"
 RAW_DIR = DATA_DIR / "raw"
+
+API_BASE = os.getenv("API_BASE_URL", "http://api:8000")
+
+# ---------------------------------------------------------------------------
+# i18n for the Ask page (Patch 4 — Russian / Kazakh / English)
+# ---------------------------------------------------------------------------
+
+_LANG = os.getenv("WIKI_LANGUAGE", "ru").lower()
+
+_UI: dict[str, str] = {
+    "ru": {
+        "title": "❓ Спросить вики",
+        "caption": "Ответ синтезируется только из проиндексированных страниц.",
+        "input_label": "Ваш вопрос",
+        "placeholder": "например, Что такое LoRA?",
+        "slider": "Сколько страниц-источников учитывать",
+        "btn_ask": "Спросить",
+        "thinking": "Думаю...",
+        "confidence_label": "Уверенность",
+        "cost_label": "Стоимость",
+        "sources": "Источники",
+        "no_sources": "Источники не использованы — скорее всего, тема не покрыта в вики.",
+        "btn_sidebar": "❓ Спросить",
+    },
+    "kk": {
+        "title": "❓ Уикиден сұрау",
+        "caption": "Жауап тек индекстелген беттер негізінде құрастырылады.",
+        "input_label": "Сіздің сұрағыңыз",
+        "placeholder": "мысалы, LoRA дегеніміз не?",
+        "slider": "Қанша бет-дерек көзін ескеру керек",
+        "btn_ask": "Сұрау",
+        "thinking": "Ойланудамын...",
+        "confidence_label": "Сенімділік",
+        "cost_label": "Құны",
+        "sources": "Дереккөздер",
+        "no_sources": "Дереккөздер пайдаланылмады — уикиде осы тақырып жоқ сияқты.",
+        "btn_sidebar": "❓ Сұрау",
+    },
+    "en": {
+        "title": "❓ Ask the wiki",
+        "caption": "Answers are synthesised only from indexed wiki pages.",
+        "input_label": "Your question",
+        "placeholder": "e.g. What is LoRA?",
+        "slider": "How many source pages to consider",
+        "btn_ask": "Ask",
+        "thinking": "Thinking...",
+        "confidence_label": "Confidence",
+        "cost_label": "Cost",
+        "sources": "Sources",
+        "no_sources": "No sources were used. The wiki likely does not cover this topic.",
+        "btn_sidebar": "❓ Ask",
+    },
+}.get(_LANG) or {
+    "title": "❓ Ask",
+    "caption": "",
+    "input_label": "Question",
+    "placeholder": "...",
+    "slider": "Top K",
+    "btn_ask": "Ask",
+    "thinking": "Thinking...",
+    "confidence_label": "Confidence",
+    "cost_label": "Cost",
+    "sources": "Sources",
+    "no_sources": "No sources used.",
+    "btn_sidebar": "❓ Ask",
+}
 
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
@@ -141,6 +208,9 @@ with st.sidebar:
         st.rerun()
     if st.button("📊 Stats", use_container_width=True):
         _nav("stats")
+        st.rerun()
+    if st.button(_UI["btn_sidebar"], use_container_width=True):
+        _nav("ask")
         st.rerun()
 
     st.divider()
@@ -417,3 +487,59 @@ elif nav == "stats":
         c1, c2 = st.columns(2)
         c1.metric("Total ingestion events", len(entries))
         c2.metric("Total LLM cost", f"${total_cost:.4f}")
+
+
+# ── Ask ──────────────────────────────────────────────────────────────────────
+elif nav == "ask":
+    st.title(_UI["title"])
+    st.caption(_UI["caption"])
+
+    question = st.text_input(
+        _UI["input_label"],
+        key="ask_question",
+        placeholder=_UI["placeholder"],
+    )
+    top_k = st.slider(_UI["slider"], 1, 10, 5)
+
+    if st.button(_UI["btn_ask"], type="primary", disabled=not question.strip()):
+        with st.spinner(_UI["thinking"]):
+            try:
+                resp = httpx.post(
+                    f"{API_BASE}/api/v1/ask",
+                    json={"question": question.strip(), "top_k": top_k},
+                    timeout=120.0,
+                )
+                resp.raise_for_status()
+                data: dict | None = resp.json()
+            except httpx.HTTPError as exc:
+                st.error(f"Request failed: {exc}")
+                data = None
+
+        if data:
+            confidence_badges: dict[str, str] = {
+                "high": "🟢 High",
+                "medium": "🟡 Medium",
+                "low": "🔴 Low",
+            }
+            badge = confidence_badges.get(data["confidence"], data["confidence"])
+            st.markdown(
+                f"**{_UI['confidence_label']}:** {badge}"
+                f"  ·  **{_UI['cost_label']}:** ${data['cost_usd']:.4f}"
+            )
+            st.divider()
+            st.markdown(escape_dollars_for_streamlit(data["answer"]))
+
+            if data["sources"]:
+                st.divider()
+                st.subheader(_UI["sources"])
+                for src in data["sources"]:
+                    cols = st.columns([3, 1])
+                    if cols[0].button(
+                        f"→ {src['title']} ([[{src['slug']}]])",
+                        key=f"src_{src['slug']}",
+                    ):
+                        _nav("page", src["slug"])
+                        st.rerun()
+                    cols[1].markdown(f"similarity: `{src['similarity']:.2f}`")
+            else:
+                st.info(_UI["no_sources"])

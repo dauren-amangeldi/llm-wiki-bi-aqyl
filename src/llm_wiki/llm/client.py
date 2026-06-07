@@ -33,7 +33,7 @@ class LLMUsage:
     """Usage record written to data/usage.log after every LLM call."""
 
     file_id: str
-    agent_type: Literal["search", "writer", "lint", "audit", "embed"]
+    agent_type: Literal["search", "writer", "lint", "audit", "embed", "answer"]
     model: str
     input_tokens: int
     output_tokens: int
@@ -235,7 +235,7 @@ class LLMClient:
         prompt: str,
         system: str,
         file_id: str,
-        agent_type: Literal["search", "writer", "lint", "audit"],
+        agent_type: Literal["search", "writer", "lint", "audit", "answer"],
         response_format: Literal["text", "json"] = "text",
     ) -> tuple[str, LLMUsage]:
         """Send a completion request and return the response with usage.

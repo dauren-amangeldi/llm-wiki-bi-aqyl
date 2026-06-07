@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator  # noqa: F401
 
 
 class FileUploadResponse(BaseModel):
@@ -126,3 +126,28 @@ class StatsResponse(BaseModel):
     cost_this_month_usd: float
     avg_cost_per_ingestion_usd: float
     last_lint_run: datetime | None
+
+
+class AskRequest(BaseModel):
+    """Request body for POST /api/v1/ask."""
+
+    question: str = Field(min_length=3, max_length=1000)
+    top_k: int = Field(default=5, ge=1, le=10)
+
+
+class AskSource(BaseModel):
+    """A single source page cited by the AnswerAgent."""
+
+    slug: str
+    title: str
+    similarity: float
+
+
+class AskResponse(BaseModel):
+    """Response body for POST /api/v1/ask."""
+
+    question: str
+    answer: str
+    confidence: Literal["high", "medium", "low"]
+    sources: list[AskSource]
+    cost_usd: float
