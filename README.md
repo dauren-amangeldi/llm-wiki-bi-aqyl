@@ -113,7 +113,7 @@ Weekly Celery Beat (Mon 03:00 UTC):
 | LW-14 | Deterministic Linter (dead links, orphan pages, stale dates) | ✅ Done |
 | LW-15 | LLM Auditor (contradictions, duplicates, suspected stale) + Celery Beat | ✅ Done |
 | LW-16 | GET /wiki/{slug}, /log, /stats + Streamlit deep-linking | ✅ Done |
-| LW-17 | Observability (structlog + OpenTelemetry) | 🔲 |
+| LW-17 | Observability (structlog JSON logs + request_id) — OTel deferred | ✅ Done |
 | LW-18 | Runbook | 🔲 |
 | LW-19 | Rate limiting + budget alerts | 🔲 |
 
@@ -198,6 +198,25 @@ curl -X POST http://localhost:8000/api/v1/audit/run \
 # Poll Auditor task status
 curl http://localhost:8000/api/v1/audit/{task_id}
 ```
+
+## Logging
+
+All services emit structured JSON logs to stdout. View them with:
+
+```bash
+docker compose logs -f api | jq
+docker compose logs -f worker | jq
+```
+
+Every HTTP request gets a `request_id` (returned in the `X-Request-ID` response header
+and present on every log line for that request). Every Celery file-ingestion task
+auto-binds `file_id` to the log context, so filtering all logs for one file is trivial:
+
+```bash
+docker compose logs worker | jq 'select(.file_id == "01HXYZ...")'
+```
+
+Log level controlled by the `LOG_LEVEL` env var (default `INFO`).
 
 ## Cost Tracking
 

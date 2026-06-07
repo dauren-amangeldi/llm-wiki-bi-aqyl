@@ -61,7 +61,22 @@ def process_file_task(self: Any, file_id: str) -> None:
     Args:
         file_id: UUID of the file to process.
     """
+    from llm_wiki.logging_config import configure_logging
     from llm_wiki.orchestrator.pipeline import process_file  # local import avoids circular
+
+    # Ensure structured JSON logging is active in the worker process.
+    configure_logging()
+
+    # Bind file_id to the contextvar log context so every nested call —
+    # pipeline stages, LLM client, storage helpers — automatically includes
+    # it without manual .bind(file_id=...) calls.
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        file_id=file_id,
+        task_name="process_file",
+    )
+    log = structlog.get_logger(__name__)
+    log.info("task_started")
 
     try:
         # asyncio.Runner keeps the loop alive across await points AND across
@@ -85,11 +100,12 @@ def process_file_task(self: Any, file_id: str) -> None:
 
             runner.get_loop().set_exception_handler(_suppress_loop_closed)
             runner.run(process_file(file_id))
+
+        log.info("task_completed")
     except _PERMANENT_ERRORS as exc:
         # No point retrying — log and fail permanently.
-        logger.error(
+        log.error(
             "pipeline_failed_permanent",
-            file_id=file_id,
             error=str(exc),
             hint=(
                 "Model not found — run `docker compose exec ollama ollama pull <model>`"
@@ -100,13 +116,14 @@ def process_file_task(self: Any, file_id: str) -> None:
         raise  # let Celery mark the task as FAILURE without scheduling retries
     except Exception as exc:
         retry_count: int = self.request.retries
-        logger.warning(
+        log.warning(
             "pipeline_retry",
-            file_id=file_id,
             attempt=retry_count + 1,
             error=str(exc),
         )
         raise self.retry(exc=exc, countdown=4**retry_count)
+    finally:
+        structlog.contextvars.clear_contextvars()
 
 
 @celery_app.task(name="llm_wiki.orchestrator.tasks.run_weekly_audit")
@@ -131,6 +148,14 @@ def run_weekly_audit(
     Returns:
         ``{"issues_found": int, "mode": str, "dry_run": bool}``
     """
+    from llm_wiki.logging_config import configure_logging
+
+    configure_logging()
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(task_name="run_weekly_audit", mode=mode)
+    _audit_log = structlog.get_logger(__name__)
+    _audit_log.info("task_started")
+
     import asyncio
     import random
     from pathlib import Path
@@ -219,11 +244,11 @@ def run_weekly_audit(
         k = str(getattr(issue, "kind", "unknown"))
         counts[k] = counts.get(k, 0) + 1
 
-    logger.info(
+    _audit_log.info(
         "weekly_audit_done",
         issues_found=len(issues),
-        mode=mode,
         dry_run=dry_run,
         **counts,
     )
+    structlog.contextvars.clear_contextvars()
     return {"issues_found": len(issues), "mode": mode, "dry_run": dry_run}

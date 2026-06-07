@@ -8,8 +8,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from llm_wiki.api.deps import _engine
+from llm_wiki.api.middleware import RequestIDMiddleware
 from llm_wiki.api.routes import router
 from llm_wiki.config import settings
+from llm_wiki.logging_config import configure_logging
 from llm_wiki.storage.filesystem import ensure_dirs
 from llm_wiki.storage.metadata import Base, run_schema_migrations
 
@@ -19,6 +21,9 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Create DB tables and data directories on startup."""
+    # Configure structured JSON logging before anything else runs.
+    configure_logging()
+
     # Ensure all data directories exist before any request comes in
     ensure_dirs(settings.raw_dir, settings.wiki_dir, settings.chroma_dir)
 
@@ -42,6 +47,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestIDMiddleware)
 app.include_router(router, prefix="/api/v1")
 
 
