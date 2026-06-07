@@ -112,7 +112,7 @@ Weekly Celery Beat (Mon 03:00 UTC):
 | LW-13 | Backlink mechanics (bidirectional ## Backlinks sync) | ✅ Done |
 | LW-14 | Deterministic Linter (dead links, orphan pages, stale dates) | ✅ Done |
 | LW-15 | LLM Auditor (contradictions, duplicates, suspected stale) + Celery Beat | ✅ Done |
-| LW-16 | GET /wiki, /log, /stats endpoints | 🔲 |
+| LW-16 | GET /wiki/{slug}, /log, /stats + Streamlit deep-linking | ✅ Done |
 | LW-17 | Observability (structlog + OpenTelemetry) | 🔲 |
 | LW-18 | Runbook | 🔲 |
 | LW-19 | Rate limiting + budget alerts | 🔲 |
@@ -202,4 +202,4 @@ curl http://localhost:8000/api/v1/audit/{task_id}
 ## Cost Tracking
 
 Every LLM call is logged to `data/usage.log` as JSON-lines with tokens and USD cost.
-View aggregate stats: `GET /api/v1/stats` (LW-16).
+View aggregate stats: `GET /api/v1/stats`.

@@ -42,14 +42,34 @@ _LOG_FIELD_RE = re.compile(r"^\s*-\s*\*\*(.+?)\*\*:\s*(.+)$")
 st.set_page_config(page_title="LLM Wiki", page_icon="📚", layout="wide")
 
 # ---------------------------------------------------------------------------
+# Deep-link: sync URL query params → session_state on every rerun.
+# This runs before any rendering so that a fresh page load with
+# ?nav=page&slug=transformers opens that wiki page immediately.
+# ---------------------------------------------------------------------------
+_qp = st.query_params
+if "nav" in _qp and st.session_state.get("nav") != _qp["nav"]:
+    st.session_state["nav"] = _qp["nav"]
+if "slug" in _qp and st.session_state.get("slug") != _qp["slug"]:
+    st.session_state["slug"] = _qp["slug"]
+
+# ---------------------------------------------------------------------------
 # Session-state helpers
 # ---------------------------------------------------------------------------
 
 
 def _nav(page: str, slug: str = "") -> None:
-    """Switch to *page*, optionally setting the current wiki slug."""
+    """Switch to *page*, update session_state, and push the URL query params.
+
+    Writing to ``st.query_params`` makes the browser URL reflect the current
+    view so links can be shared and the browser back button works.
+    """
     st.session_state["nav"] = page
     st.session_state["slug"] = slug
+    st.query_params["nav"] = page
+    if slug:
+        st.query_params["slug"] = slug
+    elif "slug" in st.query_params:
+        del st.query_params["slug"]
 
 
 def _current() -> tuple[str, str]:

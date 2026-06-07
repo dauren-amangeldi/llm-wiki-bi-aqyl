@@ -1,9 +1,14 @@
 """API route definitions — all endpoints under /api/v1/."""
 
+import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import PlainTextResponse
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
@@ -15,17 +20,31 @@ from llm_wiki.api.schemas import (
     FileUploadResponse,
     IssueResponse,
     LintRunResponse,
+    LogResponse,
     StateEntry,
+    StatsResponse,
+    WikiPageResponse,
 )
 from llm_wiki.config import settings
 from llm_wiki.orchestrator.tasks import celery_app, process_file_task, run_weekly_audit
-from llm_wiki.storage.metadata import create_file_record, get_by_sha256, get_file_record
+from llm_wiki.storage.metadata import FileRecord, create_file_record, get_by_sha256, get_file_record
+from llm_wiki.utils.backlinks import extract_backlinks
 from llm_wiki.utils.hashing import sha256_stream
 from llm_wiki.utils.ids import new_file_id
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+# Compiled once at module load — reused for every /log request.
+_LOG_HEADER_RE = re.compile(
+    r"^## (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) — (.+)$",
+    re.MULTILINE,
+)
+
+# Slug validation: lowercase alphanumeric with hyphens, min 2 chars.
+# Consistent with _WIKI_LINK_RE in utils/backlinks.py.
+_VALID_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
 
 
 @router.post(
@@ -166,16 +185,88 @@ async def get_file_status(
 
 @router.get(
     "/wiki/{slug}",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Get a wiki page by slug (LW-16)",
+    summary="Get a wiki page by slug",
     tags=["wiki"],
+    response_model=None,
+    responses={
+        200: {"description": "Wiki page in JSON or markdown form"},
+        400: {"description": "Invalid slug"},
+        404: {"description": "Page not found"},
+    },
 )
-async def get_wiki_page(slug: str) -> None:
-    """Return a wiki page as markdown or JSON depending on Accept header.
+async def get_wiki_page(
+    slug: str,
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+) -> WikiPageResponse | PlainTextResponse:
+    """Return a wiki page as markdown or JSON depending on the ``Accept`` header.
 
-    Implemented in LW-16.
+    Args:
+        slug: Page slug (e.g. ``transformers``).  Must be lowercase alphanumeric
+            with hyphens, minimum 2 characters.
+        request: FastAPI request — used to inspect the ``Accept`` header.
+        session: Injected async SQLAlchemy session.
+
+    Returns:
+        | ``text/markdown`` if ``Accept: text/markdown`` (and JSON not preferred)
+        | ``application/json`` (``WikiPageResponse``) otherwise.
+
+    Raises:
+        HTTPException 400: Slug fails validation (path traversal attempt or
+            invalid characters).
+        HTTPException 404: No ``.md`` file exists for the slug.
     """
-    raise HTTPException(status_code=501, detail="Not implemented yet — see LW-16")
+    # Guard against path traversal and invalid slugs
+    if ".." in slug or "/" in slug or "\\" in slug or not _VALID_SLUG_RE.match(slug):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid slug {slug!r}. Must be lowercase alphanumeric with hyphens (min 2 chars).",
+        )
+
+    page_path = settings.wiki_dir / f"{slug}.md"
+    if not page_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Wiki page {slug!r} not found.",
+        )
+
+    content = page_path.read_text(encoding="utf-8")
+
+    # Content negotiation: prefer text/markdown only when explicitly requested
+    # and application/json is not also present (v1 simple substring check).
+    accept = request.headers.get("accept", "")
+    if "text/markdown" in accept and "application/json" not in accept:
+        return PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
+
+    # Extract title from first "# Heading" line; fall back to slug.
+    title = slug.replace("-", " ").title()
+    for line in content.splitlines():
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
+
+    backlinks = extract_backlinks(content)
+    last_updated = datetime.fromtimestamp(page_path.stat().st_mtime, tz=timezone.utc)
+
+    # Identify source files: FileRecord rows whose created_pages or updated_pages
+    # contain this slug.  The dataset is small (<1 000 rows) so a Python-level
+    # filter over a full table scan is acceptable.
+    result = await session.execute(select(FileRecord).order_by(FileRecord.created_at))
+    records = result.scalars().all()
+    source_files = [
+        r.file_id
+        for r in records
+        if slug in (r.created_pages or []) or slug in (r.updated_pages or [])
+    ]
+
+    return WikiPageResponse(
+        slug=slug,
+        title=title,
+        content=content,
+        backlinks=backlinks,
+        last_updated=last_updated,
+        source_files=source_files,
+    )
 
 
 @router.post(
@@ -349,27 +440,125 @@ async def get_audit_status(task_id: str) -> AuditStatusResponse:
 
 @router.get(
     "/log",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Get ingestion changelog with pagination (LW-16)",
+    response_model=LogResponse,
+    summary="Get ingestion changelog with pagination",
     tags=["log"],
 )
-async def get_log(page: int = 1, per_page: int = 50) -> None:
-    """Return paginated entries from log.md.
+async def get_log(
+    page: int = Query(1, ge=1, description="1-based page number"),
+    per_page: int = Query(50, ge=1, le=200, description="Entries per page (max 200)"),
+) -> LogResponse:
+    """Return paginated entries from ``log.md``, newest first.
 
-    Implemented in LW-16.
+    Each entry is a Markdown block starting with a ``## TIMESTAMP — filename``
+    header and running until the next such header or EOF.
+
+    Args:
+        page: 1-based page number.
+        per_page: Number of entries per page (1–200).
+
+    Returns:
+        ``LogResponse`` with ``total`` count and ``entries`` slice for the
+        requested page.
     """
-    raise HTTPException(status_code=501, detail="Not implemented yet — see LW-16")
+    if not settings.log_path.exists():
+        return LogResponse(page=page, per_page=per_page, total=0, entries=[])
+
+    content = settings.log_path.read_text(encoding="utf-8")
+    matches = list(_LOG_HEADER_RE.finditer(content))
+    if not matches:
+        return LogResponse(page=page, per_page=per_page, total=0, entries=[])
+
+    # Slice the raw text between consecutive header positions so each entry
+    # includes its own header line and all body lines up to the next header.
+    raw_entries: list[str] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        raw_entries.append(content[start:end].rstrip())
+
+    raw_entries.reverse()  # newest first (log.md is append-only, chronological)
+
+    total = len(raw_entries)
+    offset = (page - 1) * per_page
+    page_entries = raw_entries[offset : offset + per_page]
+
+    return LogResponse(page=page, per_page=per_page, total=total, entries=page_entries)
 
 
 @router.get(
     "/stats",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Get usage statistics and costs (LW-16)",
+    response_model=StatsResponse,
+    summary="Get usage statistics and costs",
     tags=["stats"],
 )
-async def get_stats() -> None:
-    """Return aggregated stats: file counts, costs, last lint run.
+async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
+    """Return aggregated statistics: file counts, LLM costs, and last lint run.
 
-    Implemented in LW-16.
+    Reads the following sources:
+    - SQLite ``files`` table for file counts and average ingestion cost.
+    - ``data/wiki/*.md`` for wiki page count.
+    - ``data/usage.log`` (JSONL) for today's and this month's LLM spend.
+    - ``data/issues.md`` mtime for the last Linter run timestamp.
+
+    Args:
+        session: Injected async SQLAlchemy session.
+
+    Returns:
+        ``StatsResponse`` with all aggregated values.
     """
-    raise HTTPException(status_code=501, detail="Not implemented yet — see LW-16")
+    now = datetime.now(timezone.utc)
+
+    # --- DB aggregates --------------------------------------------------------
+    total_files_result = await session.execute(select(func.count(FileRecord.file_id)))
+    total_files: int = total_files_result.scalar_one() or 0
+
+    avg_cost_result = await session.execute(
+        select(func.avg(FileRecord.cost_usd)).where(FileRecord.status == "DONE")
+    )
+    avg_cost_raw = avg_cost_result.scalar_one()
+    avg_cost = round(float(avg_cost_raw), 4) if avg_cost_raw is not None else 0.0
+
+    # --- Filesystem counts ----------------------------------------------------
+    total_wiki_pages = (
+        len(list(settings.wiki_dir.glob("*.md"))) if settings.wiki_dir.exists() else 0
+    )
+
+    # --- Usage log: cost aggregation ------------------------------------------
+    cost_today = 0.0
+    cost_this_month = 0.0
+    today = now.date()
+
+    if settings.usage_log_path.exists():
+        for raw_line in settings.usage_log_path.read_text(encoding="utf-8").splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+                ts = datetime.fromisoformat(record["timestamp"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                cost = float(record.get("cost_usd", 0.0))
+                if ts.date() == today:
+                    cost_today += cost
+                if (ts.year, ts.month) == (now.year, now.month):
+                    cost_this_month += cost
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                logger.warning("usage_log_parse_error", line=raw_line[:120])
+
+    # --- Last lint run --------------------------------------------------------
+    last_lint_run: datetime | None = None
+    if settings.issues_path.exists():
+        last_lint_run = datetime.fromtimestamp(
+            settings.issues_path.stat().st_mtime, tz=timezone.utc
+        )
+
+    return StatsResponse(
+        total_files=total_files,
+        total_wiki_pages=total_wiki_pages,
+        cost_today_usd=round(cost_today, 4),
+        cost_this_month_usd=round(cost_this_month, 4),
+        avg_cost_per_ingestion_usd=avg_cost,
+        last_lint_run=last_lint_run,
+    )
