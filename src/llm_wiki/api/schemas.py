@@ -126,6 +126,9 @@ class StatsResponse(BaseModel):
     cost_this_month_usd: float
     avg_cost_per_ingestion_usd: float
     last_lint_run: datetime | None
+    # Budget fields (LW-19) — None when no daily limit is configured
+    budget_cost_limit_usd: float | None = None
+    budget_cost_used_pct: float | None = None
 
 
 class AskRequest(BaseModel):

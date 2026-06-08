@@ -1,6 +1,7 @@
-"""Unit tests for the API layer — POST /files endpoint (LW-5)."""
+"""Unit tests for the API layer — POST /files endpoint (LW-5 + LW-19)."""
 
 import io
+import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from llm_wiki.api.rate_limit import InMemoryRateLimiter
 from llm_wiki.storage.metadata import Base
 
 
@@ -257,3 +259,114 @@ async def test_get_file_status_returns_record(test_app: tuple) -> None:  # type:
     assert body["created_pages"] == []
     assert body["updated_pages"] == []
     assert body["cost_usd"] is None
+
+
+# ---------------------------------------------------------------------------
+# LW-19: rate limiting, kill switch, budget check
+# ---------------------------------------------------------------------------
+
+
+def _mock_settings_lw19(raw_dir: Path, **overrides: object) -> MagicMock:
+    """Mock settings with LW-19 fields explicitly set."""
+    m = MagicMock()
+    m.raw_dir = raw_dir
+    m.max_file_size_mb = 50
+    m.allowed_extensions = frozenset({".pdf", ".md"})
+    m.service_name = "llm-wiki-test"
+    m.ingestion_enabled = True
+    m.ingestion_rate_limit_per_min = 10
+    m.daily_cost_limit_usd = None
+    m.daily_token_limit = None
+    for k, v in overrides.items():
+        setattr(m, k, v)
+    return m
+
+
+async def test_rate_limit_returns_429_after_limit(test_app: tuple) -> None:  # type: ignore[type-arg]
+    """POST /files returns 429 with Retry-After when per-IP limit is exceeded."""
+    from llm_wiki.api import deps as deps_module
+
+    app, data_tmp, raw_dir = test_app
+    mock_settings = _mock_settings_lw19(raw_dir)
+
+    # Install a tight rate limiter (max 2 requests)
+    limiter = InMemoryRateLimiter(max_requests=2, window_seconds=60)
+
+    def _get_tight_limiter() -> InMemoryRateLimiter:
+        return limiter
+
+    app.dependency_overrides[deps_module.get_files_rate_limiter] = _get_tight_limiter
+    try:
+        with (
+            patch("llm_wiki.api.routes.process_file_task") as mock_task,
+            patch("llm_wiki.api.routes.settings", mock_settings),
+        ):
+            mock_task.delay.return_value = MagicMock(id="t-rl")
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                # First two should succeed
+                r1 = await client.post("/api/v1/files", files=_make_upload(b"%PDF-1.4 ok", "a.pdf"))
+                r2 = await client.post("/api/v1/files", files=_make_upload(b"%PDF-1.4 ok", "b.pdf"))
+                # Third should be rejected
+                r3 = await client.post("/api/v1/files", files=_make_upload(b"%PDF-1.4 ok", "c.pdf"))
+
+        assert r1.status_code == 202
+        assert r2.status_code in (202, 200)  # second may be a duplicate
+        assert r3.status_code == 429
+        assert "Retry-After" in r3.headers
+    finally:
+        app.dependency_overrides.pop(deps_module.get_files_rate_limiter, None)
+
+
+async def test_kill_switch_returns_503(test_app: tuple) -> None:  # type: ignore[type-arg]
+    """POST /files returns 503 when INGESTION_ENABLED=false."""
+    app, data_tmp, raw_dir = test_app
+    mock_settings = _mock_settings_lw19(raw_dir, ingestion_enabled=False)
+
+    with (
+        patch("llm_wiki.api.routes.process_file_task"),
+        patch("llm_wiki.api.routes.settings", mock_settings),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/v1/files", files=_make_upload(b"%PDF-1.4", "x.pdf"))
+
+    assert resp.status_code == 503
+    assert "disabled" in resp.json()["detail"].lower()
+
+
+async def test_budget_exceeded_returns_503(test_app: tuple, tmp_path: Path) -> None:  # type: ignore[type-arg]
+    """POST /files returns 503 when daily cost limit is already exceeded."""
+    app, data_tmp, raw_dir = test_app
+
+    # Create a usage.log that shows $2.00 already spent today
+    usage_log = tmp_path / "usage.log"
+    record = {
+        "file_id": "prev",
+        "agent_type": "writer",
+        "model": "gpt-5.4-mini",
+        "input_tokens": 1000,
+        "output_tokens": 500,
+        "cached_input_tokens": 0,
+        "cost_usd": 2.00,
+        "timestamp": "2026-06-09T10:00:00+00:00",
+        "duration_ms": 300,
+    }
+    usage_log.write_text(json.dumps(record) + "\n")
+
+    mock_settings = _mock_settings_lw19(
+        raw_dir,
+        daily_cost_limit_usd=1.0,   # limit is $1.00, already spent $2.00
+        daily_token_limit=None,
+    )
+    mock_settings.usage_log_path = usage_log
+
+    with (
+        patch("llm_wiki.api.routes.process_file_task"),
+        patch("llm_wiki.api.routes.settings", mock_settings),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/v1/files", files=_make_upload(b"%PDF-1.4", "y.pdf"))
+
+    assert resp.status_code == 503
+    assert "budget" in resp.json()["detail"].lower()

@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 100
     embedding_dimensions: int = 1536
 
+    # --- Rate limiting & budget (LW-19) ---
+    ingestion_enabled: bool = True
+    ingestion_rate_limit_per_min: int = 10        # POST /files: per source IP
+    ask_rate_limit_per_min: int = 30              # POST /ask: per source IP
+    daily_cost_limit_usd: float | None = None     # None = disabled
+    daily_token_limit: int | None = None          # None = disabled
+    budget_warning_threshold_pct: float = 0.80    # log warning at 80% of limit
+
     # --- Chunk store (LW-20.1) ---
     chunk_max_chars: int = 2000        # ~500 tokens; per-chunk context window
     chunk_overlap_chars: int = 200     # overlap between consecutive chunks in a long section

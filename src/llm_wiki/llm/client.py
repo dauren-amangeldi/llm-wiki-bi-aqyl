@@ -67,9 +67,18 @@ class LLMClient:
         Provider can be ollama, openai, or anthropic.
         """
         from llm_wiki.config import settings
+        from llm_wiki.quality.budget import BudgetGuard
 
         self._provider: str = settings.llm_provider
         self._usage_log_path: Path = settings.usage_log_path
+
+        # Budget guard — checks daily limits before every LLM / embed call.
+        # Constructed with current settings; limits of None = disabled.
+        self._budget = BudgetGuard(
+            usage_log_path=settings.usage_log_path,
+            daily_cost_limit_usd=settings.daily_cost_limit_usd,
+            daily_token_limit=settings.daily_token_limit,
+        )
 
         # _client is typed Any because AsyncOpenAI and AsyncAnthropic have
         # different method signatures — dispatch happens in _call_provider.
@@ -179,6 +188,15 @@ class LLMClient:
         if not texts:
             return []
 
+        # Budget check — raises BudgetExceeded before any API call is made.
+        from llm_wiki.quality.budget import BudgetExceeded
+
+        try:
+            self._budget.check()
+        except BudgetExceeded as exc:
+            logger.error("llm_call_blocked_by_budget", agent_type="embed", error=str(exc))
+            raise
+
         from llm_wiki.config import settings
 
         if not settings.openai_api_key:
@@ -283,9 +301,21 @@ class LLMClient:
             appended to ``data/usage.log`` as a side effect.
 
         Raises:
+            BudgetExceeded: When the daily cost or token budget is exhausted.
             Exception: Re-raises after ``_MAX_RETRIES`` failed attempts, or
                 immediately for non-retryable errors (auth, bad request, etc.).
         """
+        # Budget check — runs before any API call to avoid wasting tokens.
+        from llm_wiki.quality.budget import BudgetExceeded
+
+        try:
+            self._budget.check()
+        except BudgetExceeded as exc:
+            logger.error(
+                "llm_call_blocked_by_budget", agent_type=agent_type, error=str(exc)
+            )
+            raise
+
         start = time.monotonic()
         last_exc: Exception | None = None
 

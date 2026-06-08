@@ -114,8 +114,8 @@ Weekly Celery Beat (Mon 03:00 UTC):
 | LW-15 | LLM Auditor (contradictions, duplicates, suspected stale) + Celery Beat | ✅ Done |
 | LW-16 | GET /wiki/{slug}, /log, /stats + Streamlit deep-linking | ✅ Done |
 | LW-17 | Observability (structlog JSON logs + request_id) — OTel deferred | ✅ Done |
-| LW-18 | Runbook | 🔲 |
-| LW-19 | Rate limiting + budget alerts | 🔲 |
+| LW-18 | Runbook | ✅ Done |
+| LW-19 | Rate limiting + budget alerts (in-memory, single-replica) | ✅ Done |
 | LW-20 | POST /api/v1/ask + Streamlit Q&A (AnswerAgent) | ✅ Done |
 | LW-20.1 | Chunk-level retrieval for AnswerAgent (ChunkStore) | ✅ Done |
 
@@ -255,3 +255,21 @@ Log level controlled by the `LOG_LEVEL` env var (default `INFO`).
 
 Every LLM call is logged to `data/usage.log` as JSON-lines with tokens and USD cost.
 View aggregate stats: `GET /api/v1/stats`.
+
+## Rate limiting & budget (LW-19)
+
+Configure in `.env`:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `INGESTION_ENABLED` | `true` | Kill switch — set `false` to return 503 on `POST /files` |
+| `INGESTION_RATE_LIMIT_PER_MIN` | `10` | Max uploads per minute per source IP |
+| `ASK_RATE_LIMIT_PER_MIN` | `30` | Max `/ask` requests per minute per source IP |
+| `DAILY_COST_LIMIT_USD` | _(empty = disabled)_ | Hard cap on total LLM spend per UTC day |
+| `DAILY_TOKEN_LIMIT` | _(empty = disabled)_ | Hard cap on total tokens per UTC day |
+
+When a daily limit is exceeded, `LLMClient` raises `BudgetExceeded` before any API call is made. The ingestion task transitions to `FAILED`. A structured log event `budget_exceeded` at level `error` is emitted — this is the alerting mechanism until Slack/webhook integration is added.
+
+`POST /files` also checks the budget upfront and returns 503 immediately if the limit is already crossed, so no Celery task is enqueued.
+
+Rate limiting is in-memory per API replica — sufficient for single-container deploys. For horizontal scaling, swap `InMemoryRateLimiter` for a Redis-backed implementation (planned as LW-19.1).

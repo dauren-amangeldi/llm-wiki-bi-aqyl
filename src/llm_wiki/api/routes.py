@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import get_db
+from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db
 from llm_wiki.api.schemas import (
     AskRequest,
     AskResponse,
@@ -60,6 +60,7 @@ _VALID_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
 async def upload_file(
     file: UploadFile,
     session: AsyncSession = Depends(get_db),
+    _rate_check: None = Depends(check_files_rate_limit),
 ) -> FileUploadResponse:
     """Accept a PDF or Markdown file and enqueue it for async wiki ingestion.
 
@@ -80,6 +81,33 @@ async def upload_file(
         HTTPException 400: Empty file, or unsupported extension (.pdf / .md only).
         HTTPException 413: File exceeds the 50 MB limit.
     """
+    # Kill switch — returns 503 immediately without consuming any resources.
+    if not settings.ingestion_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ingestion is currently disabled (INGESTION_ENABLED=false).",
+        )
+
+    # Daily budget check — refuse early if today's spend already exceeds limits.
+    # Only activated when the limits are explicitly configured as numeric values.
+    _cost_limit = settings.daily_cost_limit_usd
+    _token_limit = settings.daily_token_limit
+    if isinstance(_cost_limit, (int, float)) or isinstance(_token_limit, int):
+        from llm_wiki.quality.budget import BudgetExceeded, BudgetGuard
+
+        guard = BudgetGuard(
+            usage_log_path=settings.usage_log_path,
+            daily_cost_limit_usd=_cost_limit if isinstance(_cost_limit, (int, float)) else None,
+            daily_token_limit=_token_limit if isinstance(_token_limit, int) else None,
+        )
+        try:
+            guard.check()
+        except BudgetExceeded as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Daily budget exceeded — ingestion paused. {exc}",
+            ) from exc
+
     import io
 
     filename = file.filename or "upload"
@@ -557,6 +585,12 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
             settings.issues_path.stat().st_mtime, tz=timezone.utc
         )
 
+    # --- Budget percentage (LW-19) -------------------------------------------
+    budget_limit = settings.daily_cost_limit_usd
+    budget_pct: float | None = None
+    if budget_limit is not None and budget_limit > 0:
+        budget_pct = round(cost_today / budget_limit * 100, 1)
+
     return StatsResponse(
         total_files=total_files,
         total_wiki_pages=total_wiki_pages,
@@ -564,6 +598,8 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
         cost_this_month_usd=round(cost_this_month, 4),
         avg_cost_per_ingestion_usd=avg_cost,
         last_lint_run=last_lint_run,
+        budget_cost_limit_usd=budget_limit,
+        budget_cost_used_pct=budget_pct,
     )
 
 
@@ -578,7 +614,10 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
     summary="Ask a question against the wiki",
     tags=["ask"],
 )
-async def ask_question(body: AskRequest) -> AskResponse:
+async def ask_question(
+    body: AskRequest,
+    _rate_check: None = Depends(check_ask_rate_limit),
+) -> AskResponse:
     """Run retrieval + LLM synthesis and return a cited answer.
 
     Stateless — each request spawns its own ``LLMClient`` so connections are

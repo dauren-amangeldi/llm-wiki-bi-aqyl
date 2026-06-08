@@ -776,6 +776,32 @@ print(f'{len(headings)} headings in index')
 
 ## Cost & quota
 
+### When budget alert fires (LW-19)
+
+**Symptoms:** Worker logs show `budget_exceeded` at level `error`. Files start failing at the SEARCHED or WRITTEN step with `BudgetExceeded`. `POST /files` returns 503 with "Daily budget exceeded".
+
+**Find the alert:**
+```bash
+docker compose logs api worker | jq 'select(.event == "budget_exceeded")'
+# Shows: kind (cost|tokens), cost_today_usd, cost_limit_usd
+```
+
+**Check current spend:**
+```bash
+curl -s http://localhost:8000/api/v1/stats | jq '{cost_today_usd, budget_cost_limit_usd, budget_cost_used_pct}'
+```
+
+**Fix — raise the limit for today:**
+```bash
+# Edit .env: DAILY_COST_LIMIT_USD=10.0
+docker compose up -d api worker
+```
+
+**Root cause — find who spent the budget:**
+See [Daily cost spike — diagnosis from usage.log](#daily-cost-spike--diagnosis-from-usagelog) below for the jq breakdown by agent type.
+
+---
+
 ### Daily cost spike — diagnosis from usage.log
 
 **Symptoms:** `curl /api/v1/stats | jq .cost_today_usd` is higher than expected.
@@ -890,7 +916,14 @@ docker compose exec redis redis-cli DEL celery
 
 **Option 3 — Environment-based kill switch.**
 Set `INGESTION_ENABLED=false` in `.env` and restart the API to return 503 from `POST /files`.
-**TODO: requires LW-19 budget alerts implementation — the env var check is not yet wired into the route.**
+```bash
+# Edit .env: INGESTION_ENABLED=false
+docker compose up -d api
+# Verify:
+curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8000/api/v1/files \
+  -F "file=@/dev/null"
+# Expected: 503
+```
 
 **Option 4 — Full stack pause.**
 ```bash
