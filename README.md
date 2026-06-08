@@ -1,275 +1,120 @@
-# LLM Wiki
+# llm-wiki
 
-LLM-powered wiki ingestion system. Upload a PDF or Markdown file → agents extract knowledge,
-synthesize wiki pages, maintain backlinks, and run weekly consistency checks.
+LLM-driven wiki/knowledge base для BI AQYL. Бэкенд (этот репо) + фронтенд (репо `llm-wiki-frontend`).
 
-## Quick Start (Testing — local Ollama)
+## Стек
+
+- **Backend**: FastAPI · Python 3.12 · uv · Celery · ChromaDB · SQLite · OpenAI SDK
+- **Frontend**: React 19 · Vite 6 · TypeScript · Tailwind 4 · Zustand · i18next
+- **Связь**: REST + SSE-стриминг под префиксом `/api/v1/`, заголовки `X-User-*` для контекста пользователя
+
+## Архитектура связки
+
+```
+┌──────────────────────┐                    ┌────────────────────────────┐
+│ llm-wiki-frontend    │   /api/v1/*        │ llm-wiki                   │
+│ React 19 + Vite      │ ────────────────►  │ FastAPI                    │
+│ Zustand · i18next    │   SSE для chat     │  ├── api/routes.py (legacy)│
+│ ported UI BI AQYL    │   /search          │  └── api/v1/  ← адаптер    │
+│ :5173                │ ◄──────────────    │     :8000                  │
+└──────────────────────┘                    │                            │
+                                            │  ChromaDB · SQLite · OpenAI│
+                                            └────────────────────────────┘
+```
+
+## Запуск (dev)
 
 ```bash
-# 1. Start all services (api, worker, beat, redis, ollama).
-#    ollama-init pulls the model automatically on first run — no manual step needed.
-docker compose -f docker-compose.yml -f docker-compose.testing.yml \
-  --env-file .env.testing up --build
+# backend
+cd llm-wiki
+uv sync
+uv run uvicorn llm_wiki.main:app --reload --port 8000
 
-# 2. Initialize the data directory (first time only)
-docker compose exec api uv run python scripts/init_wiki.py
-
-# 3. Upload a file
-curl -X POST http://localhost:8000/api/v1/files \
-  -F "file=@/path/to/document.pdf"
-
-# 4. Check processing status  (LW-10, coming soon)
-curl http://localhost:8000/api/v1/files/{file_id}
+# frontend (в отдельном терминале)
+cd llm-wiki-frontend
+npm install
+npm run dev      # :5173, проксирует /api → :8000
 ```
 
-> **Model size:** the testing profile defaults to `qwen2.5-coder:3b` (~2 GB).
-> Override with `OLLAMA_MODEL=qwen2.5-coder:14b` in `.env.testing` for higher quality.
-
-## Quick Start (Staging — OpenAI)
-
-```bash
-# 1. Copy the template and fill in your API key
-cp .env.staging.example .env.staging.local
-# edit OPENAI_API_KEY in .env.staging.local
-
-# 2. Start (no --env-file flag needed — the staging override loads it directly)
-docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
-```
-
-## 🌐 Wiki Viewer
-
-A lightweight Streamlit UI for browsing the wiki without entering the Docker container.
-
-### Access
-
-After `docker compose up`, open: **http://localhost:8501**
-
-### Features
-
-- **Wiki Index** — clickable tree of all ingested pages
-- **Wiki Page** — rendered markdown with internal link navigation
-- **Changelog** — ingestion history from `log.md`, filterable by type
-- **Stats** — page count, raw file count, total wiki size, cost summary
-- Read-only — does not modify any data
-
-> **Note:** This is a temporary dev/demo tool. A full Next.js UI is planned for Sprint 3.
-
-## Development Commands (all inside Docker)
-
-```bash
-# Run tests
-docker compose exec api uv run pytest
-
-# Lint
-docker compose exec api uv run ruff check .
-
-# Type check
-docker compose exec api uv run mypy --strict src/
-
-# Open a shell
-docker compose exec api bash
-
-# Run quality checks against current wiki
-docker compose exec api uv run python scripts/run_linter.py
-docker compose exec api uv run python scripts/run_auditor.py --sync --sample 5
-```
+## Роадмап интеграции с фронтендом
 
-## Architecture
-
-```
-User → POST /files → FastAPI → Celery Queue
-                              ↓
-                        Orchestrator (state machine)
-                        RECEIVED → STORED → SEARCHED → WRITTEN → LINTED → LOGGED → DONE
-                              ↓              ↓             ↓          ↓
-                         parse file    Search Agent   Writer Agent  Linter
-                         (pypdf/md)    (LLM)          (LLM)         (pure Python)
-                                           ↓
-                                       ChromaDB (LW-11)
+Делается фазами. Каждая фаза = 1–2 промпта Курсору. Ставим `[x]` после готовности.
 
-Weekly Celery Beat (Mon 03:00 UTC):
-                        Auditor Agent (LLM, Batch API) → issues.md ## LLM-flagged
-```
+### Phase 0 — Инфраструктура
 
-## Task Map
+- [x] CORS, папка `src/llm_wiki/api/v1/`, dep `get_current_user`
+- [x] Frontend: vite proxy, hardcoded session, dev запускается
+- [x] README с роадмапом
 
-| ID | Task | Status |
-|----|------|--------|
-| LW-1 | Repository skeleton | ✅ Done |
-| LW-2 | Storage layer | ✅ Done |
-| LW-3 | Parsers (PDF + MD) | ✅ Done |
-| LW-4 | LLM client wrapper | ✅ Done |
-| LW-5 | POST /files endpoint + Celery task | ✅ Done |
-| LW-6 | Search Agent v1 | ✅ Done |
-| LW-7 | Writer Agent — create page | ✅ Done |
-| LW-8 | Writer Agent — update pages | ✅ Done |
-| LW-9 | Orchestrator (state machine) | ✅ Done |
-| LW-10 | GET /files/{id} status endpoint | ✅ Done |
-| LW-10.1 | Streamlit wiki viewer (read-only UI for wiki, index, log) | ✅ Done |
-| LW-11 | ChromaDB + embeddings infrastructure | ✅ Done |
-| LW-12.1 | SHA-256 file deduplication (POST /files) | ✅ Done |
-| LW-12 | Search Agent v2 (embedding pre-filter + LLM re-rank) | ✅ Done |
-| LW-13 | Backlink mechanics (bidirectional ## Backlinks sync) | ✅ Done |
-| LW-14 | Deterministic Linter (dead links, orphan pages, stale dates) | ✅ Done |
-| LW-15 | LLM Auditor (contradictions, duplicates, suspected stale) + Celery Beat | ✅ Done |
-| LW-16 | GET /wiki/{slug}, /log, /stats + Streamlit deep-linking | ✅ Done |
-| LW-17 | Observability (structlog JSON logs + request_id) — OTel deferred | ✅ Done |
-| LW-18 | Runbook | ✅ Done |
-| LW-19 | Rate limiting + budget alerts (in-memory, single-replica) | ✅ Done |
-| LW-20 | POST /api/v1/ask + Streamlit Q&A (AnswerAgent) | ✅ Done |
-| LW-20.1 | Chunk-level retrieval for AnswerAgent (ChunkStore) | ✅ Done |
+### Phase 1 — Materials (список и детали)
 
-## API Docs
+- [x] `GET /api/v1/documents` — список из FileRecord с маппингом в schema Material
+- [x] `GET /api/v1/documents/{id}` — деталь материала
+- [x] `GET /api/v1/tags` → `[]` (заглушка под фазу 6)
+- [x] `DELETE /api/v1/documents/{id}` — soft delete (admin)
+- [x] `GET /api/v1/documents/{id}/sources` — список исходников
+- [x] `GET /api/v1/documents/{id}/dossier` — саммари + page_count
+- [x] `GET /api/v1/documents/{id}/related` → `[]` (под фазу 4)
+- [x] `GET /api/v1/files/{file_id}/raw` — отдача оригинала
+- [x] **Результат:** на фронте Workspace показывает реальные материалы, открывается модалка с саммари
 
-Available at http://localhost:8000/docs after starting the stack.
+### Phase 2 — Upload / Status
 
-## Embedding Index
+- [x] `POST /api/v1/uploads` — single-file DropZone endpoint (returns `{ document_id, title, content_type, path, status }`)
+- [x] `POST /api/v1/materials/upload` — batch multipart, обёртка над существующим ingestion, returns `{ uploaded, skipped }`
+- [x] `GET /api/v1/documents/{id}/status` — polling статуса ingestion
+- [x] `DELETE /api/v1/documents/{id}/sources/{source_id}` — удалить исходник
+- [x] **Результат:** DropZone в модалке грузит файл → статус прогрессирует → итог: done
 
-Two ChromaDB collections live in `data/chroma/`:
+### Phase 3 — Chat (SSE)
 
-| Collection | One entry per… | Used by | Purpose |
-|---|---|---|---|
-| `headings` | Page title | `SearchAgent`, `IndexStorage` | Classify *which pages* a new document relates to |
-| `chunks` | ~500-token body fragment | `AnswerAgent` | Retrieve *which paragraph* answers a user question |
+- [ ] `POST /api/v1/documents/{id}/ask` (SSE) — RAG-чат по документу из Chroma
+- [ ] `POST /api/v1/cards/{card_id}/ask` — алиас на `/documents/{id}/ask`
+- [ ] Промпт `prompts/chat_document.md`
+- [ ] **Результат:** чат в модалке стримит ответ токенами с цитатами и follow-up'ами
 
-They are intentionally separate: title embeddings and body-chunk embeddings are not
-comparable (different text length, different semantics), and the SearchAgent needs
-page-level IDs while the AnswerAgent needs passage-level text.
+### Phase 4 — Search & Advisor (SSE)
 
-**Rebuild the headings index** (after first import or model change):
-```bash
-docker compose exec api uv run python scripts/reindex.py
-docker compose exec api uv run python scripts/reindex.py --dry-run
-```
+- [ ] `POST /api/v1/search` (SSE) с режимами `library` / `expert` / `advisor`
+- [ ] `GET /api/v1/documents/{id}/related` — реальный rerank через Chroma
+- [ ] Промпты `prompts/search_expert.md`, `prompts/advisor.md`
+- [ ] Rate-limit 10 advisor/min на email
+- [ ] **Результат:** глобальный поиск + advisor стримит, related-материалы в модалке заполняются
 
-**Rebuild the chunks index** (LW-20.1 — run on first deploy and after bulk wiki edits):
-```bash
-docker compose exec api uv run python scripts/reindex_chunks.py
-docker compose exec api uv run python scripts/reindex_chunks.py --dry-run
-```
+### Phase 5 — Studio (артефакты)
 
-> **Note:** If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, run *both*
-> `reindex.py` and `reindex_chunks.py` to rebuild both collections.
->
-> See [docs/lw-20.1-chunks.md](docs/lw-20.1-chunks.md) for the architectural rationale.
+- [ ] `POST /api/v1/studio/presentation` — JSON слайдов
+- [ ] `POST /api/v1/studio/flashcards` — JSON карточек
+- [ ] `POST /api/v1/studio/test` — JSON теста
+- [ ] Кэш в SQLite, TTL 24ч
+- [ ] `POST /api/v1/studio/export` — PDF/DOCX/PPTX
+- [ ] **Результат:** в Studio-колонке генерируются и экспортируются артефакты
 
-## Wiki Quality System (LW-14 + LW-15)
+### Phase 6 — Tags / Notifications / Guidelines
 
-The quality system has two layers:
+- [ ] Таблицы `tags`, `document_tags`, `notifications` в SQLite
+- [ ] `GET/POST /api/v1/tags`, `PUT /api/v1/documents/{id}/tags`, `GET /api/v1/documents/{id}/tag-suggestions`
+- [ ] `GET /api/v1/notifications`, `POST /api/v1/notifications/{id}/read`, триггер из ingestion
+- [ ] `GET /api/v1/guidelines`, `GET /api/v1/guidelines/{section_id}` (из `data/guidelines.yaml`)
+- [ ] **Результат:** теги, колокольчик, вкладка Guidelines живые
 
-| Layer | What | When | Cost |
-|-------|------|------|------|
-| **Linter** (LW-14) | Dead links, orphan pages, stale dates | After every ingest | Zero (pure Python) |
-| **Auditor** (LW-15) | Contradictions, duplicates, suspected stale | Weekly (Mon 03:00 UTC) | ~$0.003/page sync, ~$0.0015/page batch |
+### Phase 7 — Авторизация и прод
 
-Both write to `data/issues.md` in separate sections (`## 🔎 Auto-detected` and `## 🤖 LLM-flagged`).
+- [ ] `POST /api/v1/auth/login` — реальная аутентификация
+- [ ] Убрать hardcoded session во фронте, вернуть LoginPage
+- [ ] Жёсткий `get_current_user` (401 без заголовков)
+- [ ] `Dockerfile` для фронта (nginx multi-stage), `nginx.conf`
+- [ ] Обновить `docker-compose.yml` сервисом `frontend`
+- [ ] Smoke-чек-лист
+- [ ] **Результат:** прод-сборка, `docker compose up` поднимает всю систему
 
-### Manual Linter run
+## Контракты API
 
-```bash
-# Preview findings without modifying issues.md
-docker compose exec api uv run python scripts/run_linter.py --dry-run
+Все эндпоинты под `/api/v1/`. Заголовки в каждом запросе:
+`X-User-Email`, `X-User-Role`, `X-Business-Unit`, `X-User-Geo`, `X-User-Position`, `Accept-Language`.
 
-# Run all checks and update issues.md
-docker compose exec api uv run python scripts/run_linter.py
+Pydantic-схемы — в `src/llm_wiki/api/v1/schemas.py`. Сверять 1:1 с TS-интерфейсами фронта в `llm-wiki-frontend/src/stores/*.ts` и `src/features/**/*.tsx`.
 
-# Only specific checks
-docker compose exec api uv run python scripts/run_linter.py --checks dead_link,orphan_page
+## Тесты
 
-# JSON output for CI
-docker compose exec api uv run python scripts/run_linter.py --json
-
-# Run against a fixture wiki
-docker compose exec api uv run python scripts/run_linter.py \
-  --wiki-dir tests/fixtures/sample_wikis/dead_links/ --dry-run
-```
-
-### Manual Auditor run
-
-```bash
-# Sync mode (immediate, for debugging) — DEFAULT
-docker compose exec api uv run python scripts/run_auditor.py --sync --sample 10 --dry-run
-
-# Specific pages
-docker compose exec api uv run python scripts/run_auditor.py --sync --slugs llm,agents
-
-# Production batch run (OpenAI Batch API, -50% cost, ~24 h)
-docker compose exec api uv run python scripts/run_auditor.py --batch
-
-# Guard against expensive accidental runs
-docker compose exec api uv run python scripts/run_auditor.py --sync --max-cost-usd 0.50
-```
-
-### API endpoints
-
-```bash
-# Run Linter via API (synchronous, < 1 s)
-curl -X POST http://localhost:8000/api/v1/lint/run
-curl -X POST http://localhost:8000/api/v1/lint/run?dry_run=true
-
-# Enqueue Auditor via API (async Celery task)
-curl -X POST http://localhost:8000/api/v1/audit/run \
-  -H "Content-Type: application/json" \
-  -d '{"mode": "sync", "dry_run": true, "sample": 5}'
-
-# Poll Auditor task status
-curl http://localhost:8000/api/v1/audit/{task_id}
-```
-
-## Q&A endpoint
-
-Ask the wiki a question and get a synthesised answer with citations:
-
-```bash
-curl -X POST http://localhost:8000/api/v1/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Что такое LoRA?", "top_k": 5}'
-```
-
-Or use the Streamlit UI: open http://localhost:8501 and click **❓ Спросить** in the sidebar.
-
-The AnswerAgent never invents facts — if the wiki does not cover the question, the response has `confidence: "low"` and an empty `sources` list. All citations in the answer body are validated against the retrieved sources; hallucinated `[[slug]]` references are stripped automatically.
-
-**Retrieval (LW-20.1):** AnswerAgent retrieves over chunked page bodies (`chunks` collection) so that questions answered deep in a page body are found even when the page title does not match the query. The heading-only path (LW-20) is kept as a backward-compatible fallback when the chunks collection is empty.
-
-## Logging
-
-All services emit structured JSON logs to stdout. View them with:
-
-```bash
-docker compose logs -f api | jq
-docker compose logs -f worker | jq
-```
-
-Every HTTP request gets a `request_id` (returned in the `X-Request-ID` response header
-and present on every log line for that request). Every Celery file-ingestion task
-auto-binds `file_id` to the log context, so filtering all logs for one file is trivial:
-
-```bash
-docker compose logs worker | jq 'select(.file_id == "01HXYZ...")'
-```
-
-Log level controlled by the `LOG_LEVEL` env var (default `INFO`).
-
-## Cost Tracking
-
-Every LLM call is logged to `data/usage.log` as JSON-lines with tokens and USD cost.
-View aggregate stats: `GET /api/v1/stats`.
-
-## Rate limiting & budget (LW-19)
-
-Configure in `.env`:
-
-| Variable | Default | Effect |
-|---|---|---|
-| `INGESTION_ENABLED` | `true` | Kill switch — set `false` to return 503 on `POST /files` |
-| `INGESTION_RATE_LIMIT_PER_MIN` | `10` | Max uploads per minute per source IP |
-| `ASK_RATE_LIMIT_PER_MIN` | `30` | Max `/ask` requests per minute per source IP |
-| `DAILY_COST_LIMIT_USD` | _(empty = disabled)_ | Hard cap on total LLM spend per UTC day |
-| `DAILY_TOKEN_LIMIT` | _(empty = disabled)_ | Hard cap on total tokens per UTC day |
-
-When a daily limit is exceeded, `LLMClient` raises `BudgetExceeded` before any API call is made. The ingestion task transitions to `FAILED`. A structured log event `budget_exceeded` at level `error` is emitted — this is the alerting mechanism until Slack/webhook integration is added.
-
-`POST /files` also checks the budget upfront and returns 503 immediately if the limit is already crossed, so no Celery task is enqueued.
-
-Rate limiting is in-memory per API replica — sufficient for single-container deploys. For horizontal scaling, swap `InMemoryRateLimiter` for a Redis-backed implementation (planned as LW-19.1).
+`uv run pytest tests/`. На каждую фазу — свой подкаталог `tests/unit/api/v1/test_{phase}.py`.
