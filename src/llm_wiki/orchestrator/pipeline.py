@@ -17,11 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from llm_wiki.agents.search import SearchAgent
 from llm_wiki.agents.writer import WikiPage, WriterAgent
 from llm_wiki.config import settings
+from llm_wiki.llm.chunk_store import ChunkStore
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 from llm_wiki.parsers.markdown import parse_markdown_file
 from llm_wiki.parsers.pdf import parse_pdf
 from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
+from llm_wiki.storage.chunk_sync import sync_chunks_for_page
 from llm_wiki.storage.filesystem import atomic_write
 from llm_wiki.storage.index import IndexStorage
 from llm_wiki.utils.backlinks import extract_outgoing_links
@@ -105,6 +107,9 @@ async def process_file(file_id: str) -> None:
             embedding_store = EmbeddingStore(
                 chroma_path=settings.chroma_dir, llm_client=llm
             )
+            chunk_store = ChunkStore(
+                chroma_path=settings.chroma_dir, llm_client=llm
+            )
             index_storage = IndexStorage(
                 settings.index_path, embedding_store=embedding_store
             )
@@ -132,6 +137,13 @@ async def process_file(file_id: str) -> None:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
                     _save_wiki_page(settings.wiki_dir, page)
+                    sync_chunks_for_page(
+                        chunk_store=chunk_store,
+                        slug=page.slug,
+                        title=page.title,
+                        content=page.content,
+                        file_id=file_id,
+                    )
                     index_storage.add_page(page.slug, "General", title=page.title)
                     created_pages.append(page.slug)
                     # Synchronise backlinks: new page has no previous outgoing links
@@ -154,6 +166,13 @@ async def process_file(file_id: str) -> None:
                         pages_out = await writer.update_pages(file_text, existing, file_id)
                         for p in pages_out:
                             _save_wiki_page(settings.wiki_dir, p)
+                            sync_chunks_for_page(
+                                chunk_store=chunk_store,
+                                slug=p.slug,
+                                title=p.title,
+                                content=p.content,
+                                file_id=file_id,
+                            )
                             updated_pages.append(p.slug)
                             # Synchronise backlinks using pre-write outgoing links as baseline
                             sync_backlinks_for_page(
@@ -167,6 +186,13 @@ async def process_file(file_id: str) -> None:
                         # Search found headings but files are absent — create new
                         page = await writer.create_page(file_text, file_id)
                         _save_wiki_page(settings.wiki_dir, page)
+                        sync_chunks_for_page(
+                            chunk_store=chunk_store,
+                            slug=page.slug,
+                            title=page.title,
+                            content=page.content,
+                            file_id=file_id,
+                        )
                         index_storage.add_page(page.slug, "General", title=page.title)
                         created_pages.append(page.slug)
                         # Synchronise backlinks: new page has no previous outgoing links

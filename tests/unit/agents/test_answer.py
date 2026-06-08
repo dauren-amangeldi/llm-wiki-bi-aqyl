@@ -1,4 +1,4 @@
-"""Unit tests for AnswerAgent (LW-20 + LW-20 addendum)."""
+"""Unit tests for AnswerAgent (LW-20 + LW-20 addendum + LW-20.1)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from llm_wiki.agents.answer import NO_LLM_THRESHOLD, AnswerAgent
+from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 
@@ -218,3 +219,105 @@ async def test_kazakh_refusal_message() -> None:
         assert "уикиде" in result.answer.lower() or "дерек" in result.answer.lower()
     finally:
         cfg_mod.settings.wiki_language = original
+
+
+# ---------------------------------------------------------------------------
+# LW-20.1: ChunkStore path tests
+# ---------------------------------------------------------------------------
+
+
+def _mock_chunk_store(hits: list[ChunkHit]) -> ChunkStore:
+    mock = MagicMock(spec=ChunkStore)
+    mock.query.return_value = hits
+    return mock  # type: ignore[return-value]
+
+
+async def test_answer_uses_chunk_text_in_prompt(tmp_path: Path) -> None:
+    """When chunk_store is provided, chunk.text is sent to the LLM (not re-read from disk)."""
+    chunk_text = "Adam optimizer uses adaptive learning rates."
+    chunks = [
+        ChunkHit(
+            slug="training",
+            title="Training",
+            section="Optimizers",
+            chunk_idx=0,
+            text=chunk_text,
+            similarity=0.88,
+        )
+    ]
+    llm = _mock_llm(
+        {"answer": "We use [[training]] Adam.", "confidence": "high", "used_sources": ["training"]}
+    )
+    agent = AnswerAgent(
+        llm, _mock_store([]), wiki_dir=tmp_path, chunk_store=_mock_chunk_store(chunks)
+    )
+
+    result = await agent.answer("what optimizer do we use?", top_k=5)
+
+    assert result.confidence == "high"
+    # Verify the chunk text was passed through to the LLM prompt
+    call_kwargs = llm.load_prompt.call_args.kwargs  # type: ignore[union-attr]
+    assert chunk_text in call_kwargs["sources_block"]
+    # No disk access should have happened (wiki_dir is empty tmp_path)
+    assert result.sources[0].slug == "training"
+
+
+async def test_answer_chunk_path_refusal_on_empty_store(tmp_path: Path) -> None:
+    """ChunkStore path refuses without calling LLM when store is empty."""
+    llm = _mock_llm({"answer": "x", "confidence": "high", "used_sources": []})
+    agent = AnswerAgent(
+        llm, _mock_store([]), wiki_dir=tmp_path, chunk_store=_mock_chunk_store([])
+    )
+    result = await agent.answer("any question?", top_k=5)
+    assert result.confidence == "low"
+    assert result.cost_usd == 0.0
+    llm.complete.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_answer_chunk_path_deduplicates_slugs_in_sources(tmp_path: Path) -> None:
+    """Multiple chunks from the same slug → one SearchHit (highest similarity) in sources."""
+    chunks = [
+        ChunkHit(slug="wiki", title="Wiki", section="A", chunk_idx=0, text="text A", similarity=0.90),
+        ChunkHit(slug="wiki", title="Wiki", section="B", chunk_idx=1, text="text B", similarity=0.75),
+        ChunkHit(slug="other", title="Other", section="", chunk_idx=0, text="other", similarity=0.60),
+    ]
+    llm = _mock_llm(
+        {"answer": "See [[wiki]].", "confidence": "high", "used_sources": ["wiki"]}
+    )
+    agent = AnswerAgent(
+        llm, _mock_store([]), wiki_dir=tmp_path, chunk_store=_mock_chunk_store(chunks)
+    )
+    result = await agent.answer("question", top_k=5)
+
+    wiki_sources = [s for s in result.sources if s.slug == "wiki"]
+    assert len(wiki_sources) == 1, "wiki should appear once in sources after dedup"
+    assert wiki_sources[0].similarity == 0.90, "should keep highest-similarity chunk"
+
+
+async def test_answer_chunk_path_does_not_use_keyword_fallback(tmp_path: Path) -> None:
+    """When chunk_store is active, keyword fallback is never invoked."""
+    # wiki dir has a page but we should NOT reach _keyword_fallback
+    wiki = _wiki(tmp_path, {"training": "# Training\nAdam optimizer used here."})
+    # ChunkStore returns nothing (simulates empty collection)
+    llm = _mock_llm({"answer": "x", "confidence": "high", "used_sources": []})
+    agent = AnswerAgent(
+        llm, _mock_store([]), wiki_dir=wiki, chunk_store=_mock_chunk_store([])
+    )
+    result = await agent.answer("what optimizer?", top_k=5)
+    # Should refuse without LLM, no keyword fallback rescue
+    assert result.confidence == "low"
+    llm.complete.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_answer_heading_path_still_works_without_chunk_store(tmp_path: Path) -> None:
+    """Existing heading-based path is unchanged when chunk_store=None."""
+    wiki = _wiki(tmp_path, {"lora": "# LoRA\n\nLoRA is low-rank adaptation."})
+    hits = [SearchHit(slug="lora", title="LoRA", section="ml", similarity=0.92)]
+    llm = _mock_llm(
+        {"answer": "LoRA fine-tunes via [[lora]].", "confidence": "high", "used_sources": ["lora"]}
+    )
+    # No chunk_store → old heading path
+    agent = AnswerAgent(llm, _mock_store(hits), wiki_dir=wiki)
+    result = await agent.answer("What is LoRA?", top_k=5)
+    assert result.confidence == "high"
+    assert result.sources[0].slug == "lora"

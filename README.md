@@ -115,8 +115,9 @@ Weekly Celery Beat (Mon 03:00 UTC):
 | LW-16 | GET /wiki/{slug}, /log, /stats + Streamlit deep-linking | ✅ Done |
 | LW-17 | Observability (structlog JSON logs + request_id) — OTel deferred | ✅ Done |
 | LW-18 | Runbook | 🔲 |
-| LW-20 | POST /api/v1/ask + Streamlit Q&A (AnswerAgent) | ✅ Done |
 | LW-19 | Rate limiting + budget alerts | 🔲 |
+| LW-20 | POST /api/v1/ask + Streamlit Q&A (AnswerAgent) | ✅ Done |
+| LW-20.1 | Chunk-level retrieval for AnswerAgent (ChunkStore) | ✅ Done |
 
 ## API Docs
 
@@ -124,18 +125,33 @@ Available at http://localhost:8000/docs after starting the stack.
 
 ## Embedding Index
 
-Wiki headings are indexed into ChromaDB (`data/chroma/`) using `text-embedding-3-small`.
-The Search Agent pre-filters candidates via cosine similarity before LLM re-ranking.
+Two ChromaDB collections live in `data/chroma/`:
 
-**Rebuild the index** (after first import or after changing `EMBEDDING_MODEL`):
+| Collection | One entry per… | Used by | Purpose |
+|---|---|---|---|
+| `headings` | Page title | `SearchAgent`, `IndexStorage` | Classify *which pages* a new document relates to |
+| `chunks` | ~500-token body fragment | `AnswerAgent` | Retrieve *which paragraph* answers a user question |
+
+They are intentionally separate: title embeddings and body-chunk embeddings are not
+comparable (different text length, different semantics), and the SearchAgent needs
+page-level IDs while the AnswerAgent needs passage-level text.
+
+**Rebuild the headings index** (after first import or model change):
 ```bash
 docker compose exec api uv run python scripts/reindex.py
-# Preview without writing:
 docker compose exec api uv run python scripts/reindex.py --dry-run
 ```
 
-> **Note:** If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, the service will refuse
-> to start until you run `reindex.py` to rebuild the collection with the new model.
+**Rebuild the chunks index** (LW-20.1 — run on first deploy and after bulk wiki edits):
+```bash
+docker compose exec api uv run python scripts/reindex_chunks.py
+docker compose exec api uv run python scripts/reindex_chunks.py --dry-run
+```
+
+> **Note:** If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, run *both*
+> `reindex.py` and `reindex_chunks.py` to rebuild both collections.
+>
+> See [docs/lw-20.1-chunks.md](docs/lw-20.1-chunks.md) for the architectural rationale.
 
 ## Wiki Quality System (LW-14 + LW-15)
 
@@ -214,7 +230,7 @@ Or use the Streamlit UI: open http://localhost:8501 and click **❓ Спроси
 
 The AnswerAgent never invents facts — if the wiki does not cover the question, the response has `confidence: "low"` and an empty `sources` list. All citations in the answer body are validated against the retrieved sources; hallucinated `[[slug]]` references are stripped automatically.
 
-**Known limitation (v1):** retrieval uses heading-only embeddings (LW-11) plus a lightweight keyword fallback over full page bodies (with Russian/Kazakh stop-word filtering and prefix matching). Questions whose answer lives in the body of a page with an unrelated title may still miss. A chunk-level RAG upgrade is tracked as LW-20.1.
+**Retrieval (LW-20.1):** AnswerAgent retrieves over chunked page bodies (`chunks` collection) so that questions answered deep in a page body are found even when the page title does not match the query. The heading-only path (LW-20) is kept as a backward-compatible fallback when the chunks collection is empty.
 
 ## Logging
 

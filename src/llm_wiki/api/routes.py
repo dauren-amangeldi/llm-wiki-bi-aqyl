@@ -586,13 +586,15 @@ async def ask_question(body: AskRequest) -> AskResponse:
     to a shared client behind a dependency injector later.
     """
     from llm_wiki.agents.answer import AnswerAgent
+    from llm_wiki.llm.chunk_store import ChunkStore
     from llm_wiki.llm.client import LLMClient
     from llm_wiki.llm.embeddings import EmbeddingStore
 
     llm = LLMClient()
     try:
-        store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
-        agent = AnswerAgent(llm, store)
+        embedding_store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        agent = AnswerAgent(llm, embedding_store, chunk_store=chunk_store)
         result = await agent.answer(question=body.question, top_k=body.top_k)
     finally:
         await llm.aclose()

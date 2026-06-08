@@ -1,19 +1,26 @@
-"""AnswerAgent — RAG-style Q&A over the wiki (LW-20).
+"""AnswerAgent — RAG-style Q&A over the wiki (LW-20 / LW-20.1).
 
-Pipeline:
-    1. Embedding retrieval (heading-only collection from LW-11).
-    2. If top_1 similarity < KEYWORD_FALLBACK_THRESHOLD, run a lightweight
-       keyword scan over full page bodies and merge candidates.
-    3. Load full page contents for the top-K survivors, truncate each to
-       MAX_PAGE_CHARS to keep the LLM context bounded.
-    4. Send to the LLM with a strict no-hallucination prompt.
-    5. Parse the JSON response, validate cited slugs against the provided
-       sources, return the structured answer + cost.
+Two retrieval paths (selected by constructor argument):
 
-Refusal modes (no LLM call made — saves money):
-    - top_k retrieval empty (ChromaDB has zero entries).
-    - All retrieval candidates below NO_LLM_THRESHOLD (e.g., 0.30) AND the
-      keyword fallback also finds nothing.
+ChunkStore path (LW-20.1, default when chunk_store is provided):
+    1. Query ``ChunkStore`` for top-K chunks from page *bodies*.
+    2. Assemble context directly from chunk text (no disk re-read needed).
+    3. Send to LLM with no-hallucination prompt.
+    4. Parse JSON, validate slug citations, return AnswerResult.
+
+Heading-only fallback path (LW-20, used when chunk_store=None):
+    1. Embedding retrieval from ``headings`` collection (page titles).
+    2. Keyword fallback when best similarity < KEYWORD_FALLBACK_THRESHOLD.
+    3. Load full page bodies from disk, truncate, assemble context.
+    4–5. Same as above.
+
+The chunk path has much better recall for questions whose answer is buried
+in a page body with an unrelated title.  The heading path is kept as a
+backward-compatible fallback (e.g., before reindex_chunks.py is first run).
+
+Refusal modes (no LLM call — saves money):
+    - ChunkStore path: collection is empty, or all chunks below NO_LLM_THRESHOLD.
+    - Heading path: retrieval empty, or all below threshold AND keyword fails.
 """
 
 from __future__ import annotations
@@ -28,7 +35,8 @@ import structlog
 
 from llm_wiki.agents.base import BaseAgent
 from llm_wiki.config import settings
-from llm_wiki.llm.client import LLMClient, LLMUsage
+from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
+from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 
 logger = structlog.get_logger(__name__)
@@ -80,10 +88,12 @@ class AnswerAgent(BaseAgent):
         llm_client: LLMClient,
         embedding_store: EmbeddingStore,
         wiki_dir: Path | None = None,
+        chunk_store: ChunkStore | None = None,
     ) -> None:
         self._llm = llm_client
         self._store = embedding_store
         self._wiki_dir = wiki_dir if wiki_dir is not None else settings.wiki_dir
+        self._chunk_store = chunk_store
 
     async def run(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
         raise NotImplementedError("Call answer() directly")
@@ -98,20 +108,147 @@ class AnswerAgent(BaseAgent):
 
         Args:
             question: User question, 3–1000 chars (validated upstream).
-            top_k: Maximum pages to feed the LLM (1–10).
+            top_k: Maximum pages (heading path) or chunks (chunk path) to consider.
             file_id: Correlation ID; default ``"ask"`` since there is no source file.
 
         Returns:
             ``AnswerResult`` with answer text, confidence, used sources, and total cost.
         """
-        # ── Stage 1: embedding retrieval ─────────────────────────────────────
+        if self._chunk_store is not None:
+            return await self._answer_via_chunks(question, file_id=file_id)
+        return await self._answer_via_headings(question, top_k=top_k, file_id=file_id)
+
+    # ── Chunk-based retrieval path (LW-20.1) ─────────────────────────────────
+
+    async def _answer_via_chunks(
+        self, question: str, file_id: str
+    ) -> AnswerResult:
+        """RAG pipeline using the ``chunks`` collection (full page bodies)."""
+        assert self._chunk_store is not None  # guarded by caller
+
+        # Stage 1: chunk retrieval
+        try:
+            chunk_hits = self._chunk_store.query(
+                question,
+                top_k=settings.chunk_retrieval_top_k,
+                file_id=file_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ask_chunk_query_failed", error=str(exc))
+            chunk_hits = []
+
+        # Refusal: nothing usable
+        best_sim = max((c.similarity for c in chunk_hits), default=0.0)
+        if not chunk_hits or best_sim < NO_LLM_THRESHOLD:
+            logger.info(
+                "ask_refused_no_chunks",
+                question_len=len(question),
+                best_sim=best_sim,
+            )
+            return AnswerResult(
+                answer=self._no_data_message(),
+                confidence="low",
+                sources=[],
+                cost_usd=0.0,
+            )
+
+        # Stage 2: assemble context directly from chunk text (no disk re-read)
+        total_chars = 0
+        loaded_chunks: list[ChunkHit] = []
+        for chunk in chunk_hits:
+            if total_chars + len(chunk.text) > MAX_TOTAL_CONTEXT_CHARS:
+                break
+            loaded_chunks.append(chunk)
+            total_chars += len(chunk.text)
+
+        if not loaded_chunks:
+            return AnswerResult(
+                answer=self._no_data_message(),
+                confidence="low",
+                sources=[],
+                cost_usd=0.0,
+            )
+
+        # Multiple chunks from the same page are intentionally kept — they
+        # increase the signal that the page is relevant.
+        section_suffix = lambda c: f" §{c.section}" if c.section else ""  # noqa: E731
+        sources_block = "\n\n---\n\n".join(
+            f"## Source: [[{c.slug}]]{section_suffix(c)} (similarity={c.similarity:.2f})\n\n{c.text}"
+            for c in loaded_chunks
+        )
+
+        prompt = self._llm.load_prompt(
+            "answer",
+            language=settings.wiki_language,
+            question=question,
+            sources_block=sources_block,
+        )
+
+        # Stage 3: LLM call
+        text, usage = await self._llm.complete(
+            prompt=prompt,
+            system="You are a precise wiki Q&A assistant. Return only valid JSON.",
+            file_id=file_id,
+            agent_type="answer",
+            response_format="json",
+        )
+
+        # Stage 4: parse + validate
+        provided_slugs = {c.slug for c in loaded_chunks}
+        parsed = self._parse_response(text, provided_slugs)
+        used_slugs = set(parsed["used_sources"])
+
+        # Map ChunkHit → SearchHit for API compatibility; deduplicate by slug,
+        # keeping the highest-similarity chunk per page.
+        best_by_slug: dict[str, ChunkHit] = {}
+        for chunk in loaded_chunks:
+            existing = best_by_slug.get(chunk.slug)
+            if existing is None or chunk.similarity > existing.similarity:
+                best_by_slug[chunk.slug] = chunk
+
+        used_sources: list[SearchHit] = [
+            SearchHit(slug=c.slug, title=c.title, section=c.section, similarity=c.similarity)
+            for slug, c in best_by_slug.items()
+            if slug in used_slugs
+        ]
+        if not used_sources:
+            # Transparency fallback — show top 3 unique pages
+            seen: set[str] = set()
+            for chunk in loaded_chunks:
+                if chunk.slug not in seen:
+                    used_sources.append(
+                        SearchHit(
+                            slug=chunk.slug,
+                            title=chunk.title,
+                            section=chunk.section,
+                            similarity=chunk.similarity,
+                        )
+                    )
+                    seen.add(chunk.slug)
+                    if len(used_sources) == 3:
+                        break
+
+        return AnswerResult(
+            answer=parsed["answer"],
+            confidence=parsed["confidence"],
+            sources=used_sources,
+            cost_usd=usage.cost_usd,
+        )
+
+    # ── Heading-based retrieval path (LW-20, fallback) ───────────────────────
+
+    async def _answer_via_headings(
+        self, question: str, top_k: int, file_id: str
+    ) -> AnswerResult:
+        """Original RAG pipeline using the ``headings`` collection (page titles)."""
+        # Stage 1: embedding retrieval
         try:
             candidates = self._store.query(question, top_k=top_k, file_id=file_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ask_embedding_failed", error=str(exc))
             candidates = []
 
-        # ── Stage 2: keyword fallback if recall looks weak ───────────────────
+        # Stage 2: keyword fallback if recall looks weak
         best_sim = max((c.similarity for c in candidates), default=0.0)
         if best_sim < KEYWORD_FALLBACK_THRESHOLD:
             extra = self._keyword_fallback(
@@ -119,7 +256,7 @@ class AnswerAgent(BaseAgent):
             )
             candidates = (candidates + extra)[:top_k]
 
-        # ── Refusal: nothing usable — do NOT call the LLM ───────────────────
+        # Refusal
         best_sim_after = max((c.similarity for c in candidates), default=0.0)
         has_keyword_hit = any(c.similarity == 1.0 for c in candidates)
         if not candidates or (best_sim_after < NO_LLM_THRESHOLD and not has_keyword_hit):
@@ -135,7 +272,7 @@ class AnswerAgent(BaseAgent):
                 cost_usd=0.0,
             )
 
-        # ── Stage 3: load full page bodies and assemble context ──────────────
+        # Stage 3: load full page bodies
         loaded: list[tuple[SearchHit, str]] = []
         total_chars = 0
         for hit in candidates:
@@ -168,7 +305,7 @@ class AnswerAgent(BaseAgent):
             sources_block=sources_block,
         )
 
-        # ── Stage 4: LLM call ─────────────────────────────────────────────────
+        # Stage 4: LLM call
         text, usage = await self._llm.complete(
             prompt=prompt,
             system="You are a precise wiki Q&A assistant. Return only valid JSON.",
@@ -177,14 +314,12 @@ class AnswerAgent(BaseAgent):
             response_format="json",
         )
 
-        # ── Stage 5: parse and validate ───────────────────────────────────────
+        # Stage 5: parse and validate
         provided_slugs = {hit.slug for hit, _ in loaded}
         parsed = self._parse_response(text, provided_slugs)
         used_slugs = set(parsed["used_sources"])
 
         used_sources = [hit for hit, _ in loaded if hit.slug in used_slugs]
-        # Transparency fallback: if the LLM reported no used sources, surface
-        # the top retrieval hits anyway so the caller can show them.
         if not used_sources:
             used_sources = [hit for hit, _ in loaded[:3]]
 

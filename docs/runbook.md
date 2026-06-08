@@ -22,9 +22,29 @@ remove the entry from `data/index.md`.
 
 ## Reindexing ChromaDB
 
+Two separate scripts manage the two ChromaDB collections:
+
+**`headings` collection** — page titles, used by SearchAgent and IndexStorage:
 ```bash
 docker compose exec api uv run python scripts/reindex.py
+# Preview without writing:
+docker compose exec api uv run python scripts/reindex.py --dry-run
 ```
+
+**`chunks` collection** — page body fragments, used by AnswerAgent (LW-20.1):
+```bash
+docker compose exec api uv run python scripts/reindex_chunks.py
+# Preview without writing:
+docker compose exec api uv run python scripts/reindex_chunks.py --dry-run
+```
+
+Run `reindex_chunks.py`:
+- On first deploy (if wiki pages existed before LW-20.1 was deployed).
+- After changing `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`.
+- After a bulk import that bypassed the normal ingestion pipeline.
+
+The ingestion pipeline auto-syncs chunks for each page it writes, so routine
+use does not require manual reindexing.
 
 ## High LLM Cost Alert
 

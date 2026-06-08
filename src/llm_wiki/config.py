@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 100
     embedding_dimensions: int = 1536
 
+    # --- Chunk store (LW-20.1) ---
+    chunk_max_chars: int = 2000        # ~500 tokens; per-chunk context window
+    chunk_overlap_chars: int = 200     # overlap between consecutive chunks in a long section
+    chunk_retrieval_top_k: int = 8     # how many chunks AnswerAgent pulls from Chroma
+
     # --- Search tuning ---
     search_top_k: int = 20
     search_similarity_threshold: float = 0.3
