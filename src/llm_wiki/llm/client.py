@@ -106,25 +106,51 @@ class LLMClient:
 
         Must be called when the LLMClient is no longer needed, **within the
         same event loop** that was active when ``complete()`` was first called.
-        Calling this prevents the ``RuntimeError: Event loop is closed`` warning
-        that appears when GC later tries to clean up an open httpx.AsyncClient
-        on a dead loop.
+
+        We snapshot the event loop's task set BEFORE calling the SDK's
+        ``aclose()`` and gather only tasks that appeared *during* that call —
+        these are the httpx fire-and-forget TLS-shutdown / pool-cleanup tasks
+        we actually want to drain.
+
+        Gathering *all* pending tasks (the previous behaviour) is safe under
+        ``asyncio.Runner`` (Celery), where the loop runs a single coroutine,
+        but **deadlocks under FastAPI/uvicorn**, where ``asyncio.all_tasks()``
+        includes the long-lived server task and other in-flight request
+        handlers — waiting on those never returns and the HTTP response never
+        reaches the client.
         """
+        loop = asyncio.get_running_loop()
+
+        # Snapshot tasks that exist BEFORE teardown — uvicorn server task,
+        # other request handlers, lifespan tasks, etc. We must NOT wait on
+        # these; they belong to the process, not to this LLMClient instance.
+        pre_existing: set[asyncio.Task[Any]] = set(asyncio.all_tasks(loop))
+
         close = getattr(self._client, "aclose", None)
         if callable(close):
             await close()
 
-        # httpx spawns fire-and-forget asyncio.Tasks to tear down TLS streams
-        # and clean up the connection pool.  If we return now, asyncio.Runner
-        # will close the event loop before those tasks finish, producing
-        # "RuntimeError: Event loop is closed".  Gather them explicitly.
-        loop = asyncio.get_running_loop()
-        pending = [
-            t for t in asyncio.all_tasks(loop)
-            if t is not asyncio.current_task() and not t.done()
+        # Only the diff: tasks spawned by httpx during its teardown (TLS
+        # stream close, connection-pool drain, etc.).
+        current = asyncio.current_task()
+        new_tasks = [
+            t
+            for t in asyncio.all_tasks(loop)
+            if t not in pre_existing and t is not current and not t.done()
         ]
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if new_tasks:
+            # Bounded wait — if a cleanup task is somehow wedged, we'd rather
+            # leak it than hang the caller. 2 s is ample for local TLS teardown.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*new_tasks, return_exceptions=True),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "llm_aclose_cleanup_timeout",
+                    stuck_tasks=len(new_tasks),
+                )
 
     def embed(self, texts: list[str], file_id: str = "") -> list[list[float]]:
         """Generate embeddings for *texts* using the OpenAI embeddings API.

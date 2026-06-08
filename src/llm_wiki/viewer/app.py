@@ -503,17 +503,33 @@ elif nav == "ask":
 
     if st.button(_UI["btn_ask"], type="primary", disabled=not question.strip()):
         with st.spinner(_UI["thinking"]):
+            data: dict | None = None
             try:
                 resp = httpx.post(
                     f"{API_BASE}/api/v1/ask",
                     json={"question": question.strip(), "top_k": top_k},
-                    timeout=120.0,
+                    # connect/write timeouts are short; read is generous because
+                    # AnswerAgent may embed + call LLM (up to 60 s per attempt,
+                    # up to 3 retries on 429/5xx) before it returns.
+                    timeout=httpx.Timeout(connect=5.0, read=90.0, write=10.0, pool=5.0),
                 )
                 resp.raise_for_status()
-                data: dict | None = resp.json()
-            except httpx.HTTPError as exc:
-                st.error(f"Request failed: {exc}")
-                data = None
+                data = resp.json()
+            except httpx.ReadTimeout:
+                st.error(
+                    "Сервер не успел ответить за 90 секунд. "
+                    "Попробуйте уменьшить top_k или повторите запрос."
+                )
+                st.stop()
+            except httpx.HTTPStatusError as exc:
+                st.error(
+                    f"Ошибка API ({exc.response.status_code}): "
+                    f"{exc.response.text[:300]}"
+                )
+                st.stop()
+            except httpx.RequestError as exc:
+                st.error(f"Не удалось подключиться к API: {exc}")
+                st.stop()
 
         if data:
             confidence_badges: dict[str, str] = {

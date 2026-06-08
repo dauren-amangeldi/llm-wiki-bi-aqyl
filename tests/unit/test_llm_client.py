@@ -309,3 +309,27 @@ async def test_aclose_is_idempotent(tmp_path: Path) -> None:
     client._client.aclose = AsyncMock()
     await client.aclose()
     await client.aclose()  # second call must not raise
+
+
+async def test_aclose_does_not_wait_on_unrelated_tasks(tmp_path: Path) -> None:
+    """aclose() must NOT wait on tasks it did not spawn.
+
+    Reproduces the FastAPI/uvicorn bug: a long-lived task (simulating the
+    uvicorn server task) sits on the event loop while a request handler
+    calls llm.aclose(). The handler must return promptly — not block until
+    the server task finishes.
+    """
+    client = _make_client(tmp_path)
+    client._client.aclose = AsyncMock()
+
+    # Simulate a "uvicorn server"-like task that never completes on its own.
+    long_running = asyncio.create_task(asyncio.sleep(3600))
+    try:
+        # aclose() must return well under the sleep duration.
+        await asyncio.wait_for(client.aclose(), timeout=1.0)
+    finally:
+        long_running.cancel()
+        try:
+            await long_running
+        except asyncio.CancelledError:
+            pass
