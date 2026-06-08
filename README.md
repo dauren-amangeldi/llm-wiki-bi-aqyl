@@ -68,10 +68,13 @@ npm run dev      # :5173, проксирует /api → :8000
 
 ### Phase 3 — Chat (SSE)
 
-- [ ] `POST /api/v1/documents/{id}/ask` (SSE) — RAG-чат по документу из Chroma
-- [ ] `POST /api/v1/cards/{card_id}/ask` — алиас на `/documents/{id}/ask`
-- [ ] Промпт `prompts/chat_document.md`
-- [ ] **Результат:** чат в модалке стримит ответ токенами с цитатами и follow-up'ами
+- [x] `POST /api/v1/documents/{id}/ask` — RAG-чат по документу; JSON (default) + SSE (`?stream=true`)
+- [x] `POST /api/v1/cards/{card_id}/ask` — алиас на `/documents/{id}/ask`
+- [x] Промпт `prompts/chat_document.md` (ru/en/kk, режимы library/expert/advisor)
+- [x] `stream_completion()` в `LLMClient` для инкрементального стриминга токенов
+- [x] `slug_filter` в `ChunkStore.query()` для скоупа чанков на конкретный документ
+- [x] Тесты `tests/unit/api/v1/test_phase3.py` (11 тестов — JSON + SSE + insufficient_evidence)
+- [x] **Результат:** чат в модалке отвечает через `apiFetch` (JSON) + готов к SSE через `useSSEStream`
 
 ### Phase 4 — Search & Advisor (SSE)
 

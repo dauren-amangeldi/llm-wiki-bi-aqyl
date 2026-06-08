@@ -269,7 +269,11 @@ class ChunkStore:
             )
 
     def query(
-        self, text: str, top_k: int = 10, file_id: str = ""
+        self,
+        text: str,
+        top_k: int = 10,
+        file_id: str = "",
+        slug_filter: list[str] | None = None,
     ) -> list[ChunkHit]:
         """Return the *top_k* most similar chunks to *text*.
 
@@ -277,6 +281,9 @@ class ChunkStore:
             text: Query string (e.g. a user question).
             top_k: Maximum number of chunks to return.
             file_id: Correlation ID for embedding usage tracking.
+            slug_filter: If provided, restricts results to chunks whose
+                ``slug`` metadata field is in this list.  Use this to scope
+                retrieval to the wiki pages belonging to a specific document.
 
         Returns:
             List of ``ChunkHit`` sorted by descending similarity.  Empty if
@@ -286,6 +293,12 @@ class ChunkStore:
         if current_count == 0:
             return []
 
+        # Filter out empty/None slugs before building the $in clause
+        valid_slugs = [s for s in (slug_filter or []) if s] if slug_filter else None
+        if slug_filter is not None and not valid_slugs:
+            # Explicit filter requested but list is empty — no matching chunks possible.
+            return []
+
         n = min(top_k, current_count)
         try:
             vectors = self._llm.embed([text], file_id=file_id)
@@ -293,11 +306,16 @@ class ChunkStore:
             logger.warning("chunk_store_query_embed_failed", error=str(exc))
             return []
 
+        where: dict | None = (
+            {"slug": {"$in": valid_slugs}} if valid_slugs else None
+        )
+
         try:
             results = self._col.query(
                 query_embeddings=[vectors[0]],
                 n_results=n,
                 include=["metadatas", "distances", "documents"],  # type: ignore[list-item]
+                **({"where": where} if where else {}),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("chunk_store_query_failed", error=str(exc))

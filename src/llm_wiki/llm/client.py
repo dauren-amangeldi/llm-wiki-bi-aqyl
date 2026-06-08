@@ -7,6 +7,7 @@ Provider is selected by the LLM_PROVIDER env var — never hardcode a provider.
 import asyncio
 import json
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -364,6 +365,52 @@ class LLMClient:
                     await asyncio.sleep(backoff)
 
         raise last_exc or RuntimeError("LLM call failed after retries with no recorded exception")
+
+    # ------------------------------------------------------------------
+    # Streaming completion (Phase 3 chat)
+    # ------------------------------------------------------------------
+
+    async def stream_completion(
+        self,
+        system: str,
+        prompt: str,
+    ) -> AsyncGenerator[str, None]:
+        """Stream completion tokens as an async generator.
+
+        OpenAI / Ollama: real incremental streaming via the SDK's stream API.
+        Anthropic: falls back to a single blocking call, yields the full text
+        in one chunk (Anthropic streaming would require a separate method).
+
+        Usage is NOT tracked here (stream makes token counts unavailable mid-
+        stream); callers that need cost accounting should use ``complete()``.
+
+        Args:
+            system: System message content.
+            prompt: User message content.
+
+        Yields:
+            Individual text delta strings as they arrive from the model.
+        """
+        if self._provider in ("openai", "ollama"):
+            stream = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                stream=True,
+                timeout=120,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+        else:
+            # Anthropic: simulate streaming — yield the full response at once
+            text, _ = await self.complete(
+                prompt, system, file_id="", agent_type="answer"
+            )
+            yield text
 
     # ------------------------------------------------------------------
     # Provider dispatch
