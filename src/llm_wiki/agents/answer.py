@@ -29,7 +29,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
@@ -38,6 +38,9 @@ from llm_wiki.config import settings
 from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
+
+if TYPE_CHECKING:
+    from llm_wiki.storage.metadata import FileRecord
 
 logger = structlog.get_logger(__name__)
 
@@ -117,6 +120,107 @@ class AnswerAgent(BaseAgent):
         if self._chunk_store is not None:
             return await self._answer_via_chunks(question, file_id=file_id)
         return await self._answer_via_headings(question, top_k=top_k, file_id=file_id)
+
+    async def answer_for_document(
+        self,
+        question: str,
+        document: FileRecord,
+        language: str = "ru",
+        file_id: str = "ask",
+    ) -> AnswerResult:
+        """Ask scoped to a specific uploaded document.
+
+        Loads the wiki pages this document created/updated and feeds them
+        directly to the LLM as guaranteed context — no similarity threshold,
+        no refusal path. If the wiki content exists, we answer from it.
+
+        Args:
+            question: User question.
+            document: FileRecord for the uploaded source file.
+            language: Response language (``ru``, ``en``, or ``kk``).
+            file_id: Correlation ID for usage logging.
+
+        Returns:
+            ``AnswerResult`` with answer text, confidence, sources, and cost.
+        """
+        slugs = list(
+            dict.fromkeys(
+                list(document.created_pages or []) + list(document.updated_pages or [])
+            )
+        )
+
+        loaded: list[tuple[str, str]] = []
+        total = 0
+        for slug in slugs:
+            body = self._load_page_body(slug)
+            if not body:
+                continue
+            truncated = body[:MAX_PAGE_CHARS]
+            if total + len(truncated) > MAX_TOTAL_CONTEXT_CHARS:
+                break
+            loaded.append((slug, truncated))
+            total += len(truncated)
+
+        if not loaded:
+            msg = {
+                "ru": (
+                    f"Файл ещё обрабатывается или wiki-страница не создана "
+                    f"(статус: {document.status})."
+                ),
+                "kk": (
+                    f"Файл әлі өңделуде немесе уики-беті жасалмаған "
+                    f"(статус: {document.status})."
+                ),
+                "en": (
+                    f"The file is still being processed or no wiki page was created yet "
+                    f"(status: {document.status})."
+                ),
+            }.get(
+                language,
+                (
+                    f"The file is still being processed or no wiki page was created yet "
+                    f"(status: {document.status})."
+                ),
+            )
+            return AnswerResult(answer=msg, confidence="low", sources=[], cost_usd=0.0)
+
+        sources_block = "\n\n---\n\n".join(
+            f"## Source: [[{slug}]]\n\n{body}" for slug, body in loaded
+        )
+        prompt = self._llm.load_prompt(
+            "answer",
+            language=language,
+            question=question,
+            sources_block=sources_block,
+        )
+        text, usage = await self._llm.complete(
+            prompt=prompt,
+            system="You are a precise wiki Q&A assistant. Return only valid JSON.",
+            file_id=file_id,
+            agent_type="answer",
+            response_format="json",
+        )
+
+        provided_slugs = {slug for slug, _ in loaded}
+        parsed = self._parse_response(text, provided_slugs)
+        used = [
+            SearchHit(slug=s, title=s, section="", similarity=1.0)
+            for s in parsed["used_sources"]
+        ] or [
+            SearchHit(slug=s, title=s, section="", similarity=1.0)
+            for s, _ in loaded[:3]
+        ]
+
+        confidence: Literal["high", "medium", "low"] = parsed["confidence"]
+        if confidence == "low":
+            confidence = "medium"
+
+        return AnswerResult(
+            answer=parsed["answer"],
+            confidence=confidence,
+            sources=used,
+            cost_usd=usage.cost_usd,
+        )
 
     # ── Chunk-based retrieval path (LW-20.1) ─────────────────────────────────
 

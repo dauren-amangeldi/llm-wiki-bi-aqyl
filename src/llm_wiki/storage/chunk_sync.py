@@ -39,4 +39,4 @@ def sync_chunks_for_page(
         chunk_store.upsert_page(slug=slug, title=title, content=content, file_id=file_id)
         logger.debug("chunk_sync_ok", slug=slug, file_id=file_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("chunk_sync_failed", slug=slug, file_id=file_id, error=str(exc))
+        logger.error("chunk_sync_failed", slug=slug, file_id=file_id, error=str(exc))

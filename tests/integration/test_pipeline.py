@@ -13,9 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from llm_wiki.agents.search import SearchResult
-from llm_wiki.agents.writer import WikiPage
-from llm_wiki.storage.metadata import Base, FileRecord, create_file_record, get_file_record
+from llm_wiki.storage.metadata import Base, create_file_record, get_file_record
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +94,14 @@ def _make_settings_patch(pipeline_dirs: dict[str, Path], db_engine) -> MagicMock
 
 def _llm_create_response(slug: str = "transformers", title: str = "Transformers") -> tuple[str, MagicMock]:
     """JSON response for a SearchAgent or WriterAgent create_page call."""
+    body = (
+        f"# {title}\n\n"
+        "Deep learning model architecture with encoder-decoder stacks, "
+        "self-attention layers, and positional embeddings for sequence modelling. "
+        "Used widely in NLP and vision tasks across industry and research."
+    )
     return (
-        json.dumps({"slug": slug, "title": title, "content": f"# {title}\n\nContent."}),
+        json.dumps({"slug": slug, "title": title, "content": body}),
         MagicMock(),
     )
 
@@ -143,6 +147,8 @@ async def test_upload_md_creates_wiki_page(
     mock_llm = MagicMock()
     mock_llm.load_prompt.return_value = "prompt"
     mock_llm.complete = AsyncMock(side_effect=_fake_complete)
+    mock_llm.embed = MagicMock(return_value=[[0.1] * 1536])
+    mock_llm.aclose = AsyncMock(return_value=None)
 
     factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
         bind=db_engine, expire_on_commit=False, autoflush=False
@@ -175,6 +181,15 @@ async def test_upload_md_creates_wiki_page(
     assert record is not None
     assert record.status == "DONE"
 
+    # Chunk index populated after ingestion
+    from llm_wiki.llm.chunk_store import ChunkStore
+
+    chunk_store = ChunkStore(
+        chroma_path=pipeline_dirs["chroma"],
+        llm_client=mock_llm,
+    )
+    assert chunk_store.count() > 0
+
 
 async def test_pipeline_idempotent_on_rerun(
     db_engine, db_session: AsyncSession, pipeline_dirs: dict[str, Path], fake_md_file: tuple[str, Path],
@@ -192,6 +207,8 @@ async def test_pipeline_idempotent_on_rerun(
         if kw.get("agent_type") == "search"
         else _llm_create_response()
     )
+    mock_llm.embed = MagicMock(return_value=[[0.1] * 1536])
+    mock_llm.aclose = AsyncMock(return_value=None)
 
     with (
         patch("llm_wiki.orchestrator.pipeline.settings", mock_settings),
@@ -224,6 +241,7 @@ async def test_pipeline_failed_state_on_llm_error(
     mock_llm = MagicMock()
     mock_llm.load_prompt.return_value = "prompt"
     mock_llm.complete = AsyncMock(side_effect=RuntimeError("LLM exploded"))
+    mock_llm.aclose = AsyncMock(return_value=None)
 
     factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
         bind=db_engine, expire_on_commit=False, autoflush=False

@@ -12,6 +12,7 @@ from llm_wiki.agents.answer import NO_LLM_THRESHOLD, AnswerAgent
 from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
+from llm_wiki.storage.metadata import FileRecord
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +308,85 @@ async def test_answer_chunk_path_does_not_use_keyword_fallback(tmp_path: Path) -
     # Should refuse without LLM, no keyword fallback rescue
     assert result.confidence == "low"
     llm.complete.assert_not_called()  # type: ignore[attr-defined]
+
+
+def _file_record(
+    *,
+    status: str = "DONE",
+    created_pages: list[str] | None = None,
+    updated_pages: list[str] | None = None,
+) -> FileRecord:
+    """Build a minimal FileRecord for document-scoped ask tests."""
+    return FileRecord(
+        file_id="doc-001",
+        original_name="sample.pdf",
+        status=status,
+        created_pages=created_pages or [],
+        updated_pages=updated_pages or [],
+        state_history=[],
+    )
+
+
+async def test_answer_for_document_returns_answer_when_pages_exist(
+    tmp_path: Path,
+) -> None:
+    """Document-scoped ask loads wiki pages directly and calls the LLM."""
+    wiki = _wiki(tmp_path, {"lora": "# LoRA\n\nLoRA is low-rank adaptation."})
+    llm = _mock_llm(
+        {
+            "answer": "LoRA fine-tunes via [[lora]] adapters.",
+            "confidence": "high",
+            "used_sources": ["lora"],
+        }
+    )
+    agent = AnswerAgent(llm, _mock_store([]), wiki_dir=wiki)
+    document = _file_record(created_pages=["lora"])
+
+    result = await agent.answer_for_document(
+        "What is LoRA?", document=document, language="ru"
+    )
+
+    assert result.confidence == "high"
+    assert "[[lora]]" in result.answer
+    assert [s.slug for s in result.sources] == ["lora"]
+    llm.complete.assert_called_once()  # type: ignore[attr-defined]
+    assert llm.load_prompt.call_args.kwargs["language"] == "ru"  # type: ignore[union-attr]
+
+
+async def test_answer_for_document_handles_missing_pages(tmp_path: Path) -> None:
+    """When no wiki pages exist yet, return a processing message without LLM."""
+    llm = _mock_llm({"answer": "x", "confidence": "high", "used_sources": []})
+    agent = AnswerAgent(llm, _mock_store([]), wiki_dir=tmp_path)
+    document = _file_record(status="SEARCHED", created_pages=["missing-page"])
+
+    result = await agent.answer_for_document(
+        "What is LoRA?", document=document, language="ru"
+    )
+
+    assert result.confidence == "low"
+    assert result.sources == []
+    assert "обрабатывается" in result.answer.lower() or "статус" in result.answer.lower()
+    llm.complete.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_answer_for_document_upgrades_low_confidence_to_medium(
+    tmp_path: Path,
+) -> None:
+    """When sources were provided, low LLM confidence is upgraded to medium."""
+    wiki = _wiki(tmp_path, {"lora": "# LoRA\n\nBody"})
+    llm = _mock_llm(
+        {
+            "answer": "Partial answer via [[lora]].",
+            "confidence": "low",
+            "used_sources": ["lora"],
+        }
+    )
+    agent = AnswerAgent(llm, _mock_store([]), wiki_dir=wiki)
+    document = _file_record(created_pages=["lora"])
+
+    result = await agent.answer_for_document("?", document=document)
+
+    assert result.confidence == "medium"
 
 
 async def test_answer_heading_path_still_works_without_chunk_store(tmp_path: Path) -> None:

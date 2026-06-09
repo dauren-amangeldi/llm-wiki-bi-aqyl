@@ -14,6 +14,9 @@ docker compose -f docker-compose.yml -f docker-compose.testing.yml \
 # 2. Initialize the data directory (first time only)
 docker compose exec api uv run python scripts/init_wiki.py
 
+# 2b. Backfill chunk index for existing wiki pages (after deploy or if /ask is empty)
+docker compose exec api uv run python scripts/reindex_chunks.py
+
 # 3. Upload a file
 curl -X POST http://localhost:8000/api/v1/files \
   -F "file=@/path/to/document.pdf"
