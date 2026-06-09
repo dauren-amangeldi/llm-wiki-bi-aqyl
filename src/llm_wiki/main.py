@@ -5,11 +5,13 @@ from collections.abc import AsyncGenerator
 
 import structlog
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from llm_wiki.api.deps import _engine
 from llm_wiki.api.middleware import RequestIDMiddleware
 from llm_wiki.api.routes import router
+from llm_wiki.api.v1 import router as v1_router
 from llm_wiki.config import settings
 from llm_wiki.logging_config import configure_logging
 from llm_wiki.storage.filesystem import ensure_dirs
@@ -47,8 +49,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(router, prefix="/api/v1")
+app.include_router(v1_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])
