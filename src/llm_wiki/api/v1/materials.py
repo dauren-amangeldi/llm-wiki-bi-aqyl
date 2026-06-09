@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import numpy as np
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1.deps import get_current_user
 from llm_wiki.api.v1.schemas import (
@@ -25,6 +26,8 @@ from llm_wiki.api.v1.schemas import (
     SourcesResponse,
 )
 from llm_wiki.config import settings
+from llm_wiki.llm.chunk_store import ChunkStore
+from llm_wiki.llm.client import LLMClient
 from llm_wiki.storage.metadata import FileRecord, get_file_record
 from llm_wiki.utils.slugify import to_slug
 
@@ -245,9 +248,84 @@ async def get_related(
     language: str | None = None,
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, list[Any]]:
-    """Return related materials.  Phase 1: always empty (implemented in Phase 4)."""
-    await _get_or_404(session, document_id)
-    return {"items": []}
+    """Return related materials based on cosine similarity of chunk embeddings.
+
+    Algorithm:
+    1. Get wiki slugs produced by this document's ingestion pipeline.
+    2. Fetch stored embeddings for those chunks from ChromaDB.
+    3. Average them into a single document-level embedding.
+    4. Query ChromaDB for the 20 nearest chunks (global, including all docs).
+    5. Group by slug, map slugs → FileRecords, exclude self, return top-5.
+    """
+    fr = await _get_or_404(session, document_id)
+    wiki_slugs = list(set((fr.created_pages or []) + (fr.updated_pages or [])))
+
+    if not wiki_slugs:
+        return {"items": []}
+
+    # Retrieve stored chunk embeddings for this document
+    llm = LLMClient()
+    try:
+        chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        embeddings = chunk_store.get_embeddings_for_slugs(wiki_slugs)
+
+        if not embeddings:
+            return {"items": []}
+
+        # Compute mean document embedding
+        mean_emb: list[float] = np.mean(np.array(embeddings), axis=0).tolist()
+
+        # Query ChromaDB for the 20 nearest chunks globally
+        raw = chunk_store._col.query(  # type: ignore[attr-defined]
+            query_embeddings=[mean_emb],
+            n_results=min(20, chunk_store.count()),
+            include=["metadatas"],  # type: ignore[list-item]
+        )
+    finally:
+        await llm.aclose()
+
+    # Collect related slugs (excluding the document's own slugs)
+    own_slugs = set(wiki_slugs)
+    related_slugs: list[str] = []
+    seen_related: set[str] = set()
+    for meta in (raw.get("metadatas") or [[]])[0]:
+        slug = str(meta.get("slug", ""))
+        if slug and slug not in own_slugs and slug not in seen_related:
+            seen_related.add(slug)
+            related_slugs.append(slug)
+        if len(related_slugs) >= 20:
+            break
+
+    if not related_slugs:
+        return {"items": []}
+
+    # Map related slugs → FileRecords (scan all non-deleted records)
+    result = await session.execute(
+        select(FileRecord)
+        .where(FileRecord.status != "deleted")
+        .order_by(FileRecord.created_at.desc())
+        .limit(500)
+    )
+    all_records = list(result.scalars().all())
+
+    slug_set = set(related_slugs)
+    matched: list[FileRecord] = []
+    seen_fids: set[str] = {document_id}
+
+    for candidate in all_records:
+        if candidate.file_id in seen_fids:
+            continue
+        candidate_slugs = set(
+            (candidate.created_pages or []) + (candidate.updated_pages or [])
+        )
+        if candidate_slugs & slug_set:
+            seen_fids.add(candidate.file_id)
+            matched.append(candidate)
+        if len(matched) >= 5:
+            break
+
+    materials = [_fr_to_material(r) for r in matched]
+    return {"items": [m.model_dump() for m in materials]}
 
 
 # ---------------------------------------------------------------------------

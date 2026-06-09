@@ -343,6 +343,35 @@ class ChunkStore:
         hits.sort(key=lambda h: h.similarity, reverse=True)
         return hits
 
+    def get_embeddings_for_slugs(self, slugs: list[str]) -> list[list[float]]:
+        """Return all stored embedding vectors for chunks belonging to *slugs*.
+
+        Used by ``GET /documents/{id}/related`` to compute a mean document
+        embedding and find related materials via cosine similarity.
+
+        Args:
+            slugs: Wiki page slugs whose chunk embeddings to retrieve.
+
+        Returns:
+            List of embedding vectors (one per chunk).  Empty if no chunks are
+            found or the collection is empty.
+        """
+        valid = [s for s in slugs if s]
+        if not valid:
+            return []
+        try:
+            results = self._col.get(
+                where={"slug": {"$in": valid}},
+                include=["embeddings"],  # type: ignore[list-item]
+            )
+            embeddings = results.get("embeddings")
+            if embeddings is None:
+                return []
+            return [list(e) for e in embeddings]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("chunk_store_get_embeddings_failed", error=str(exc))
+            return []
+
     def count(self) -> int:
         """Return the total number of chunk embeddings in the collection."""
         return self._col.count()  # type: ignore[no-any-return]

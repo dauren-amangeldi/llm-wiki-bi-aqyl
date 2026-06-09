@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from llm_wiki.api.deps import _engine
 from llm_wiki.api.middleware import RequestIDMiddleware
+from llm_wiki.api.advisor import router as advisor_router
 from llm_wiki.api.routes import router
 from llm_wiki.api.v1 import router as v1_router
 from llm_wiki.config import settings
@@ -60,6 +61,7 @@ app.add_middleware(
 
 app.include_router(router, prefix="/api/v1")
 app.include_router(v1_router, prefix="/api/v1")
+app.include_router(advisor_router, prefix="/api")
 
 
 @app.get("/health", tags=["system"])

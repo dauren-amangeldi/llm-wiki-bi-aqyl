@@ -78,11 +78,14 @@ npm run dev      # :5173, проксирует /api → :8000
 
 ### Phase 4 — Search & Advisor (SSE)
 
-- [ ] `POST /api/v1/search` (SSE) с режимами `library` / `expert` / `advisor`
-- [ ] `GET /api/v1/documents/{id}/related` — реальный rerank через Chroma
-- [ ] Промпты `prompts/search_expert.md`, `prompts/advisor.md`
-- [ ] Rate-limit 10 advisor/min на email
-- [ ] **Результат:** глобальный поиск + advisor стримит, related-материалы в модалке заполняются
+- [x] `GET /api/v1/search` — JSON для SearchPanel/SearchBar (семантика → EmbeddingStore, fallback SQL LIKE)
+- [x] `POST /api/v1/search` — SSE с режимами `library` / `expert` / `advisor`
+- [x] `POST /api/advisor/ask` — SSE endpoint для AdvisorPanel (top-15 чанков + advisor.md)
+- [x] `GET /api/v1/documents/{id}/related` — real rerank через mean Chroma embedding, top-5
+- [x] Промпты `prompts/search_expert.md`, `prompts/advisor.md`
+- [x] `utils/rate_limit.py` — in-memory sliding-window, 10 advisor/min на email
+- [x] Тесты `tests/unit/api/v1/test_phase4.py` (8 тестов — library/expert/rate-limit/related)
+- [x] **Результат:** SearchPanel + SearchBar работают через GET; AdvisorPanel стримит через /api/advisor/ask
 
 ### Phase 5 — Studio (артефакты)
 

@@ -9,7 +9,7 @@ See README.md "Роадмап интеграции с фронтендом" for 
 
 from fastapi import APIRouter
 
-from llm_wiki.api.v1 import chat, files, materials, tags, uploads
+from llm_wiki.api.v1 import chat, files, materials, search, tags, uploads
 
 router = APIRouter(tags=["v1"])
 
@@ -18,3 +18,4 @@ router.include_router(tags.router)
 router.include_router(files.router)
 router.include_router(uploads.router)
 router.include_router(chat.router)
+router.include_router(search.router)
