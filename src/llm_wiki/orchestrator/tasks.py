@@ -107,6 +107,7 @@ def process_file_task(self: Any, file_id: str) -> None:
         log.error(
             "pipeline_failed_permanent",
             error=str(exc),
+            exc_info=True,
             hint=(
                 "Model not found — run `docker compose exec ollama ollama pull <model>`"
                 if isinstance(exc, openai.NotFoundError)
@@ -120,6 +121,7 @@ def process_file_task(self: Any, file_id: str) -> None:
             "pipeline_retry",
             attempt=retry_count + 1,
             error=str(exc),
+            exc_info=True,
         )
         raise self.retry(exc=exc, countdown=4**retry_count)
     finally:
