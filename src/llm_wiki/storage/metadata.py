@@ -13,15 +13,35 @@ Each migration is **idempotent** — safe to run every startup.
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy import JSON, DateTime, String, select, text, update as sa_update
+from sqlalchemy import JSON, DateTime, Integer, String, select, text, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from llm_wiki.utils.ids import new_file_id
+
 logger = structlog.get_logger(__name__)
+
+_DEV_USER_ID = "dev-user"
+_DEV_USER_NAME = "Dev User"
+_DEV_USER_ROLE = "admin"
 
 
 class Base(DeclarativeBase):
     """SQLAlchemy declarative base for all metadata models."""
+
+
+class User(Base):
+    """Minimal user record for notebook ownership (LW-N1)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False, default="employee")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
 
 
 class FileRecord(Base):
@@ -50,6 +70,153 @@ class FileRecord(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class Notebook(Base):
+    """A user-owned collection of attached source files (LW-N2)."""
+
+    __tablename__ = "notebooks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class NotebookFile(Base):
+    """M2M link between a notebook and an ingested file (LW-N2)."""
+
+    __tablename__ = "notebook_files"
+
+    notebook_id: Mapped[str] = mapped_column(String, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class Skill(Base):
+    """Role-based system prompt for AI modes and positions (LW-N11)."""
+
+    __tablename__ = "skills"
+
+    role: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False, default="")
+    system_prompt: Mapped[str] = mapped_column(String, nullable=False, default="")
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+# Roles grouped for frontend slug mapping (modes/* vs positions/*)
+_MODE_ROLES: frozenset[str] = frozenset({"advisor", "expert", "library"})
+
+_DEFAULT_SKILL_SEEDS: list[dict[str, str | int]] = [
+    {
+        "role": "advisor",
+        "title": "AI-Советник",
+        "description": "Задаёт вектор решения, предлагает стратегию на основе кейсов",
+        "system_prompt": (
+            "Ты AI-советник BI Group. Анализируй кейсы из базы знаний и предлагай "
+            "конкретные стратегические действия, привязанные к реальным case_id. "
+            "Отвечай строго на языке запроса. Возвращай только JSON по схеме."
+        ),
+    },
+    {
+        "role": "expert",
+        "title": "Эксперт",
+        "description": "Глубокий анализ кейса с детальными рекомендациями",
+        "system_prompt": (
+            "Ты эксперт BI Group. Давай глубокий анализ кейсов с детальными "
+            "рекомендациями и ссылками на источники. Отвечай строго на языке запроса."
+        ),
+    },
+    {
+        "role": "library",
+        "title": "Библиотека",
+        "description": "Поиск по всей базе знаний с цитатами из источников",
+        "system_prompt": (
+            "Ты библиотечный ассистент BI Group. Находи релевантные материалы "
+            "и цитируй источники дословно. Не выдумывай факты."
+        ),
+    },
+    {
+        "role": "employee",
+        "title": "Сотрудник",
+        "description": "Базовый режим для линейных сотрудников",
+        "system_prompt": (
+            "Ты помощник для линейного сотрудника BI Group. Объясняй простым языком, "
+            "фокусируйся на практическом применении кейсов в ежедневной работе."
+        ),
+    },
+    {
+        "role": "finance",
+        "title": "Финансы",
+        "description": "Финансовый анализ, бюджетирование, отчётность",
+        "system_prompt": (
+            "Ты финансовый аналитик BI Group. Акцентируй бюджет, ROI, "
+            "финансовые риски и метрики из кейсов. Не выдумывай цифры."
+        ),
+    },
+    {
+        "role": "gd",
+        "title": "Генеральный директор",
+        "description": "Стратегические решения для топ-менеджмента",
+        "system_prompt": (
+            "Ты стратегический советник для топ-менеджмента BI Group. "
+            "Фокусируйся на стратегических выводах, рисках и возможностях масштабирования."
+        ),
+    },
+    {
+        "role": "hr",
+        "title": "HR",
+        "description": "Управление персоналом, подбор, развитие команды",
+        "system_prompt": (
+            "Ты HR-эксперт BI Group. Акцентируй развитие персонала, "
+            "компетенции, адаптацию и практики из кейсов."
+        ),
+    },
+    {
+        "role": "legal",
+        "title": "Юридический",
+        "description": "Юридическая экспертиза, комплаенс, договоры",
+        "system_prompt": (
+            "Ты юридический советник BI Group. Выделяй правовые риски, "
+            "комплаенс и договорные практики из кейсов. Не давай юридических заключений вне источников."
+        ),
+    },
+    {
+        "role": "pm",
+        "title": "Project Manager",
+        "description": "Управление проектами, планирование, контроль",
+        "system_prompt": (
+            "Ты project manager BI Group. Фокусируй сроки, зависимости, "
+            "риски и lean-практики из кейсов. Предлагай конкретные шаги."
+        ),
+    },
+    {
+        "role": "pto",
+        "title": "PTO / Инженерия",
+        "description": "Техническая экспертиза, инженерные решения",
+        "system_prompt": (
+            "Ты инженерный эксперт BI Group. Акцентируй технические решения, "
+            "BIM, контроль качества и строительные практики из кейсов."
+        ),
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +351,275 @@ async def append_state_history(
         .values(state_history=history, updated_at=datetime.now(timezone.utc))
     )
     await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# User CRUD (LW-N1)
+# ---------------------------------------------------------------------------
+
+
+async def get_user_by_id(session: AsyncSession, user_id: str) -> User | None:
+    """Return a User by primary key, or None if not found."""
+    result = await session.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
+
+
+async def get_or_create_user(
+    session: AsyncSession,
+    user_id: str,
+    name: str,
+    role: str,
+) -> User:
+    """Return an existing user or insert a new one (idempotent on *user_id*)."""
+    existing = await get_user_by_id(session, user_id)
+    if existing is not None:
+        return existing
+    user = User(id=user_id, name=name, role=role)
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+async def ensure_dev_user(session: AsyncSession) -> User:
+    """Return the default development user, creating it if absent."""
+    return await get_or_create_user(
+        session, _DEV_USER_ID, _DEV_USER_NAME, _DEV_USER_ROLE
+    )
+
+
+# ---------------------------------------------------------------------------
+# Notebook CRUD (LW-N2)
+# ---------------------------------------------------------------------------
+
+
+async def create_notebook(
+    session: AsyncSession,
+    owner_id: str,
+    title: str,
+) -> Notebook:
+    """Create a notebook owned by *owner_id*."""
+    notebook = Notebook(
+        id=new_file_id(),
+        owner_id=owner_id,
+        title=title,
+    )
+    session.add(notebook)
+    await session.commit()
+    await session.refresh(notebook)
+    return notebook
+
+
+async def list_notebooks(
+    session: AsyncSession,
+    owner_id: str,
+) -> list[Notebook]:
+    """Return all notebooks belonging to *owner_id*, newest first."""
+    result = await session.execute(
+        select(Notebook)
+        .where(Notebook.owner_id == owner_id)
+        .order_by(Notebook.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_notebook(
+    session: AsyncSession,
+    notebook_id: str,
+    owner_id: str,
+) -> Notebook | None:
+    """Return a notebook only when it belongs to *owner_id*."""
+    result = await session.execute(
+        select(Notebook).where(
+            Notebook.id == notebook_id,
+            Notebook.owner_id == owner_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def delete_notebook(
+    session: AsyncSession,
+    notebook_id: str,
+    owner_id: str,
+) -> bool:
+    """Delete a notebook and its file links. Returns False if not found/owned."""
+    from sqlalchemy import delete as sa_delete
+
+    notebook = await get_notebook(session, notebook_id, owner_id)
+    if notebook is None:
+        return False
+    await session.execute(
+        sa_delete(NotebookFile).where(NotebookFile.notebook_id == notebook_id)
+    )
+    await session.delete(notebook)
+    await session.commit()
+    return True
+
+
+async def attach_file(
+    session: AsyncSession,
+    notebook_id: str,
+    file_id: str,
+    owner_id: str,
+) -> None:
+    """Attach *file_id* to *notebook_id* after verifying ownership.
+
+    Raises:
+        ValueError: If the notebook does not exist or is not owned by *owner_id*.
+    """
+    notebook = await get_notebook(session, notebook_id, owner_id)
+    if notebook is None:
+        raise ValueError(f"Notebook {notebook_id!r} not found for owner {owner_id!r}")
+
+    existing = await session.execute(
+        select(NotebookFile).where(
+            NotebookFile.notebook_id == notebook_id,
+            NotebookFile.file_id == file_id,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        return
+
+    session.add(NotebookFile(notebook_id=notebook_id, file_id=file_id))
+    notebook.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+
+
+async def notebook_files_detail(
+    session: AsyncSession,
+    notebook_id: str,
+    owner_id: str,
+) -> list[FileRecord]:
+    """Return ``FileRecord`` rows for files attached to a owned notebook."""
+    file_ids = await notebook_file_ids(session, notebook_id, owner_id)
+    if not file_ids:
+        return []
+    result = await session.execute(
+        select(FileRecord).where(FileRecord.file_id.in_(file_ids))
+    )
+    by_id = {r.file_id: r for r in result.scalars().all()}
+    return [by_id[fid] for fid in file_ids if fid in by_id]
+
+
+async def notebook_file_ids(
+    session: AsyncSession,
+    notebook_id: str,
+    owner_id: str,
+) -> list[str]:
+    """Return file_ids attached to *notebook_id* when owned by *owner_id*."""
+    notebook = await get_notebook(session, notebook_id, owner_id)
+    if notebook is None:
+        return []
+    result = await session.execute(
+        select(NotebookFile.file_id)
+        .where(NotebookFile.notebook_id == notebook_id)
+        .order_by(NotebookFile.added_at.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def build_slug_to_file_id_map(session: AsyncSession) -> dict[str, str]:
+    """Map wiki slugs to the most recent source *file_id* (LW-N3 backfill)."""
+    result = await session.execute(select(FileRecord).order_by(FileRecord.created_at))
+    records = result.scalars().all()
+    mapping: dict[str, str] = {}
+    for record in records:
+        for slug in list(record.created_pages or []) + list(record.updated_pages or []):
+            mapping[slug] = record.file_id
+    return mapping
+
+
+# ---------------------------------------------------------------------------
+# Skills CRUD (LW-N11 / LW-N12)
+# ---------------------------------------------------------------------------
+
+
+def skill_role_to_slug(role: str) -> str:
+    """Map a DB role key to the frontend slug (``modes/advisor``, etc.)."""
+    if role in _MODE_ROLES:
+        return f"modes/{role}"
+    return f"positions/{role}"
+
+
+def skill_slug_to_role(slug: str) -> str:
+    """Parse a frontend slug back to the DB role key."""
+    if slug.startswith("modes/"):
+        return slug[len("modes/") :]
+    if slug.startswith("positions/"):
+        return slug[len("positions/") :]
+    return slug
+
+
+async def list_skills(session: AsyncSession) -> list[Skill]:
+    """Return all skills ordered by role."""
+    result = await session.execute(select(Skill).order_by(Skill.role))
+    return list(result.scalars().all())
+
+
+async def get_skill(session: AsyncSession, role: str) -> Skill | None:
+    """Fetch a skill by role key, or None if not found."""
+    result = await session.execute(select(Skill).where(Skill.role == role))
+    return result.scalar_one_or_none()
+
+
+async def update_skill(
+    session: AsyncSession,
+    role: str,
+    *,
+    system_prompt: str | None = None,
+    active: int | None = None,
+) -> Skill | None:
+    """Update ``system_prompt`` and/or ``active`` for *role*."""
+    skill = await get_skill(session, role)
+    if skill is None:
+        return None
+    values: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
+    if system_prompt is not None:
+        values["system_prompt"] = system_prompt
+    if active is not None:
+        values["active"] = active
+    await session.execute(sa_update(Skill).where(Skill.role == role).values(**values))
+    await session.commit()
+    return await get_skill(session, role)
+
+
+async def skills_count(session: AsyncSession) -> int:
+    """Return the number of rows in the skills table."""
+    result = await session.execute(select(Skill))
+    return len(result.scalars().all())
+
+
+async def seed_skills(session: AsyncSession) -> int:
+    """Insert default skills when absent (idempotent). Returns rows inserted."""
+    inserted = 0
+    for row in _DEFAULT_SKILL_SEEDS:
+        role = str(row["role"])
+        existing = await get_skill(session, role)
+        if existing is not None:
+            continue
+        session.add(
+            Skill(
+                role=role,
+                title=str(row["title"]),
+                description=str(row["description"]),
+                system_prompt=str(row["system_prompt"]),
+                active=int(row.get("active", 1)),
+            )
+        )
+        inserted += 1
+    if inserted:
+        await session.commit()
+    return inserted
+
+
+async def resolve_skill_system_prompt(session: AsyncSession, role: str) -> str | None:
+    """Return the active system prompt for *role*, or None when missing/inactive."""
+    skill = await get_skill(session, role)
+    if skill is None or not skill.active:
+        return None
+    prompt = skill.system_prompt.strip()
+    return prompt or None
 
 
 # ---------------------------------------------------------------------------

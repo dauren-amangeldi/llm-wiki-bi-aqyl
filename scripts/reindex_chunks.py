@@ -39,7 +39,26 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help="Print progress every N pages (default: 50).",
     )
+    p.add_argument(
+        "--backfill-file-ids",
+        action="store_true",
+        help="Only backfill file_id metadata on existing chunks (no re-embed).",
+    )
     return p.parse_args()
+
+
+def _load_slug_file_map() -> dict[str, str]:
+    """Load slug → file_id mapping from SQLite (sync wrapper for CLI scripts)."""
+    import asyncio
+
+    from llm_wiki.api.deps import _SessionLocal
+    from llm_wiki.storage.metadata import build_slug_to_file_id_map
+
+    async def _run() -> dict[str, str]:
+        async with _SessionLocal() as session:
+            return await build_slug_to_file_id_map(session)
+
+    return asyncio.run(_run())
 
 
 def _extract_title(content: str, slug: str) -> str:
@@ -57,6 +76,17 @@ def main() -> None:
     from llm_wiki.config import settings
     from llm_wiki.llm.chunk_store import ChunkStore, chunk_markdown
     from llm_wiki.llm.client import LLMClient
+
+    if args.backfill_file_ids:
+        slug_map = _load_slug_file_map()
+        if not slug_map:
+            print("No slug→file_id mappings found in metadata.db.")
+            return
+        llm = LLMClient()
+        store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        total = sum(store.backfill_file_id(slug, fid) for slug, fid in slug_map.items())
+        print(f"Backfill complete: {total} chunk record(s) updated.")
+        return
 
     wiki_dir: Path = settings.wiki_dir
     if not wiki_dir.exists():
@@ -90,12 +120,16 @@ def main() -> None:
     print("Clearing existing chunks collection…")
     store.clear()
 
+    slug_map = _load_slug_file_map()
     indexed_pages = 0
     for i, path in enumerate(pages, start=1):
         slug = path.stem
         content = path.read_text(encoding="utf-8")
         title = _extract_title(content, slug)
-        store.upsert_page(slug=slug, title=title, content=content, file_id="reindex-chunks")
+        source_file_id = slug_map.get(slug, "reindex-chunks")
+        store.upsert_page(
+            slug=slug, title=title, content=content, file_id=source_file_id
+        )
         indexed_pages += 1
 
         if i % args.batch_size == 0 or i == len(pages):

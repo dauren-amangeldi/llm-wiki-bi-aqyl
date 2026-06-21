@@ -138,6 +138,7 @@ class EmbeddingStore:
                     "title": title,
                     "section": section,
                     "level": level,
+                    "file_id": file_id,
                     "last_indexed_at": datetime.now(timezone.utc).isoformat(),
                 }
             ],
@@ -149,6 +150,7 @@ class EmbeddingStore:
         self,
         headings: "list[HeadingInfo]",  # noqa: F821
         file_id: str = "",
+        slug_to_file_id: dict[str, str] | None = None,
     ) -> None:
         """Batch-upsert multiple headings.
 
@@ -157,13 +159,13 @@ class EmbeddingStore:
 
         Args:
             headings: List of ``HeadingInfo`` objects with slug/title/section/level.
-            file_id: Correlation ID for usage tracking.
-
-        Raises:
-            EmbeddingError: If any API call fails after all retries.
+            file_id: Default correlation / source file ID for usage tracking.
+            slug_to_file_id: Optional per-slug file_id overrides (LW-N3).
         """
         if not headings:
             return
+
+        slug_map = slug_to_file_id or {}
 
         from llm_wiki.config import settings
 
@@ -185,6 +187,7 @@ class EmbeddingStore:
                         "title": h.title,
                         "section": h.section,
                         "level": h.level,
+                        "file_id": slug_map.get(h.slug, file_id),
                         "last_indexed_at": datetime.now(timezone.utc).isoformat(),
                     }
                     for h in chunk
@@ -192,6 +195,15 @@ class EmbeddingStore:
                 documents=[h.title for h in chunk],
             )
         logger.info("embedding_batch_upserted", count=len(headings))
+
+    def backfill_file_id(self, slug: str, file_id: str) -> bool:
+        """Set ``file_id`` metadata on an existing heading without re-embedding."""
+        try:
+            self._col.update(ids=[slug], metadatas=[{"file_id": file_id}])
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("embedding_backfill_failed", slug=slug, error=str(exc))
+            return False
 
     def update_metadata(self, slug: str, section: str) -> None:
         """Update only the *section* metadata for an existing heading.

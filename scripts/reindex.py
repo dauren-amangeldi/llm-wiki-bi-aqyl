@@ -37,12 +37,64 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Override EMBEDDING_BATCH_SIZE from config (0 = use config value).",
     )
+    parser.add_argument(
+        "--backfill-file-ids",
+        action="store_true",
+        help="Only backfill file_id metadata on existing headings/chunks (no re-embed).",
+    )
     return parser.parse_args()
+
+
+def _load_slug_file_map() -> dict[str, str]:
+    """Load slug → file_id mapping from SQLite (sync wrapper for CLI scripts)."""
+    import asyncio
+
+    from llm_wiki.api.deps import _SessionLocal
+    from llm_wiki.storage.metadata import build_slug_to_file_id_map
+
+    async def _run() -> dict[str, str]:
+        async with _SessionLocal() as session:
+            return await build_slug_to_file_id_map(session)
+
+    return asyncio.run(_run())
+
+
+def _backfill_file_ids_only() -> None:
+    """Backfill file_id on existing Chroma metadata without re-embedding."""
+    from llm_wiki.config import settings
+    from llm_wiki.llm.chunk_store import ChunkStore
+    from llm_wiki.llm.client import LLMClient
+    from llm_wiki.llm.embeddings import EmbeddingStore
+
+    slug_map = _load_slug_file_map()
+    if not slug_map:
+        print("No slug→file_id mappings found in metadata.db.")
+        return
+
+    llm = LLMClient()
+    heading_store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
+    chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+
+    heading_updates = 0
+    chunk_updates = 0
+    for slug, file_id in slug_map.items():
+        if heading_store.backfill_file_id(slug, file_id):
+            heading_updates += 1
+        chunk_updates += chunk_store.backfill_file_id(slug, file_id)
+
+    print(
+        f"Backfill complete: {heading_updates} heading(s), "
+        f"{chunk_updates} chunk record(s) updated."
+    )
 
 
 def main() -> None:
     """Scan index.md and re-embed all headings into ChromaDB."""
     args = _parse_args()
+
+    if args.backfill_file_ids:
+        _backfill_file_ids_only()
+        return
 
     from llm_wiki.config import settings
     from llm_wiki.llm.client import LLMClient
@@ -105,8 +157,10 @@ def main() -> None:
     print(f"Embedding {len(heading_infos)} headings (model={settings.embedding_model}) …")
     t0 = time.perf_counter()
 
+    slug_map = _load_slug_file_map()
+
     try:
-        store.upsert_many(heading_infos)
+        store.upsert_many(heading_infos, slug_to_file_id=slug_map)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR during embedding: {exc}", file=sys.stderr)
         sys.exit(1)

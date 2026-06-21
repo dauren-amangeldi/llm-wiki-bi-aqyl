@@ -2,35 +2,48 @@
 
 import json
 import re
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db
+from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_current_user, get_db
 from llm_wiki.api.schemas import (
+    AdvisorPointResponse,
+    AdvisorRequest,
     AskRequest,
     AskResponse,
     AskSource,
     AuditRunRequest,
     AuditRunResponse,
     AuditStatusResponse,
+    CurrentUser,
     FileStatusResponse,
     FileUploadResponse,
     IssueResponse,
     LintRunResponse,
     LogResponse,
+    NotebookAskRequest,
+    NotebookAttachRequest,
+    NotebookCreateRequest,
+    NotebookFileRef,
+    NotebookResponse,
+    SkillResponse,
+    SkillUpdateRequest,
     StateEntry,
     StatsResponse,
     WikiPageResponse,
+    WikiSearchResult,
 )
 from llm_wiki.config import settings
 from llm_wiki.orchestrator.tasks import celery_app, process_file_task, run_weekly_audit
 from llm_wiki.storage.metadata import FileRecord, create_file_record, get_by_sha256, get_file_record
+from llm_wiki.storage.wiki_fts import keyword_search
 from llm_wiki.utils.backlinks import extract_backlinks
 from llm_wiki.utils.hashing import sha256_stream
 from llm_wiki.utils.ids import new_file_id
@@ -604,6 +617,45 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Keyword search (FTS5 — no LLM, LW-N5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/search",
+    response_model=list[WikiSearchResult],
+    summary="Lexical full-text search over wiki pages",
+    tags=["search"],
+)
+async def search_wiki(
+    q: str = Query("", description="Search query (min 3 characters)"),
+    scope: str = Query("all", description="Scope filter (accepted, ignored for MVP)"),
+    language: str = Query("ru", description="Language (accepted, ignored for MVP)"),
+    limit: int = Query(10, ge=1, le=100),
+    session: AsyncSession = Depends(get_db),
+) -> list[WikiSearchResult]:
+    """Run FTS5 keyword search over indexed wiki pages.
+
+    No LLM calls — pure SQLite ``MATCH``.  Returns an empty list when
+    ``q`` is shorter than 3 characters.
+    """
+    _ = scope, language  # accepted for API compat; filtering deferred
+    if len(q.strip()) < 3:
+        return []
+
+    hits = await keyword_search(session, q, limit=limit)
+    return [
+        WikiSearchResult(
+            slug=h.slug,
+            title=h.title,
+            snippet=h.snippet,
+            scope="wiki",
+        )
+        for h in hits
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Q&A
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -647,4 +699,476 @@ async def ask_question(
             for h in result.sources
         ],
         cost_usd=round(result.cost_usd, 6),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Advisor (semantic SSE — LW-N8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _sse_line(payload: dict[str, object]) -> str:
+    """Format a single Server-Sent Event data line."""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@router.post(
+    "/advisor",
+    summary="Advisor — semantic case search with SSE streaming",
+    tags=["advisor"],
+    response_class=StreamingResponse,
+)
+async def advisor_endpoint(
+    body: AdvisorRequest,
+    stream: bool = Query(False, description="When true, stream SSE progress events"),
+    session: AsyncSession = Depends(get_db),
+    _rate_check: None = Depends(check_ask_rate_limit),
+) -> StreamingResponse:
+    """Run the Advisor Agent and return structured insights via SSE.
+
+    The frontend hook ``useSSEStream`` appends ``?stream=true`` automatically.
+    Progress events use ``status``; the final event has ``done: true`` plus either
+    the full ``AdvisorResponse`` fields or a ``refusal`` payload.
+    """
+    from llm_wiki.agents.advisor import AdvisorAgent, HistoryTurn
+    from llm_wiki.llm.chunk_store import ChunkStore
+    from llm_wiki.llm.client import LLMClient
+    from llm_wiki.storage.metadata import resolve_skill_system_prompt
+
+    role_prompt = await resolve_skill_system_prompt(session, body.role)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        llm = LLMClient()
+        try:
+            if stream:
+                yield _sse_line({"status": "searching", "step": 1, "total": 2})
+
+            chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+            agent = AdvisorAgent(llm, chunk_store)
+            history = [
+                HistoryTurn(role=t.role, content=t.content) for t in body.history
+            ]
+            result = await agent.advise(
+                query=body.query,
+                role=body.role,
+                language=body.language,
+                history=history or None,
+                system_prompt=role_prompt,
+            )
+
+            if stream:
+                yield _sse_line({"status": "synthesizing", "step": 2, "total": 2})
+
+            if result.refusal:
+                yield _sse_line(
+                    {
+                        "done": True,
+                        "refusal": True,
+                        "refusal_message": result.refusal_message,
+                    }
+                )
+            else:
+                yield _sse_line(
+                    {
+                        "done": True,
+                        "title": result.title,
+                        "summary": result.summary,
+                        "points": [
+                            AdvisorPointResponse(
+                                heading=p.heading,
+                                body=p.body,
+                                metric=p.metric,
+                                tag=p.tag,
+                                case_id=p.case_id,
+                            ).model_dump()
+                            for p in result.points
+                        ],
+                        "source": result.source,
+                        "caseCount": result.caseCount,
+                        "cost_usd": round(result.cost_usd, 6),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("advisor_stream_failed", error=str(exc))
+            yield _sse_line({"error": str(exc)})
+        finally:
+            await llm.aclose()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Skills — role-based prompts (LW-N12)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _skill_to_response(skill: object) -> SkillResponse:
+    from llm_wiki.storage.metadata import Skill, skill_role_to_slug
+
+    assert isinstance(skill, Skill)
+    return SkillResponse(
+        slug=skill_role_to_slug(skill.role),
+        name=skill.title,
+        content=skill.system_prompt,
+        role=skill.role,
+        active=bool(skill.active),
+        description=skill.description,
+    )
+
+
+@router.get(
+    "/skills",
+    response_model=list[SkillResponse],
+    summary="List role-based AI skills",
+    tags=["skills"],
+)
+async def list_skills_endpoint(
+    session: AsyncSession = Depends(get_db),
+) -> list[SkillResponse]:
+    """Return all configured skills for the management UI."""
+    from llm_wiki.storage.metadata import list_skills
+
+    rows = await list_skills(session)
+    return [_skill_to_response(s) for s in rows]
+
+
+@router.put(
+    "/skills/{role:path}",
+    response_model=SkillResponse,
+    summary="Update a skill's system prompt or active flag",
+    tags=["skills"],
+)
+async def update_skill_endpoint(
+    role: str,
+    body: SkillUpdateRequest,
+    session: AsyncSession = Depends(get_db),
+) -> SkillResponse:
+    """Persist ``system_prompt`` / ``active`` for the given role."""
+    from llm_wiki.storage.metadata import skill_slug_to_role, update_skill
+
+    role_key = skill_slug_to_role(role)
+    prompt = body.resolved_system_prompt()
+    if prompt is None and body.active is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide content/system_prompt and/or active.",
+        )
+
+    updated = await update_skill(
+        session,
+        role_key,
+        system_prompt=prompt,
+        active=body.active,
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill {role_key!r} not found.",
+        )
+    return _skill_to_response(updated)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Notebooks — scoped sources, no global wiki writes (LW-N15 / LW-N16 / LW-N17)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _notebook_response(notebook: object, files: list[object]) -> NotebookResponse:
+    from llm_wiki.storage.metadata import FileRecord, Notebook
+
+    assert isinstance(notebook, Notebook)
+    file_refs: list[NotebookFileRef] = []
+    for record in files:
+        assert isinstance(record, FileRecord)
+        file_refs.append(
+            NotebookFileRef(
+                file_id=record.file_id,
+                original_name=record.original_name,
+                status=record.status,
+            )
+        )
+    return NotebookResponse(
+        id=notebook.id,
+        title=notebook.title,
+        created_at=notebook.created_at,
+        updated_at=notebook.updated_at,
+        files=file_refs,
+    )
+
+
+async def _get_owned_notebook_or_404(
+    session: AsyncSession,
+    notebook_id: str,
+    user: CurrentUser,
+) -> object:
+    from llm_wiki.storage.metadata import Notebook, get_notebook
+
+    notebook = await get_notebook(session, notebook_id, user.id)
+    if notebook is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Notebook {notebook_id!r} not found.",
+        )
+    return notebook
+
+
+@router.post(
+    "/notebooks",
+    response_model=NotebookResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a notebook",
+    tags=["notebooks"],
+)
+async def create_notebook_endpoint(
+    body: NotebookCreateRequest,
+    session: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> NotebookResponse:
+    """Create an empty notebook owned by the current user."""
+    from llm_wiki.storage.metadata import create_notebook
+
+    notebook = await create_notebook(session, user.id, body.title)
+    return _notebook_response(notebook, [])
+
+
+@router.get(
+    "/notebooks",
+    response_model=list[NotebookResponse],
+    summary="List notebooks for the current user",
+    tags=["notebooks"],
+)
+async def list_notebooks_endpoint(
+    session: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> list[NotebookResponse]:
+    """Return all notebooks owned by the caller, newest first."""
+    from llm_wiki.storage.metadata import list_notebooks, notebook_files_detail
+
+    notebooks = await list_notebooks(session, user.id)
+    results: list[NotebookResponse] = []
+    for nb in notebooks:
+        files = await notebook_files_detail(session, nb.id, user.id)
+        results.append(_notebook_response(nb, files))
+    return results
+
+
+@router.get(
+    "/notebooks/{notebook_id}",
+    response_model=NotebookResponse,
+    summary="Get a notebook by id",
+    tags=["notebooks"],
+)
+async def get_notebook_endpoint(
+    notebook_id: str,
+    session: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> NotebookResponse:
+    """Return one notebook when owned by the caller."""
+    from llm_wiki.storage.metadata import notebook_files_detail
+
+    notebook = await _get_owned_notebook_or_404(session, notebook_id, user)
+    files = await notebook_files_detail(session, notebook_id, user.id)
+    return _notebook_response(notebook, files)
+
+
+@router.delete(
+    "/notebooks/{notebook_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a notebook",
+    tags=["notebooks"],
+)
+async def delete_notebook_endpoint(
+    notebook_id: str,
+    session: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> None:
+    """Delete a notebook and its file links (sources remain in raw/chroma)."""
+    from llm_wiki.storage.metadata import delete_notebook
+
+    deleted = await delete_notebook(session, notebook_id, user.id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Notebook {notebook_id!r} not found.",
+        )
+
+
+@router.post(
+    "/notebooks/{notebook_id}/files",
+    response_model=NotebookResponse,
+    summary="Upload or attach a source file to a notebook",
+    tags=["notebooks"],
+)
+async def add_notebook_file_endpoint(
+    notebook_id: str,
+    session: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+    file: UploadFile | None = File(None),
+    file_id: str | None = Form(None),
+) -> NotebookResponse:
+    """Add a source to a notebook without running the global wiki pipeline.
+
+    Accepts either a multipart *file* upload (parsed + embedded) or an existing
+    *file_id* to attach without re-embedding.
+    """
+    from llm_wiki.llm.chunk_store import ChunkStore
+    from llm_wiki.llm.client import LLMClient
+    from llm_wiki.orchestrator.pipeline import (
+        attach_notebook_existing_file,
+        ingest_notebook_file,
+    )
+    from llm_wiki.storage.metadata import Notebook, notebook_files_detail
+
+    await _get_owned_notebook_or_404(session, notebook_id, user)
+
+    llm = LLMClient()
+    try:
+        chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        if file is not None and file.filename:
+            content = await file.read()
+            if len(content) > settings.max_file_size_mb * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File exceeds {settings.max_file_size_mb} MB limit.",
+                )
+            try:
+                await ingest_notebook_file(
+                    session,
+                    notebook_id,
+                    user.id,
+                    file.filename,
+                    content,
+                    llm,
+                    chunk_store,
+                )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        elif file_id:
+            try:
+                await attach_notebook_existing_file(
+                    session, notebook_id, user.id, file_id
+                )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide a file upload or file_id.",
+            )
+    finally:
+        await llm.aclose()
+
+    notebook = await _get_owned_notebook_or_404(session, notebook_id, user)
+    assert isinstance(notebook, Notebook)
+    files = await notebook_files_detail(session, notebook_id, user.id)
+    return _notebook_response(notebook, files)
+
+
+@router.post(
+    "/notebooks/{notebook_id}/attach",
+    response_model=NotebookResponse,
+    summary="Attach an existing file to a notebook (JSON)",
+    tags=["notebooks"],
+)
+async def attach_notebook_file_json(
+    notebook_id: str,
+    body: NotebookAttachRequest,
+    session: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> NotebookResponse:
+    """JSON variant of file attach — used when linking an existing case."""
+    from llm_wiki.orchestrator.pipeline import attach_notebook_existing_file
+    from llm_wiki.storage.metadata import Notebook, notebook_files_detail
+
+    await _get_owned_notebook_or_404(session, notebook_id, user)
+    try:
+        await attach_notebook_existing_file(
+            session, notebook_id, user.id, body.file_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    notebook = await _get_owned_notebook_or_404(session, notebook_id, user)
+    assert isinstance(notebook, Notebook)
+    files = await notebook_files_detail(session, notebook_id, user.id)
+    return _notebook_response(notebook, files)
+
+
+@router.post(
+    "/notebooks/{notebook_id}/ask",
+    summary="Ask a question scoped to notebook sources (SSE)",
+    tags=["notebooks"],
+    response_class=StreamingResponse,
+)
+async def notebook_ask_endpoint(
+    notebook_id: str,
+    body: NotebookAskRequest,
+    stream: bool = Query(False),
+    session: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+    _rate_check: None = Depends(check_ask_rate_limit),
+) -> StreamingResponse:
+    """Run scoped RAG over notebook file_ids only; stream progress + answer."""
+    from llm_wiki.agents.answer import AnswerAgent
+    from llm_wiki.llm.chunk_store import ChunkStore
+    from llm_wiki.llm.client import LLMClient
+    from llm_wiki.storage.metadata import notebook_file_ids
+
+    await _get_owned_notebook_or_404(session, notebook_id, user)
+    scoped_ids = await notebook_file_ids(session, notebook_id, user.id)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        llm = LLMClient()
+        try:
+            if stream:
+                yield _sse_line({"status": "searching", "step": 1, "total": 2})
+
+            chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+            from llm_wiki.llm.embeddings import EmbeddingStore
+
+            embedding_store = EmbeddingStore(
+                chroma_path=settings.chroma_dir, llm_client=llm
+            )
+            agent = AnswerAgent(llm, embedding_store, chunk_store=chunk_store)
+            result = await agent.answer_for_notebook(
+                question=body.question,
+                file_ids=scoped_ids,
+                language=body.language,
+                file_id=f"nb-{notebook_id}",
+            )
+
+            if stream:
+                yield _sse_line({"status": "synthesizing", "step": 2, "total": 2})
+
+            refusal = result.confidence == "low" and not result.sources
+            payload: dict[str, object] = {
+                "done": True,
+                "answer": result.answer,
+                "confidence": result.confidence,
+                "sources": [
+                    {"slug": s.slug, "title": s.title, "similarity": s.similarity}
+                    for s in result.sources
+                ],
+                "cost_usd": round(result.cost_usd, 6),
+            }
+            if refusal:
+                payload["refusal"] = True
+                payload["refusal_message"] = result.answer
+            yield _sse_line(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("notebook_ask_failed", error=str(exc))
+            yield _sse_line({"error": str(exc)})
+        finally:
+            await llm.aclose()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

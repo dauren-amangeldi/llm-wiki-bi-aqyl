@@ -52,6 +52,7 @@ class ChunkHit:
     chunk_idx: int
     text: str     # the actual chunk body (used directly as LLM context)
     similarity: float
+    file_id: str = ""  # source document (case) ID, empty when not backfilled
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +236,7 @@ class ChunkStore:
                 "title": title,
                 "section": section_name,
                 "chunk_idx": i,
+                "file_id": file_id,
             }
             for i, (section_name, _) in enumerate(chunks)
         ]
@@ -269,19 +271,30 @@ class ChunkStore:
             )
 
     def query(
-        self, text: str, top_k: int = 10, file_id: str = ""
+        self,
+        text: str,
+        top_k: int = 10,
+        file_id: str = "",
+        file_ids: list[str] | None = None,
     ) -> list[ChunkHit]:
         """Return the *top_k* most similar chunks to *text*.
 
         Args:
             text: Query string (e.g. a user question).
             top_k: Maximum number of chunks to return.
-            file_id: Correlation ID for embedding usage tracking.
+            file_id: Correlation ID for embedding usage tracking and optional filter.
+            file_ids: When set, restrict results to these source file IDs.
 
         Returns:
             List of ``ChunkHit`` sorted by descending similarity.  Empty if
             the collection is empty or the embeddings call fails.
         """
+        where_filter: dict[str, object] | None = None
+        if file_ids:
+            where_filter = {"file_id": {"$in": file_ids}}
+        elif file_id:
+            where_filter = {"file_id": file_id}
+
         current_count = self.count()
         if current_count == 0:
             return []
@@ -297,6 +310,7 @@ class ChunkStore:
             results = self._col.query(
                 query_embeddings=[vectors[0]],
                 n_results=n,
+                where=where_filter,  # type: ignore[arg-type]
                 include=["metadatas", "distances", "documents"],  # type: ignore[list-item]
             )
         except Exception as exc:  # noqa: BLE001
@@ -319,6 +333,7 @@ class ChunkStore:
                     chunk_idx=int(meta.get("chunk_idx", 0)),
                     text=doc,
                     similarity=similarity,
+                    file_id=str(meta.get("file_id", "")),
                 )
             )
 
@@ -328,6 +343,30 @@ class ChunkStore:
     def count(self) -> int:
         """Return the total number of chunk embeddings in the collection."""
         return self._col.count()  # type: ignore[no-any-return]
+
+    def count_by_file_id(self, file_id: str) -> int:
+        """Return how many chunks are tagged with *file_id*."""
+        result = self._col.get(where={"file_id": file_id}, include=[])
+        return len(result.get("ids", []))
+
+    def backfill_file_id(self, slug: str, file_id: str) -> int:
+        """Set ``file_id`` metadata on all existing chunks for *slug*.
+
+        Returns:
+            Number of chunk records updated.
+        """
+        existing = self._col.get(where={"slug": slug}, include=["metadatas"])
+        ids: list[str] = existing.get("ids", [])
+        if not ids:
+            return 0
+        metas: list[dict[str, object]] = existing.get("metadatas", [])
+        updated_metas: list[dict[str, object]] = []
+        for meta in metas:
+            merged = dict(meta)
+            merged["file_id"] = file_id
+            updated_metas.append(merged)
+        self._col.update(ids=ids, metadatas=updated_metas)
+        return len(ids)
 
     def clear(self) -> None:
         """Delete ALL chunks.  Used by ``scripts/reindex_chunks.py``."""

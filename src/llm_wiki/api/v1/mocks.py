@@ -62,12 +62,6 @@ async def notifications() -> list:
     return []
 
 
-@router.get("/skills")
-async def skills() -> list:
-    """MOCK."""
-    return []
-
-
 @router.get("/guidelines")
 async def guidelines() -> dict:
     """MOCK."""
@@ -91,11 +85,6 @@ async def metrics(db: AsyncSession = Depends(get_db)) -> dict:
         "last_activity": None,
     }
 
-
-@router.get("/search")
-async def search(query: str = "", scope: str = "all", limit: int = 10) -> list:
-    """MOCK: returns empty list; extend via AnswerAgent retrieval later."""
-    return []
 
 
 @router.get("/files/{file_id}/raw")

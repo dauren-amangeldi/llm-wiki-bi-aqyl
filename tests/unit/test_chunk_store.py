@@ -233,3 +233,32 @@ def test_chunk_hit_text_field_populated() -> None:
     hits = store.query("overview text", top_k=3)
     assert hits, "Expected at least one hit"
     assert all(len(h.text) > 0 for h in hits), "ChunkHit.text must not be empty"
+
+
+def test_upsert_page_stores_file_id_in_metadata() -> None:
+    """Chunks must carry file_id so retrieval can be scoped per source file (LW-N3)."""
+    store = _store()
+    content = "## Section\n\n" + ("Scoped retrieval text. " * 20)
+    source_id = "file-abc-123"
+    store.upsert_page("scoped-page", "Scoped", content, file_id=source_id)
+
+    assert store.count_by_file_id(source_id) > 0
+
+    other_id = "file-other-999"
+    assert store.count_by_file_id(other_id) == 0
+
+    hits = store.query("retrieval", top_k=5, file_ids=[source_id])
+    assert hits
+    assert all(h.slug == "scoped-page" for h in hits)
+
+
+def test_backfill_file_id_updates_existing_chunks() -> None:
+    """backfill_file_id patches metadata on chunks indexed before LW-N3."""
+    store = _store()
+    content = "## Legacy\n\n" + ("Legacy chunk body. " * 20)
+    store.upsert_page("legacy-page", "Legacy", content, file_id="")
+
+    assert store.count_by_file_id("legacy-file") == 0
+    updated = store.backfill_file_id("legacy-page", "legacy-file")
+    assert updated > 0
+    assert store.count_by_file_id("legacy-file") == updated

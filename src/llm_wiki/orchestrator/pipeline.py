@@ -26,8 +26,10 @@ from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
 from llm_wiki.storage.chunk_sync import sync_chunks_for_page
 from llm_wiki.storage.filesystem import atomic_write
 from llm_wiki.storage.index import IndexStorage
+from llm_wiki.storage.wiki_fts import upsert_wiki_fts
 from llm_wiki.utils.backlinks import extract_outgoing_links
 from llm_wiki.storage.log import append_log_entry
+from llm_wiki.utils.ids import new_file_id
 from llm_wiki.storage.metadata import (
     FileRecord,
     append_state_history,
@@ -137,6 +139,7 @@ async def process_file(file_id: str) -> None:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
                     _save_wiki_page(settings.wiki_dir, page)
+                    await _index_wiki_page_fts(session, page)
                     sync_chunks_for_page(
                         chunk_store=chunk_store,
                         slug=page.slug,
@@ -166,6 +169,7 @@ async def process_file(file_id: str) -> None:
                         pages_out = await writer.update_pages(file_text, existing, file_id)
                         for p in pages_out:
                             _save_wiki_page(settings.wiki_dir, p)
+                            await _index_wiki_page_fts(session, p)
                             sync_chunks_for_page(
                                 chunk_store=chunk_store,
                                 slug=p.slug,
@@ -186,6 +190,7 @@ async def process_file(file_id: str) -> None:
                         # Search found headings but files are absent — create new
                         page = await writer.create_page(file_text, file_id)
                         _save_wiki_page(settings.wiki_dir, page)
+                        await _index_wiki_page_fts(session, page)
                         sync_chunks_for_page(
                             chunk_store=chunk_store,
                             slug=page.slug,
@@ -275,6 +280,120 @@ async def process_file(file_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Notebook-scoped ingestion (LW-N16) — never touches wiki / Search Agent
+# ---------------------------------------------------------------------------
+
+
+def index_notebook_source(
+    chunk_store: ChunkStore,
+    file_id: str,
+    title: str,
+    text: str,
+) -> None:
+    """Chunk and embed raw source text for notebook-scoped retrieval.
+
+    Uses slug ``nb-{file_id}`` so notebook sources never collide with wiki
+    page slugs.  Does not write to ``data/wiki/`` or ``index.md``.
+    """
+    truncated = text[: settings.notebook_max_source_chars]
+    slug = f"nb-{file_id}"
+    chunk_store.upsert_page(slug=slug, title=title, content=truncated, file_id=file_id)
+    logger.info(
+        "notebook_source_indexed",
+        file_id=file_id,
+        slug=slug,
+        chars=len(truncated),
+    )
+
+
+async def ingest_notebook_file(
+    session: AsyncSession,
+    notebook_id: str,
+    owner_id: str,
+    filename: str,
+    content: bytes,
+    llm: LLMClient,
+    chunk_store: ChunkStore,
+) -> str:
+    """Save, embed (if needed), and attach a file to a notebook.
+
+    Skips re-embedding when the same ``file_id`` already has chunks — only
+    adds a ``notebook_files`` link so one file can live in many notebooks.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        notebook_id: Target notebook UUID.
+        owner_id: Must own the notebook.
+        filename: Original upload name.
+        content: Raw file bytes.
+        llm: LLM client for embeddings.
+        chunk_store: Chroma chunk store.
+
+    Returns:
+        The ``file_id`` attached to the notebook.
+
+    Raises:
+        LookupError: Notebook not found for owner.
+        ValueError: Unsupported extension or empty file.
+    """
+    import io
+
+    from llm_wiki.storage.metadata import attach_file, create_file_record, get_by_sha256, get_notebook
+    from llm_wiki.utils.hashing import sha256_stream
+
+    notebook = await get_notebook(session, notebook_id, owner_id)
+    if notebook is None:
+        raise LookupError(f"Notebook {notebook_id!r} not found for owner {owner_id!r}")
+
+    ext = Path(filename).suffix.lower()
+    if ext not in settings.allowed_extensions:
+        raise ValueError(
+            f"Unsupported file type {ext!r}. Allowed: {sorted(settings.allowed_extensions)}"
+        )
+    if len(content) == 0:
+        raise ValueError("Empty file is not allowed.")
+
+    sha = sha256_stream(io.BytesIO(content))
+    existing = await get_by_sha256(session, sha)
+
+    if existing is not None:
+        file_id = existing.file_id
+        if chunk_store.count_by_file_id(file_id) == 0:
+            raw_path = _find_raw_file(settings.raw_dir, file_id)
+            text = _parse_raw_file(raw_path)
+            index_notebook_source(chunk_store, file_id, existing.original_name, text)
+    else:
+        file_id = new_file_id()
+        dest = settings.raw_dir / f"{file_id}{ext}"
+        dest.write_bytes(content)
+        await create_file_record(session, file_id, filename, content_sha256=sha)
+        await update_file_status(session, file_id, "NOTEBOOK")
+        text = _parse_raw_file(dest)
+        index_notebook_source(chunk_store, file_id, filename, text)
+
+    await attach_file(session, notebook_id, file_id, owner_id)
+    return file_id
+
+
+async def attach_notebook_existing_file(
+    session: AsyncSession,
+    notebook_id: str,
+    owner_id: str,
+    file_id: str,
+) -> None:
+    """Link an existing ingested file to a notebook without re-embedding."""
+    from llm_wiki.storage.metadata import attach_file, get_notebook
+
+    notebook = await get_notebook(session, notebook_id, owner_id)
+    if notebook is None:
+        raise LookupError(f"Notebook {notebook_id!r} not found for owner {owner_id!r}")
+    record = await get_file_record(session, file_id)
+    if record is None:
+        raise LookupError(f"File {file_id!r} not found")
+    await attach_file(session, notebook_id, file_id, owner_id)
+
+
+# ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
@@ -341,6 +460,14 @@ def _save_wiki_page(wiki_dir: Path, page: WikiPage) -> None:
     dest = wiki_dir / f"{page.slug}.md"
     atomic_write(dest, page.content)
     logger.debug("wiki_page_saved", slug=page.slug, path=str(dest))
+
+
+async def _index_wiki_page_fts(session: AsyncSession, page: WikiPage) -> None:
+    """Update the FTS5 index after a wiki page is saved (LW-N4)."""
+    try:
+        await upsert_wiki_fts(session, page.slug, page.title, page.content)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("wiki_fts_index_failed", slug=page.slug, error=str(exc))
 
 
 def _load_existing_pages(

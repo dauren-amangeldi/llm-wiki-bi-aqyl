@@ -6,6 +6,23 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator  # noqa: F401
 
 
+class CurrentUser(BaseModel):
+    """Authenticated (or dev-stub) user resolved by ``get_current_user`` (LW-N1)."""
+
+    id: str
+    name: str
+    role: str
+
+
+class WikiSearchResult(BaseModel):
+    """Lexical FTS hit returned by GET /search (LW-N5)."""
+
+    slug: str
+    title: str
+    snippet: str
+    scope: str = "wiki"
+
+
 class FileUploadResponse(BaseModel):
     """Response body for POST /files.
 
@@ -154,3 +171,102 @@ class AskResponse(BaseModel):
     confidence: Literal["high", "medium", "low"]
     sources: list[AskSource]
     cost_usd: float
+
+
+class AdvisorHistoryTurn(BaseModel):
+    """One turn in an advisor follow-up conversation."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class AdvisorRequest(BaseModel):
+    """Request body for POST /api/v1/advisor."""
+
+    query: str = Field(min_length=3, max_length=1000)
+    role: str = Field(default="employee", max_length=64)
+    language: str = Field(default="ru", pattern="^(ru|en|kk)$")
+    scope: str = Field(default="all", max_length=32)
+    history: list[AdvisorHistoryTurn] = Field(default_factory=list)
+
+
+class AdvisorPointResponse(BaseModel):
+    """A single insight point in the advisor SSE final event."""
+
+    heading: str
+    body: str
+    metric: str = ""
+    tag: str = ""
+    case_id: str
+
+
+class AdvisorResponseBody(BaseModel):
+    """Structured advisor payload (non-refusal)."""
+
+    title: str
+    summary: str
+    points: list[AdvisorPointResponse]
+    source: str
+    caseCount: int
+
+
+class SkillResponse(BaseModel):
+    """Skill row exposed to the frontend skills panel (LW-N12)."""
+
+    slug: str
+    name: str
+    content: str
+    role: str
+    active: bool
+    description: str = ""
+
+
+class SkillUpdateRequest(BaseModel):
+    """Request body for PUT /api/v1/skills/{role}."""
+
+    content: str | None = Field(default=None, max_length=8000)
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    active: int | None = Field(default=None, ge=0, le=1)
+
+    def resolved_system_prompt(self) -> str | None:
+        """Return the prompt field supplied by the client."""
+        if self.system_prompt is not None:
+            return self.system_prompt
+        return self.content
+
+
+class NotebookCreateRequest(BaseModel):
+    """Request body for POST /api/v1/notebooks."""
+
+    title: str = Field(min_length=1, max_length=200)
+
+
+class NotebookFileRef(BaseModel):
+    """A source file attached to a notebook."""
+
+    file_id: str
+    original_name: str
+    status: str
+
+
+class NotebookResponse(BaseModel):
+    """Notebook with attached source files."""
+
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    files: list[NotebookFileRef] = Field(default_factory=list)
+
+
+class NotebookAttachRequest(BaseModel):
+    """Attach an existing file to a notebook without re-upload."""
+
+    file_id: str = Field(min_length=1, max_length=64)
+
+
+class NotebookAskRequest(BaseModel):
+    """Request body for POST /api/v1/notebooks/{id}/ask."""
+
+    question: str = Field(min_length=3, max_length=1000)
+    language: str = Field(default="ru", pattern="^(ru|en|kk)$")

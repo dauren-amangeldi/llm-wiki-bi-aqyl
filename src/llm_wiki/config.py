@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     chunk_max_chars: int = 2000        # ~500 tokens; per-chunk context window
     chunk_overlap_chars: int = 200     # overlap between consecutive chunks in a long section
     chunk_retrieval_top_k: int = 8     # how many chunks AnswerAgent pulls from Chroma
+    notebook_max_source_chars: int = 120_000  # token ceiling for notebook-only uploads (LW-N16)
 
     # --- Search tuning ---
     search_top_k: int = 20
