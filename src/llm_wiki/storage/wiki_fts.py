@@ -17,6 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 logger = structlog.get_logger(__name__)
 
+_STOPWORDS: frozenset[str] = frozenset({
+    "и", "в", "во", "не", "что", "на", "с", "со", "как", "а", "то", "по", "за", "к", "у",
+    "же", "бы", "или", "для", "от", "из", "о", "об", "это", "при", "над", "до", "про", "чем",
+    "the", "a", "an", "of", "to", "in", "is", "it", "and", "or", "for",
+})
+
 _FTS_DDL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
     slug UNINDEXED,
@@ -45,16 +51,26 @@ def extract_page_title(content: str, slug: str) -> str:
     return slug.replace("-", " ").title()
 
 
+def _normalize(s: str) -> str:
+    """Lower-case and fold ``ё`` → ``е`` for consistent FTS matching."""
+    return s.lower().replace("ё", "е")
+
+
 def _prepare_fts_query(q: str) -> str:
-    """Turn a user query into a safe FTS5 MATCH expression (prefix AND)."""
-    tokens = re.findall(r"[\w\u0400-\u04ff]+", q, flags=re.UNICODE)
-    if not tokens:
+    """Turn a user query into a safe FTS5 MATCH expression (prefix OR).
+
+    Uses OR so documents need not contain every token (incl. stop-words).
+    Stop-words and single-char tokens are dropped; if nothing remains, falls
+    back to the raw token list so pure-stop-word queries still attempt a match.
+    """
+    tokens = re.findall(r"[\w\u0400-\u04ff]+", _normalize(q), flags=re.UNICODE)
+    meaningful = [t for t in tokens if t not in _STOPWORDS and len(t) >= 2]
+    if not meaningful:
+        meaningful = tokens
+    if not meaningful:
         return ""
-    parts: list[str] = []
-    for token in tokens:
-        safe = token.replace('"', '""')
-        parts.append(f'"{safe}"*')
-    return " AND ".join(parts)
+    parts = [f'"{t.replace(chr(34), chr(34) * 2)}"*' for t in meaningful]
+    return " OR ".join(parts)
 
 
 async def ensure_wiki_fts_table(conn: AsyncConnection) -> None:
@@ -72,7 +88,7 @@ async def upsert_wiki_fts(
     await session.execute(text("DELETE FROM wiki_fts WHERE slug = :slug"), {"slug": slug})
     await session.execute(
         text("INSERT INTO wiki_fts(slug, title, body) VALUES (:slug, :title, :body)"),
-        {"slug": slug, "title": title, "body": body},
+        {"slug": slug, "title": _normalize(title), "body": _normalize(body)},
     )
     await session.commit()
     logger.debug("wiki_fts_upserted", slug=slug)
@@ -137,7 +153,7 @@ async def rebuild_wiki_fts_from_disk(
         title = extract_page_title(content, slug)
         await session.execute(
             text("INSERT INTO wiki_fts(slug, title, body) VALUES (:slug, :title, :body)"),
-            {"slug": slug, "title": title, "body": content},
+            {"slug": slug, "title": _normalize(title), "body": _normalize(content)},
         )
         count += 1
     await session.commit()

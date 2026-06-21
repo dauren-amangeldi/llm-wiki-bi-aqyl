@@ -1052,7 +1052,7 @@ async def add_notebook_file_endpoint(
         elif file_id:
             try:
                 await attach_notebook_existing_file(
-                    session, notebook_id, user.id, file_id
+                    session, notebook_id, user.id, file_id, chunk_store
                 )
             except LookupError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1083,16 +1083,24 @@ async def attach_notebook_file_json(
     user: CurrentUser = Depends(get_current_user),
 ) -> NotebookResponse:
     """JSON variant of file attach — used when linking an existing case."""
+    from llm_wiki.llm.chunk_store import ChunkStore
+    from llm_wiki.llm.client import LLMClient
     from llm_wiki.orchestrator.pipeline import attach_notebook_existing_file
     from llm_wiki.storage.metadata import Notebook, notebook_files_detail
 
     await _get_owned_notebook_or_404(session, notebook_id, user)
+
+    llm = LLMClient()
     try:
-        await attach_notebook_existing_file(
-            session, notebook_id, user.id, body.file_id
-        )
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        try:
+            await attach_notebook_existing_file(
+                session, notebook_id, user.id, body.file_id, chunk_store
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        await llm.aclose()
 
     notebook = await _get_owned_notebook_or_404(session, notebook_id, user)
     assert isinstance(notebook, Notebook)
