@@ -13,6 +13,15 @@ from llm_wiki.api.v1 import router
 from llm_wiki.config import settings
 from llm_wiki.storage.metadata import FileRecord
 
+_MOCK_TAG_SUGGESTIONS: list[dict[str, str]] = [
+    {"id": "t-strategy", "name": "Стратегия"},
+    {"id": "t-dev", "name": "Девелопмент"},
+    {"id": "t-finance", "name": "Финансы"},
+    {"id": "t-risk", "name": "Риски"},
+    {"id": "t-quality", "name": "Качество"},
+    {"id": "t-sales", "name": "Продажи"},
+]
+
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -55,6 +64,14 @@ class Dossier(BaseModel):
     page_count: int | None = None
     language: str = "ru"
     status: str
+
+
+class DocumentText(BaseModel):
+    """Full processed text of a document (markdown from its wiki page)."""
+
+    content: str | None = None
+    format: str = "markdown"
+    slug: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +168,91 @@ async def get_dossier(
         language="ru",
         status=fr.status,
     )
+
+
+@router.get("/documents/{document_id}/text", response_model=DocumentText)
+async def get_document_text(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> DocumentText:
+    """Return the full processed markdown text of a document."""
+    fr = await db.get(FileRecord, document_id)
+    if not fr:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    all_pages = list(fr.created_pages or []) + list(fr.updated_pages or [])
+    if not all_pages:
+        return DocumentText(content=None, slug=None)
+
+    slug = all_pages[0]
+    wiki_path = settings.wiki_dir / f"{slug}.md"
+    if not wiki_path.exists():
+        return DocumentText(content=None, slug=slug)
+
+    content = wiki_path.read_text(encoding="utf-8")
+    return DocumentText(content=content, format="markdown", slug=slug)
+
+
+@router.get("/documents/{document_id}/tags")
+async def get_document_tags(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, list[dict[str, str]]]:
+    """Return per-document tags and global suggestions (MVP: tags empty)."""
+    fr = await db.get(FileRecord, document_id)
+    if not fr:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"tags": [], "suggestions": _MOCK_TAG_SUGGESTIONS[:4]}
+
+
+@router.get("/documents/{document_id}/related")
+async def get_related_documents(
+    document_id: str,
+    limit: int = 4,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, list[dict[str, object]]]:
+    """Return documents with similar titles (word overlap)."""
+    fr = await db.get(FileRecord, document_id)
+    if not fr:
+        return {"items": []}
+
+    source_words = set(
+        Path(fr.original_name).stem.lower().replace("_", " ").replace("-", " ").split()
+    )
+    if not source_words:
+        return {"items": []}
+
+    stmt = select(FileRecord).where(
+        FileRecord.file_id != document_id,
+        FileRecord.status.notin_(["FAILED", "ROLLED_BACK"]),
+    )
+    rows = (await db.scalars(stmt.limit(50))).all()
+
+    scored: list[tuple[float, FileRecord]] = []
+    for row in rows:
+        words = set(
+            Path(row.original_name).stem.lower().replace("_", " ").replace("-", " ").split()
+        )
+        overlap = len(source_words & words) / max(len(source_words | words), 1)
+        scored.append((overlap, row))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    items: list[dict[str, object]] = []
+    for score, row in scored[:limit]:
+        name = Path(row.original_name).stem
+        items.append(
+            {
+                "document_id": row.file_id,
+                "title": name,
+                "content_type": (
+                    "pdf" if row.original_name.lower().endswith(".pdf") else "markdown"
+                ),
+                "score": round(score, 3),
+            }
+        )
+
+    return {"items": items}
 
 
 @router.post("/uploads", status_code=202)

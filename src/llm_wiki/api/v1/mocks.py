@@ -22,12 +22,6 @@ async def list_tags() -> list:
     return []
 
 
-@router.get("/documents/{document_id}/tags")
-async def doc_tags(document_id: str) -> list:
-    """MOCK."""
-    return []
-
-
 @router.get("/documents/{document_id}/sources")
 async def doc_sources(
     document_id: str,
@@ -48,12 +42,6 @@ async def doc_sources(
             "status": fr.status,
         }
     ]
-
-
-@router.get("/documents/{document_id}/related")
-async def doc_related(document_id: str) -> dict:
-    """MOCK."""
-    return {"items": []}
 
 
 @router.get("/notifications")
