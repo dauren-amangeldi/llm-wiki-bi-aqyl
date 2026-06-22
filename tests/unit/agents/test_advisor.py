@@ -46,6 +46,37 @@ def _hit(
 
 
 @pytest.mark.asyncio
+async def test_advisor_queries_globally_not_by_usage_file_id() -> None:
+    """Advisor must not filter Chroma by the usage correlation id."""
+    hits = [_hit()]
+    chunk_store = _mock_chunk_store(hits)
+    llm = _mock_llm(
+        {
+            "title": "T",
+            "summary": "S",
+            "points": [
+                {
+                    "heading": "H",
+                    "body": "B",
+                    "metric": "12%",
+                    "tag": "Tag",
+                    "case_id": "case-001",
+                }
+            ],
+            "source": "src",
+            "caseCount": 1,
+        }
+    )
+    agent = AdvisorAgent(llm, chunk_store)
+
+    await agent.advise("question?", file_id="advisor")
+
+    chunk_store.query.assert_called_once_with(
+        "question?", top_k=8, usage_file_id="advisor"
+    )
+
+
+@pytest.mark.asyncio
 async def test_advisor_happy_path_returns_structured_response() -> None:
     hits = [
         _hit(file_id="case-001"),

@@ -276,14 +276,17 @@ class ChunkStore:
         top_k: int = 10,
         file_id: str = "",
         file_ids: list[str] | None = None,
+        usage_file_id: str = "",
     ) -> list[ChunkHit]:
         """Return the *top_k* most similar chunks to *text*.
 
         Args:
             text: Query string (e.g. a user question).
             top_k: Maximum number of chunks to return.
-            file_id: Correlation ID for embedding usage tracking and optional filter.
+            file_id: When set (and *file_ids* is empty), restrict to this source file.
             file_ids: When set, restrict results to these source file IDs.
+            usage_file_id: Correlation ID for embedding usage logging only — never
+                applied as a ChromaDB metadata filter.
 
         Returns:
             List of ``ChunkHit`` sorted by descending similarity.  Empty if
@@ -295,13 +298,14 @@ class ChunkStore:
         elif file_id:
             where_filter = {"file_id": file_id}
 
+        embed_tag = usage_file_id or file_id or "chunk-query"
         current_count = self.count()
         if current_count == 0:
             return []
 
         n = min(top_k, current_count)
         try:
-            vectors = self._llm.embed([text], file_id=file_id)
+            vectors = self._llm.embed([text], file_id=embed_tag)
         except Exception as exc:  # noqa: BLE001
             logger.warning("chunk_store_query_embed_failed", error=str(exc))
             return []

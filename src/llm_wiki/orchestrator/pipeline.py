@@ -384,9 +384,10 @@ async def attach_notebook_existing_file(
 ) -> None:
     """Link an existing ingested file to a notebook.
 
-    When no chunks are tagged with *file_id*, embeds from ``data/raw/`` under
-    slug ``nb-{file_id}`` — same path as ``ingest_notebook_file``.  Does not
-    write to ``data/wiki/`` or run the Search Agent.
+    Always embeds raw text from ``data/raw/`` under slug ``nb-{file_id}`` so
+    notebook Q&A uses source content, even when global wiki chunks already
+    exist for the same ``file_id``.  Does not write to ``data/wiki/`` or run
+    the Search Agent.
     """
     from llm_wiki.storage.metadata import attach_file, get_notebook
 
@@ -396,13 +397,12 @@ async def attach_notebook_existing_file(
     record = await get_file_record(session, file_id)
     if record is None:
         raise LookupError(f"File {file_id!r} not found")
-    if chunk_store.count_by_file_id(file_id) == 0:
-        try:
-            raw_path = _find_raw_file(settings.raw_dir, file_id)
-        except FileNotFoundError as exc:
-            raise LookupError(f"Raw file for {file_id!r} not found") from exc
-        text = _parse_raw_file(raw_path)
-        index_notebook_source(chunk_store, file_id, record.original_name, text)
+    try:
+        raw_path = _find_raw_file(settings.raw_dir, file_id)
+    except FileNotFoundError as exc:
+        raise LookupError(f"Raw file for {file_id!r} not found") from exc
+    text = _parse_raw_file(raw_path)
+    index_notebook_source(chunk_store, file_id, record.original_name, text)
     await attach_file(session, notebook_id, file_id, owner_id)
 
 

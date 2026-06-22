@@ -95,7 +95,9 @@ class AdvisorAgent(BaseAgent):
             ``AdvisorResponse`` — either populated insights or a refusal payload.
         """
         try:
-            hits = self._chunk_store.query(query, top_k=ADVISOR_TOP_K, file_id=file_id)
+            hits = self._chunk_store.query(
+                query, top_k=ADVISOR_TOP_K, usage_file_id=file_id
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("advisor_chunk_query_failed", error=str(exc))
             hits = []

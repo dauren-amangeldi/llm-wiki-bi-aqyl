@@ -77,22 +77,34 @@ async def test_attach_existing_file_backfills_when_no_chunks(
         mock_index.assert_called_once()
         assert mock_index.call_args.args[1] == "global-file"
 
-    chunk_store.count_by_file_id.assert_called_once_with("global-file")
-
 
 @pytest.mark.asyncio
-async def test_attach_existing_file_skips_reindex_when_chunks_exist(
+async def test_attach_existing_file_always_indexes_from_raw(
     db_session: AsyncSession,
+    tmp_path,
 ) -> None:
-    """Attach does not re-embed when chunks already exist for file_id."""
+    """Library attach always embeds raw text into nb-{file_id}, even if wiki chunks exist."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "file-1.md").write_text(
+        "# Case\n\nNotebook raw content xyzzy.",
+        encoding="utf-8",
+    )
+
     nb = await create_notebook(db_session, "user-a", "Research")
     await create_file_record(db_session, "file-1", "doc.md")
 
     chunk_store = MagicMock()
     chunk_store.count_by_file_id.return_value = 3
 
-    with patch("llm_wiki.orchestrator.pipeline.index_notebook_source") as mock_index:
+    with patch("llm_wiki.orchestrator.pipeline.settings") as mock_settings, patch(
+        "llm_wiki.orchestrator.pipeline.index_notebook_source"
+    ) as mock_index:
+        mock_settings.raw_dir = raw_dir
         await attach_notebook_existing_file(
             db_session, nb.id, "user-a", "file-1", chunk_store
         )
-        mock_index.assert_not_called()
+        mock_index.assert_called_once()
+        assert mock_index.call_args.args[1] == "file-1"
+
+    chunk_store.count_by_file_id.assert_not_called()

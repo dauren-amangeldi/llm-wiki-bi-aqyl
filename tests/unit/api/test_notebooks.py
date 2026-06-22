@@ -114,21 +114,27 @@ async def test_notebook_foreign_owner_returns_404(
 async def test_notebook_attach_existing_file(
     client: AsyncClient,
     db_engine,
+    tmp_path,
 ) -> None:
     """Attach JSON endpoint links an existing file without re-upload."""
     from llm_wiki.storage.metadata import create_file_record
 
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "file-abc.md").write_text("# Case\n\nAttached library content.", encoding="utf-8")
+
     factory = async_sessionmaker(bind=db_engine, expire_on_commit=False, autoflush=False)
     async with factory() as session:
         nb = await create_notebook(session, "user-a", "Case study")
-        await create_file_record(session, "file-abc", "case.pdf")
+        await create_file_record(session, "file-abc", "case.md")
 
-    with patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls, patch(
+    with patch("llm_wiki.orchestrator.pipeline.settings") as mock_settings, patch(
+        "llm_wiki.orchestrator.pipeline.index_notebook_source"
+    ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls, patch(
         "llm_wiki.llm.chunk_store.ChunkStore"
     ) as mock_chunk_cls:
-        mock_chunk = MagicMock()
-        mock_chunk.count_by_file_id.return_value = 2
-        mock_chunk_cls.return_value = mock_chunk
+        mock_settings.raw_dir = raw_dir
+        mock_chunk_cls.return_value = MagicMock()
         mock_llm = MagicMock()
         mock_llm.aclose = AsyncMock()
         mock_llm_cls.return_value = mock_llm

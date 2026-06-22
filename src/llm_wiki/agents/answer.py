@@ -257,8 +257,8 @@ class AnswerAgent(BaseAgent):
             chunk_hits = self._chunk_store.query(
                 question,
                 top_k=settings.chunk_retrieval_top_k,
-                file_id=file_id,
                 file_ids=file_ids,
+                usage_file_id=file_id,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("notebook_ask_chunk_query_failed", error=str(exc))
@@ -367,7 +367,7 @@ class AnswerAgent(BaseAgent):
             chunk_hits = self._chunk_store.query(
                 question,
                 top_k=settings.chunk_retrieval_top_k,
-                file_id=file_id,
+                usage_file_id=file_id,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("ask_chunk_query_failed", error=str(exc))

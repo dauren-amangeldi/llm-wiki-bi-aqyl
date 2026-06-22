@@ -252,6 +252,20 @@ def test_upsert_page_stores_file_id_in_metadata() -> None:
     assert all(h.slug == "scoped-page" for h in hits)
 
 
+def test_usage_file_id_does_not_apply_where_filter() -> None:
+    """usage_file_id is for embed logging only — must not scope Chroma results."""
+    store = _store()
+    content_a = "## A\n\n" + ("Alpha retrieval content. " * 20)
+    content_b = "## B\n\n" + ("Beta retrieval content. " * 20)
+    store.upsert_page("page-a", "A", content_a, file_id="real-file")
+    store.upsert_page("page-b", "B", content_b, file_id="other-file")
+
+    hits = store.query("Alpha retrieval", top_k=5, usage_file_id="advisor")
+    assert hits
+    assert any(h.file_id == "real-file" for h in hits)
+    assert not store.query("Alpha retrieval", top_k=5, file_id="advisor")
+
+
 def test_backfill_file_id_updates_existing_chunks() -> None:
     """backfill_file_id patches metadata on chunks indexed before LW-N3."""
     store = _store()

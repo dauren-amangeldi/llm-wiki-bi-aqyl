@@ -37,6 +37,9 @@ async def test_advisor_sse_stream_returns_done_event(mock_advisor_response: Advi
     mock_agent.advise = AsyncMock(return_value=mock_advisor_response)
 
     with patch("llm_wiki.agents.advisor.AdvisorAgent", return_value=mock_agent), patch(
+        "llm_wiki.storage.metadata.resolve_skill_system_prompt",
+        AsyncMock(return_value=None),
+    ), patch(
         "llm_wiki.llm.chunk_store.ChunkStore"
     ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
         mock_llm = MagicMock()
@@ -72,6 +75,9 @@ async def test_advisor_sse_refusal_event() -> None:
     mock_agent.advise = AsyncMock(return_value=refusal)
 
     with patch("llm_wiki.agents.advisor.AdvisorAgent", return_value=mock_agent), patch(
+        "llm_wiki.storage.metadata.resolve_skill_system_prompt",
+        AsyncMock(return_value=None),
+    ), patch(
         "llm_wiki.llm.chunk_store.ChunkStore"
     ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
         mock_llm = MagicMock()
