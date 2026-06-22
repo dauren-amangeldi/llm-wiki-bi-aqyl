@@ -32,7 +32,7 @@ async def get_current_user(
 
     When the header is absent, falls back to the stable dev user
     ``dev-user``.  Creates the user row on first sight so ``user.id`` is
-    always persisted and can flow into notebook ownership.
+    always persisted for dev-user identity.
     """
     user_id = request.headers.get("X-User-Id", "dev-user")
     name = request.headers.get("X-User-Name", "Dev User")

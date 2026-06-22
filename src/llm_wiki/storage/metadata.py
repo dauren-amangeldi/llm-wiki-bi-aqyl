@@ -31,7 +31,7 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
-    """Minimal user record for notebook ownership (LW-N1)."""
+    """Minimal user record for dev-user identity (get_current_user)."""
 
     __tablename__ = "users"
 
@@ -69,38 +69,6 @@ class FileRecord(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
-    )
-
-
-class Notebook(Base):
-    """A user-owned collection of attached source files (LW-N2)."""
-
-    __tablename__ = "notebooks"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    owner_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-    )
-
-
-class NotebookFile(Base):
-    """M2M link between a notebook and an ingested file (LW-N2)."""
-
-    __tablename__ = "notebook_files"
-
-    notebook_id: Mapped[str] = mapped_column(String, primary_key=True)
-    file_id: Mapped[str] = mapped_column(String, primary_key=True)
-    added_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -389,134 +357,8 @@ async def ensure_dev_user(session: AsyncSession) -> User:
 
 
 # ---------------------------------------------------------------------------
-# Notebook CRUD (LW-N2)
+# Slug ↔ file_id mapping (LW-N3 backfill)
 # ---------------------------------------------------------------------------
-
-
-async def create_notebook(
-    session: AsyncSession,
-    owner_id: str,
-    title: str,
-) -> Notebook:
-    """Create a notebook owned by *owner_id*."""
-    notebook = Notebook(
-        id=new_file_id(),
-        owner_id=owner_id,
-        title=title,
-    )
-    session.add(notebook)
-    await session.commit()
-    await session.refresh(notebook)
-    return notebook
-
-
-async def list_notebooks(
-    session: AsyncSession,
-    owner_id: str,
-) -> list[Notebook]:
-    """Return all notebooks belonging to *owner_id*, newest first."""
-    result = await session.execute(
-        select(Notebook)
-        .where(Notebook.owner_id == owner_id)
-        .order_by(Notebook.created_at.desc())
-    )
-    return list(result.scalars().all())
-
-
-async def get_notebook(
-    session: AsyncSession,
-    notebook_id: str,
-    owner_id: str,
-) -> Notebook | None:
-    """Return a notebook only when it belongs to *owner_id*."""
-    result = await session.execute(
-        select(Notebook).where(
-            Notebook.id == notebook_id,
-            Notebook.owner_id == owner_id,
-        )
-    )
-    return result.scalar_one_or_none()
-
-
-async def delete_notebook(
-    session: AsyncSession,
-    notebook_id: str,
-    owner_id: str,
-) -> bool:
-    """Delete a notebook and its file links. Returns False if not found/owned."""
-    from sqlalchemy import delete as sa_delete
-
-    notebook = await get_notebook(session, notebook_id, owner_id)
-    if notebook is None:
-        return False
-    await session.execute(
-        sa_delete(NotebookFile).where(NotebookFile.notebook_id == notebook_id)
-    )
-    await session.delete(notebook)
-    await session.commit()
-    return True
-
-
-async def attach_file(
-    session: AsyncSession,
-    notebook_id: str,
-    file_id: str,
-    owner_id: str,
-) -> None:
-    """Attach *file_id* to *notebook_id* after verifying ownership.
-
-    Raises:
-        ValueError: If the notebook does not exist or is not owned by *owner_id*.
-    """
-    notebook = await get_notebook(session, notebook_id, owner_id)
-    if notebook is None:
-        raise ValueError(f"Notebook {notebook_id!r} not found for owner {owner_id!r}")
-
-    existing = await session.execute(
-        select(NotebookFile).where(
-            NotebookFile.notebook_id == notebook_id,
-            NotebookFile.file_id == file_id,
-        )
-    )
-    if existing.scalar_one_or_none() is not None:
-        return
-
-    session.add(NotebookFile(notebook_id=notebook_id, file_id=file_id))
-    notebook.updated_at = datetime.now(timezone.utc)
-    await session.commit()
-
-
-async def notebook_files_detail(
-    session: AsyncSession,
-    notebook_id: str,
-    owner_id: str,
-) -> list[FileRecord]:
-    """Return ``FileRecord`` rows for files attached to a owned notebook."""
-    file_ids = await notebook_file_ids(session, notebook_id, owner_id)
-    if not file_ids:
-        return []
-    result = await session.execute(
-        select(FileRecord).where(FileRecord.file_id.in_(file_ids))
-    )
-    by_id = {r.file_id: r for r in result.scalars().all()}
-    return [by_id[fid] for fid in file_ids if fid in by_id]
-
-
-async def notebook_file_ids(
-    session: AsyncSession,
-    notebook_id: str,
-    owner_id: str,
-) -> list[str]:
-    """Return file_ids attached to *notebook_id* when owned by *owner_id*."""
-    notebook = await get_notebook(session, notebook_id, owner_id)
-    if notebook is None:
-        return []
-    result = await session.execute(
-        select(NotebookFile.file_id)
-        .where(NotebookFile.notebook_id == notebook_id)
-        .order_by(NotebookFile.added_at.asc())
-    )
-    return list(result.scalars().all())
 
 
 async def build_slug_to_file_id_map(session: AsyncSession) -> dict[str, str]:

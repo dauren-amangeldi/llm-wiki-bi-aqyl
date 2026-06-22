@@ -17,15 +17,10 @@ from llm_wiki.storage.metadata import (
     Base,
     FileRecord,
     append_state_history,
-    attach_file,
     create_file_record,
-    create_notebook,
     ensure_dev_user,
     get_file_record,
-    get_notebook,
     get_or_create_user,
-    list_notebooks,
-    notebook_file_ids,
     update_file_status,
 )
 
@@ -320,39 +315,3 @@ async def test_ensure_dev_user(db_session: AsyncSession) -> None:
     user = await ensure_dev_user(db_session)
     assert user.id == "dev-user"
     assert user.role == "admin"
-
-
-# ===========================================================================
-# metadata.py — notebooks (LW-N2)
-# ===========================================================================
-
-
-async def test_notebook_attach_and_list_files(db_session: AsyncSession) -> None:
-    """Create a notebook, attach two files, read them back."""
-    owner = await get_or_create_user(db_session, "owner-a", "Owner A", "admin")
-    await create_file_record(db_session, "file-1", "a.pdf")
-    await create_file_record(db_session, "file-2", "b.pdf")
-
-    notebook = await create_notebook(db_session, owner.id, "My notebook")
-    await attach_file(db_session, notebook.id, "file-1", owner.id)
-    await attach_file(db_session, notebook.id, "file-2", owner.id)
-
-    file_ids = await notebook_file_ids(db_session, notebook.id, owner.id)
-    assert file_ids == ["file-1", "file-2"]
-
-
-async def test_notebook_owner_isolation(db_session: AsyncSession) -> None:
-    """A notebook is invisible to a different owner_id."""
-    owner_a = await get_or_create_user(db_session, "owner-a", "A", "admin")
-    owner_b = await get_or_create_user(db_session, "owner-b", "B", "employee")
-
-    notebook = await create_notebook(db_session, owner_a.id, "Private")
-    await create_file_record(db_session, "file-x", "x.pdf")
-    await attach_file(db_session, notebook.id, "file-x", owner_a.id)
-
-    assert await get_notebook(db_session, notebook.id, owner_a.id) is not None
-    assert await get_notebook(db_session, notebook.id, owner_b.id) is None
-    assert await notebook_file_ids(db_session, notebook.id, owner_b.id) == []
-
-    visible = await list_notebooks(db_session, owner_b.id)
-    assert visible == []
