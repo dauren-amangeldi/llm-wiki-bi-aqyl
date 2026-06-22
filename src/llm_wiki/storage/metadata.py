@@ -72,6 +72,25 @@ class FileRecord(Base):
     )
 
 
+class CaseRecord(Base):
+    """A user-created case (topic container) grouping related documents."""
+
+    __tablename__ = "cases"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    doc_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class Skill(Base):
     """Role-based system prompt for AI modes and positions (LW-N11)."""
 
