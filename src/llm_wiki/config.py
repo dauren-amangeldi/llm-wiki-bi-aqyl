@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     # --- API ---
     max_file_size_mb: int = 50
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     allowed_extensions: frozenset[str] = frozenset({".pdf", ".md"})
 
     # --- Wiki output language ---
