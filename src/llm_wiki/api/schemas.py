@@ -14,6 +14,18 @@ class CurrentUser(BaseModel):
     role: str
 
 
+class DocumentSearchResult(BaseModel):
+    """Document hit returned by GET /search (MVP mock contract)."""
+
+    document_id: str
+    document_title: str
+    snippet: str = ""
+    scope: str = "internal"
+    classification: str = ""
+    score: float = 1.0
+    content_type: str = "markdown"
+
+
 class WikiSearchResult(BaseModel):
     """Lexical FTS hit returned by GET /search (LW-N5)."""
 

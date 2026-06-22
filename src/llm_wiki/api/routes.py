@@ -32,13 +32,12 @@ from llm_wiki.api.schemas import (
     SkillUpdateRequest,
     StateEntry,
     StatsResponse,
+    DocumentSearchResult,
     WikiPageResponse,
-    WikiSearchResult,
 )
 from llm_wiki.config import settings
 from llm_wiki.orchestrator.tasks import celery_app, process_file_task, run_weekly_audit
 from llm_wiki.storage.metadata import FileRecord, create_file_record, get_by_sha256, get_file_record
-from llm_wiki.storage.wiki_fts import keyword_search
 from llm_wiki.utils.backlinks import extract_backlinks
 from llm_wiki.utils.hashing import sha256_stream
 from llm_wiki.utils.ids import new_file_id
@@ -612,41 +611,47 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Keyword search (FTS5 — no LLM, LW-N5)
+# Document search (MVP — ILIKE on file names, mock contract)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @router.get(
     "/search",
-    response_model=list[WikiSearchResult],
-    summary="Lexical full-text search over wiki pages",
+    response_model=list[DocumentSearchResult],
+    summary="Search documents by filename",
     tags=["search"],
 )
-async def search_wiki(
-    q: str = Query("", description="Search query (min 3 characters)"),
+async def search_documents(
+    q: str = Query("", description="Search query"),
+    query: str = Query("", description="Alias for q"),
     scope: str = Query("all", description="Scope filter (accepted, ignored for MVP)"),
-    language: str = Query("ru", description="Language (accepted, ignored for MVP)"),
     limit: int = Query(10, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
-) -> list[WikiSearchResult]:
-    """Run FTS5 keyword search over indexed wiki pages.
-
-    No LLM calls — pure SQLite ``MATCH``.  Returns an empty list when
-    ``q`` is shorter than 3 characters.
-    """
-    _ = scope, language  # accepted for API compat; filtering deferred
-    if len(q.strip()) < 3:
+) -> list[DocumentSearchResult]:
+    """Substring match on ingested file names — returns clickable document hits."""
+    _ = scope
+    term = (q or query).strip()
+    if not term:
         return []
 
-    hits = await keyword_search(session, q, limit=limit)
+    stmt = (
+        select(FileRecord)
+        .where(FileRecord.status.notin_(["FAILED", "ROLLED_BACK", "RECEIVED"]))
+        .where(FileRecord.original_name.ilike(f"%{term}%"))
+        .limit(limit)
+    )
+    rows = (await session.scalars(stmt)).all()
     return [
-        WikiSearchResult(
-            slug=h.slug,
-            title=h.title,
-            snippet=h.snippet,
-            scope="wiki",
+        DocumentSearchResult(
+            document_id=fr.file_id,
+            document_title=Path(fr.original_name).stem,
+            snippet="",
+            scope="internal",
+            classification="",
+            score=1.0,
+            content_type="pdf" if fr.original_name.lower().endswith(".pdf") else "markdown",
         )
-        for h in hits
+        for fr in rows
     ]
 
 
