@@ -61,6 +61,16 @@ def process_file_task(self: Any, file_id: str) -> None:
     Args:
         file_id: UUID of the file to process.
     """
+    import logging as _stdlib_logging
+
+    # Stdlib log before any local imports — distinguishes Celery "received"
+    # from actually entering the task body (branch A vs B in runbook).
+    _stdlib_logging.getLogger(__name__).info(
+        "celery_task_entered file_id=%s celery_task_id=%s",
+        file_id,
+        getattr(self.request, "id", "?"),
+    )
+
     from llm_wiki.logging_config import configure_logging
     from llm_wiki.orchestrator.pipeline import process_file  # local import avoids circular
 

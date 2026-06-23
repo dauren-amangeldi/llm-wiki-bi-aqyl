@@ -4,11 +4,14 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
 from llm_wiki.config import settings
+from llm_wiki.storage.wiki_fts import keyword_search
 
 
 class WikiPageSummary(BaseModel):
@@ -51,16 +54,49 @@ def _plain_snippet(content: str, length: int = 200) -> str:
     return text[:length] + ("…" if len(text) > length else "")
 
 
+def _summary_from_path(path: Path, snippet: str | None = None) -> WikiPageSummary | None:
+    """Build a WikiPageSummary from a wiki .md file (snippet overridable)."""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    slug = path.stem
+    return WikiPageSummary(
+        slug=slug,
+        title=_extract_title(content, slug),
+        snippet=snippet if snippet is not None else _plain_snippet(content),
+        size_chars=len(content),
+        updated_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+        backlinks_count=content.count("[[") - content.count("[[]]"),
+    )
+
+
 @router.get("/wiki", response_model=list[WikiPageSummary])
 async def list_wiki_pages(
     q: str | None = None,
     limit: int = 200,
     offset: int = 0,
+    db: AsyncSession = Depends(get_db),
 ) -> list[WikiPageSummary]:
-    """List all wiki pages (newest first)."""
+    """List wiki pages (newest first), or full-text search when *q* is given.
+
+    With a query, runs the FTS5 lexical index over page **bodies** (ranked,
+    with ``<mark>`` highlight snippets) — keyword search like Ctrl+F, used when
+    the AI advisor is OFF. Without a query, lists all pages by recency.
+    """
     wiki_dir = settings.wiki_dir
     if not wiki_dir.exists():
         return []
+
+    term = (q or "").strip()
+    if term:
+        hits = await keyword_search(db, term, limit=limit + offset)
+        results: list[WikiPageSummary] = []
+        for hit in hits:
+            summary = _summary_from_path(wiki_dir / f"{hit.slug}.md", snippet=hit.snippet)
+            if summary is not None:
+                results.append(summary)
+        return results[offset : offset + limit]
 
     files = sorted(
         wiki_dir.glob("*.md"),

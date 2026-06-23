@@ -89,6 +89,12 @@ async def process_file(file_id: str) -> None:
             raise ValueError(f"File {file_id!r} not found in database")
 
         completed: set[str] = {e["state"] for e in (record.state_history or [])}
+        logger.info(
+            "pipeline_started",
+            file_id=file_id,
+            status=record.status,
+            completed_states=sorted(completed),
+        )
 
         # One LLMClient for the whole pipeline run; closed in finally so its
         # httpx connections are released before the event loop shuts down.
@@ -97,15 +103,18 @@ async def process_file(file_id: str) -> None:
             # ----------------------------------------------------------------
             # STORED — parse raw file to plain text
             # ----------------------------------------------------------------
+            logger.info("pipeline_step_start", file_id=file_id, step="STORED")
             raw_path = _find_raw_file(settings.raw_dir, file_id)
             file_text = _parse_raw_file(raw_path)
 
             if "STORED" not in completed:
                 await _transition(session, file_id, "STORED")
+            logger.info("pipeline_step_done", file_id=file_id, step="STORED")
 
             # ----------------------------------------------------------------
             # SEARCHED — Search Agent v2 (embedding pre-filter + LLM re-rank)
             # ----------------------------------------------------------------
+            logger.info("pipeline_step_start", file_id=file_id, step="SEARCHED")
             embedding_store = EmbeddingStore(
                 chroma_path=settings.chroma_dir, llm_client=llm
             )
@@ -126,11 +135,13 @@ async def process_file(file_id: str) -> None:
 
             if "SEARCHED" not in completed:
                 await _transition(session, file_id, "SEARCHED")
+            logger.info("pipeline_step_done", file_id=file_id, step="SEARCHED")
 
             # ----------------------------------------------------------------
             # WRITTEN — Writer Agent creates / updates pages
             # ----------------------------------------------------------------
             if "WRITTEN" not in completed:
+                logger.info("pipeline_step_start", file_id=file_id, step="WRITTEN")
                 writer = WriterAgent(llm)
                 created_pages: list[str] = []
                 updated_pages: list[str] = []
@@ -219,6 +230,7 @@ async def process_file(file_id: str) -> None:
                 )
                 await session.commit()
                 await _transition(session, file_id, "WRITTEN")
+                logger.info("pipeline_step_done", file_id=file_id, step="WRITTEN")
 
             # ----------------------------------------------------------------
             # LINTED — deterministic quality checks on the whole wiki

@@ -62,6 +62,7 @@ def _make_client(tmp_path: Path, provider: str = "openai") -> Any:
             mock_settings.ollama_model = "qwen2.5-coder:14b"
             mock_settings.anthropic_api_key = ""
             mock_settings.anthropic_model = "claude-3-5-sonnet"
+            mock_settings.llm_timeout_s = 60.0
             mock_settings.usage_log_path = tmp_path / "usage.log"
             mock_settings.price_table = {
                 "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
@@ -257,8 +258,47 @@ def test_load_prompt_interpolates_variables(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# aclose / event-loop lifecycle
+# Timeouts
 # ---------------------------------------------------------------------------
+
+
+def test_llm_client_passes_timeout_to_async_openai(tmp_path: Path) -> None:
+    """AsyncOpenAI is constructed with settings.llm_timeout_s."""
+    from llm_wiki.llm.client import LLMClient
+
+    with patch("llm_wiki.llm.client.openai.AsyncOpenAI") as mock_sdk:
+        with patch("llm_wiki.config.settings") as mock_settings:
+            mock_settings.llm_provider = "openai"
+            mock_settings.openai_api_key = "sk-test"
+            mock_settings.openai_model = "gpt-5.4-mini"
+            mock_settings.llm_timeout_s = 45.0
+            mock_settings.usage_log_path = tmp_path / "usage.log"
+            mock_settings.daily_cost_limit_usd = None
+            mock_settings.daily_token_limit = None
+            mock_settings.price_table = {
+                "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
+            }
+            LLMClient()
+    mock_sdk.assert_called_once_with(api_key="sk-test", timeout=45.0)
+
+
+def test_embed_passes_timeout_to_sync_openai(tmp_path: Path) -> None:
+    """embed() constructs sync OpenAI client with settings.llm_timeout_s."""
+    from llm_wiki.config import settings
+
+    client = _make_client(tmp_path)
+    mock_response = MagicMock()
+    mock_response.usage = MagicMock(total_tokens=10)
+    mock_response.data = [MagicMock(embedding=[0.1, 0.2])]
+
+    with patch("llm_wiki.llm.client.openai.OpenAI") as mock_sync:
+        mock_sync.return_value.embeddings.create.return_value = mock_response
+        with patch.object(settings, "openai_api_key", "sk-test"), patch.object(
+            settings, "llm_timeout_s", 30.0
+        ), patch.object(client._budget, "check"):
+            client.embed(["hello"], file_id="fid")
+
+    mock_sync.assert_called_once_with(api_key="sk-test", timeout=30.0)
 
 
 def test_aclose_called_within_same_loop_no_runtime_error(tmp_path: Path) -> None:

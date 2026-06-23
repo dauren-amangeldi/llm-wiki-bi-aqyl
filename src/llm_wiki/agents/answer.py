@@ -148,7 +148,68 @@ class AnswerAgent(BaseAgent):
                 list(document.created_pages or []) + list(document.updated_pages or [])
             )
         )
+        return await self._answer_from_slugs(
+            question=question,
+            slugs=slugs,
+            language=language,
+            file_id=file_id,
+            status=document.status,
+        )
 
+    async def answer_for_case(
+        self,
+        question: str,
+        documents: list[FileRecord],
+        language: str = "ru",
+        file_id: str = "ask",
+    ) -> AnswerResult:
+        """Ask scoped to a whole case — answers across all its documents.
+
+        Aggregates the wiki pages created/updated by every document linked to
+        the case and feeds them as one context block (NotebookLM-style Q&A over
+        the full case rather than a single source).
+
+        Args:
+            question: User question.
+            documents: FileRecords for all documents linked to the case.
+            language: Response language (``ru``, ``en``, or ``kk``).
+            file_id: Correlation ID for usage logging.
+
+        Returns:
+            ``AnswerResult`` with answer text, confidence, sources, and cost.
+        """
+        slugs: list[str] = []
+        for doc in documents:
+            slugs.extend(list(doc.created_pages or []))
+            slugs.extend(list(doc.updated_pages or []))
+        slugs = list(dict.fromkeys(slugs))
+
+        # Surface the least-finished document status so the "still processing"
+        # message is accurate when no pages exist yet.
+        statuses = {d.status for d in documents}
+        status_label = "EMPTY" if not documents else ", ".join(sorted(statuses))
+
+        return await self._answer_from_slugs(
+            question=question,
+            slugs=slugs,
+            language=language,
+            file_id=file_id,
+            status=status_label,
+        )
+
+    async def _answer_from_slugs(
+        self,
+        question: str,
+        slugs: list[str],
+        language: str,
+        file_id: str,
+        status: str,
+    ) -> AnswerResult:
+        """Answer a question from a fixed set of wiki page slugs (no retrieval).
+
+        Shared core for ``answer_for_document`` and ``answer_for_case``: loads
+        the given pages as guaranteed context and synthesises an answer.
+        """
         loaded: list[tuple[str, str]] = []
         total = 0
         for slug in slugs:
@@ -165,21 +226,21 @@ class AnswerAgent(BaseAgent):
             msg = {
                 "ru": (
                     f"Файл ещё обрабатывается или wiki-страница не создана "
-                    f"(статус: {document.status})."
+                    f"(статус: {status})."
                 ),
                 "kk": (
                     f"Файл әлі өңделуде немесе уики-беті жасалмаған "
-                    f"(статус: {document.status})."
+                    f"(статус: {status})."
                 ),
                 "en": (
                     f"The file is still being processed or no wiki page was created yet "
-                    f"(status: {document.status})."
+                    f"(status: {status})."
                 ),
             }.get(
                 language,
                 (
                     f"The file is still being processed or no wiki page was created yet "
-                    f"(status: {document.status})."
+                    f"(status: {status})."
                 ),
             )
             return AnswerResult(answer=msg, confidence="low", sources=[], cost_usd=0.0)

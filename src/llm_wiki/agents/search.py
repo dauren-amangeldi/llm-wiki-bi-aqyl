@@ -105,8 +105,18 @@ class SearchAgent(BaseAgent):
             return []
 
         try:
+            logger.info(
+                "search_embedding_prefilter_start",
+                file_id=file_id,
+                store_count=self._store.count(),
+            )
             candidates = self._store.query(
                 summary, top_k=settings.search_top_k, file_id=file_id
+            )
+            logger.info(
+                "search_embedding_prefilter_done",
+                file_id=file_id,
+                n_candidates=len(candidates),
             )
         except Exception as exc:
             raise SearchAgentError(f"Embedding query failed: {exc}") from exc
@@ -128,6 +138,11 @@ class SearchAgent(BaseAgent):
         # Stage 2: LLM re-rank
         # ------------------------------------------------------------------
         try:
+            logger.info(
+                "search_llm_rerank_start",
+                file_id=file_id,
+                n_candidates=len(above_threshold),
+            )
             reranked = await self._llm_rerank(
                 summary=summary,
                 candidates=above_threshold,

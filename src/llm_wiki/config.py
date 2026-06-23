@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.4-mini"
     anthropic_api_key: str = Field(default="", repr=False)
     anthropic_model: str = "claude-3-5-sonnet-20241022"
+    llm_timeout_s: float = 60.0  # HTTP timeout for LLM + embedding API calls
 
     # --- Infrastructure ---
     redis_url: str = "redis://redis:6379/0"

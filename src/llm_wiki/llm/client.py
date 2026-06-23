@@ -83,16 +83,21 @@ class LLMClient:
         # _client is typed Any because AsyncOpenAI and AsyncAnthropic have
         # different method signatures — dispatch happens in _call_provider.
         # _non_retryable is built per-instance to avoid global mutation.
+        timeout = settings.llm_timeout_s
         match self._provider:
             case "openai":
-                self._client: Any = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+                self._client: Any = openai.AsyncOpenAI(
+                    api_key=settings.openai_api_key,
+                    timeout=timeout,
+                )
                 self._model: str = settings.openai_model
                 self._non_retryable: tuple[type[Exception], ...] = _NON_RETRYABLE_OPENAI
             case "anthropic":
                 import anthropic
 
                 self._client = anthropic.AsyncAnthropic(
-                    api_key=settings.anthropic_api_key
+                    api_key=settings.anthropic_api_key,
+                    timeout=timeout,
                 )
                 self._model = settings.anthropic_model
                 self._non_retryable = _NON_RETRYABLE_OPENAI + (
@@ -104,6 +109,7 @@ class LLMClient:
                 self._client = openai.AsyncOpenAI(
                     base_url=f"{settings.ollama_base_url}/v1",
                     api_key="ollama",  # Ollama ignores the key but SDK requires non-empty
+                    timeout=timeout,
                 )
                 self._model = settings.ollama_model
                 self._non_retryable = _NON_RETRYABLE_OPENAI
@@ -204,7 +210,10 @@ class LLMClient:
                 "OPENAI_API_KEY is required for embeddings (text-embedding-3-small)."
             )
 
-        sync_client = openai.OpenAI(api_key=settings.openai_api_key)
+        sync_client = openai.OpenAI(
+            api_key=settings.openai_api_key,
+            timeout=settings.llm_timeout_s,
+        )
         model = settings.embedding_model
         batch_size = settings.embedding_batch_size
 
@@ -217,6 +226,13 @@ class LLMClient:
             for attempt in range(self._MAX_RETRIES):
                 start = time.monotonic()
                 try:
+                    logger.info(
+                        "embed_batch_start",
+                        file_id=file_id,
+                        batch_start=batch_start,
+                        batch_size=len(batch),
+                        attempt=attempt + 1,
+                    )
                     response = sync_client.embeddings.create(
                         model=model,
                         input=batch,
@@ -240,6 +256,12 @@ class LLMClient:
                     )
                     self._write_usage(usage)
                     all_vectors.extend(item.embedding for item in response.data)
+                    logger.info(
+                        "embed_batch_done",
+                        file_id=file_id,
+                        batch_start=batch_start,
+                        duration_ms=duration_ms,
+                    )
                     break  # success — move to next batch
                 except Exception as exc:  # noqa: BLE001
                     if isinstance(exc, self._non_retryable):
@@ -405,13 +427,15 @@ class LLMClient:
         Returns:
             ``(text, input_tokens, output_tokens, cached_tokens)``
         """
+        from llm_wiki.config import settings
+
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            "timeout": 60,
+            "timeout": settings.llm_timeout_s,
         }
         if response_format == "json":
             kwargs["response_format"] = {"type": "json_object"}
@@ -449,11 +473,14 @@ class LLMClient:
         if response_format == "json":
             effective_system += "\nRespond ONLY with valid JSON, no markdown fences."
 
+        from llm_wiki.config import settings
+
         response = await self._client.messages.create(
             model=self._model,
             max_tokens=4096,
             system=effective_system,
             messages=[{"role": "user", "content": prompt}],
+            timeout=settings.llm_timeout_s,
         )
         text: str = response.content[0].text
         input_tokens: int = response.usage.input_tokens

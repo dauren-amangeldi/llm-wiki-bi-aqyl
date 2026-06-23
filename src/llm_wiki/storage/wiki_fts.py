@@ -56,12 +56,25 @@ def _normalize(s: str) -> str:
     return s.lower().replace("ё", "е")
 
 
+# Long Cyrillic/Latin words are inflected (\u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0438 / \u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0435\u0439 / \u0446\u0435\u043d\u043d\u043e\u0441\u0442\u044c),
+# so we prefix-match on a crude stem rather than the full token. 6 chars keeps
+# the stem specific enough to avoid noise while catching morphological variants.
+_STEM_PREFIX_LEN: int = 6
+
+
+def _stem(token: str) -> str:
+    """Truncate a long word to a stem prefix for morphology-tolerant matching."""
+    return token[:_STEM_PREFIX_LEN] if len(token) > _STEM_PREFIX_LEN else token
+
+
 def _prepare_fts_query(q: str) -> str:
     """Turn a user query into a safe FTS5 MATCH expression (prefix OR).
 
     Uses OR so documents need not contain every token (incl. stop-words).
     Stop-words and single-char tokens are dropped; if nothing remains, falls
     back to the raw token list so pure-stop-word queries still attempt a match.
+    Long tokens are stemmed to a prefix so Russian/Kazakh inflections still
+    match (``\u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0438`` finds ``\u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0435\u0439``).
     """
     tokens = re.findall(r"[\w\u0400-\u04ff]+", _normalize(q), flags=re.UNICODE)
     meaningful = [t for t in tokens if t not in _STOPWORDS and len(t) >= 2]
@@ -69,7 +82,9 @@ def _prepare_fts_query(q: str) -> str:
         meaningful = tokens
     if not meaningful:
         return ""
-    parts = [f'"{t.replace(chr(34), chr(34) * 2)}"*' for t in meaningful]
+    # Deduplicate stems while preserving order.
+    stems = list(dict.fromkeys(_stem(t) for t in meaningful))
+    parts = [f'"{s.replace(chr(34), chr(34) * 2)}"*' for s in stems]
     return " OR ".join(parts)
 
 

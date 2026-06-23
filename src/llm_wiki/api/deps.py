@@ -24,6 +24,19 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+def get_user_key(request: Request) -> str:
+    """Stable per-user key for chat history, taken from frontend headers.
+
+    The frontend sends ``X-User-Email``; fall back to ``X-User-Id`` and finally
+    a shared ``anon`` bucket so history still works without auth.
+    """
+    return (
+        request.headers.get("X-User-Email")
+        or request.headers.get("X-User-Id")
+        or "anon"
+    )
+
+
 async def get_current_user(
     request: Request,
     session: AsyncSession = Depends(get_db),

@@ -91,6 +91,30 @@ class CaseRecord(Base):
     )
 
 
+class ChatRecord(Base):
+    """A single persisted chat turn, scoped to a user + (document|case).
+
+    Powers chat history: a user's questions and the assistant's answers are
+    stored so the conversation can be reloaded and continued across sessions.
+    """
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_key: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)  # "document" | "case"
+    scope_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String, nullable=False)  # "user" | "assistant"
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    citations: Mapped[list[str]] = mapped_column(JSON, default=list)
+    model_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+
+
 class Skill(Base):
     """Role-based system prompt for AI modes and positions (LW-N11)."""
 
@@ -497,6 +521,76 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
         "ALTER TABLE files ADD COLUMN content_sha256 VARCHAR(64)",
     ),
 ]
+
+# ---------------------------------------------------------------------------
+# Chat history CRUD
+# ---------------------------------------------------------------------------
+
+
+async def append_chat_message(
+    session: AsyncSession,
+    *,
+    user_key: str,
+    scope_type: str,
+    scope_id: str,
+    role: str,
+    text_body: str,
+    citations: list[str] | None = None,
+    model_name: str | None = None,
+) -> ChatRecord:
+    """Persist one chat turn and return the saved row."""
+    record = ChatRecord(
+        user_key=user_key,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        role=role,
+        text=text_body,
+        citations=citations or [],
+        model_name=model_name,
+    )
+    session.add(record)
+    await session.commit()
+    return record
+
+
+async def list_chat_messages(
+    session: AsyncSession,
+    *,
+    user_key: str,
+    scope_type: str,
+    scope_id: str,
+    limit: int = 200,
+) -> list[ChatRecord]:
+    """Return a user's chat turns for a scope, oldest-first."""
+    stmt = (
+        select(ChatRecord)
+        .where(
+            ChatRecord.user_key == user_key,
+            ChatRecord.scope_type == scope_type,
+            ChatRecord.scope_id == scope_id,
+        )
+        .order_by(ChatRecord.created_at, ChatRecord.id)
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def clear_chat_messages(
+    session: AsyncSession,
+    *,
+    user_key: str,
+    scope_type: str,
+    scope_id: str,
+) -> int:
+    """Delete a user's chat turns for a scope. Returns count removed."""
+    rows = await list_chat_messages(
+        session, user_key=user_key, scope_type=scope_type, scope_id=scope_id, limit=10000
+    )
+    for row in rows:
+        await session.delete(row)
+    await session.commit()
+    return len(rows)
+
 
 _INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS ix_files_content_sha256 ON files (content_sha256)"
