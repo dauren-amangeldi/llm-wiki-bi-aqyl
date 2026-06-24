@@ -22,9 +22,7 @@ class Settings(BaseSettings):
     )
 
     # --- LLM provider ---
-    llm_provider: Literal["ollama", "openai", "anthropic"] = "ollama"
-    ollama_base_url: str = "http://ollama:11434"
-    ollama_model: str = "qwen2.5-coder:14b"
+    llm_provider: Literal["openai", "anthropic"] = "openai"
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-5.4-mini"
     anthropic_api_key: str = Field(default="", repr=False)
@@ -77,7 +75,6 @@ class Settings(BaseSettings):
         default={
             "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
             "gpt-5.4": {"input": 2.50, "output": 15.00},
-            "ollama": {"input": 0.00, "output": 0.00},
             "text-embedding-3-small": {"input": 0.02, "output": 0.00},
         }
     )

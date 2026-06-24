@@ -47,7 +47,6 @@ class LLMClient:
     """Provider-agnostic async LLM client.
 
     Supports:
-      - ollama (OpenAI-compatible local API)
       - openai (GPT-5.4 / GPT-5.4 Mini)
       - anthropic (Claude, fallback)
 
@@ -64,7 +63,7 @@ class LLMClient:
         """Initialise the client from environment settings.
 
         Reads LLM_PROVIDER and creates the appropriate SDK client.
-        Provider can be ollama, openai, or anthropic.
+        Provider can be openai or anthropic.
         """
         from llm_wiki.config import settings
         from llm_wiki.quality.budget import BudgetGuard
@@ -105,14 +104,6 @@ class LLMClient:
                     anthropic.PermissionDeniedError,
                     anthropic.BadRequestError,
                 )
-            case "ollama":
-                self._client = openai.AsyncOpenAI(
-                    base_url=f"{settings.ollama_base_url}/v1",
-                    api_key="ollama",  # Ollama ignores the key but SDK requires non-empty
-                    timeout=timeout,
-                )
-                self._model = settings.ollama_model
-                self._non_retryable = _NON_RETRYABLE_OPENAI
             case _:
                 raise ValueError(f"Unknown LLM_PROVIDER: {self._provider!r}")
 
@@ -171,8 +162,8 @@ class LLMClient:
         """Generate embeddings for *texts* using the OpenAI embeddings API.
 
         Embeddings always use OpenAI's ``text-embedding-3-small`` regardless of
-        the configured chat provider (Anthropic/Ollama do not have standalone
-        embedding APIs comparable to OpenAI).
+        the configured chat provider (Anthropic does not have a standalone
+        embedding API comparable to OpenAI).
 
         Retries up to ``_MAX_RETRIES`` times with exponential backoff on
         transient errors.  Non-retryable 4xx errors are raised immediately.
@@ -407,7 +398,7 @@ class LLMClient:
         Returns:
             Tuple of ``(response_text, input_tokens, output_tokens, cached_tokens)``.
         """
-        if self._provider in ("openai", "ollama"):
+        if self._provider == "openai":
             return await self._call_openai(prompt, system, response_format)
         return await self._call_anthropic(prompt, system, response_format)
 
@@ -417,7 +408,7 @@ class LLMClient:
         system: str,
         response_format: Literal["text", "json"],
     ) -> tuple[str, int, int, int]:
-        """Call OpenAI-compatible API (OpenAI or Ollama).
+        """Call the OpenAI Chat Completions API.
 
         Args:
             prompt: User message.
@@ -531,8 +522,7 @@ class LLMClient:
         """
         from llm_wiki.config import settings
 
-        prices = settings.price_table.get(model) or settings.price_table.get(
-            "ollama", {"input": 0.0, "output": 0.0}
-        )
+        # Unknown models fall back to zero cost rather than raising.
+        prices = settings.price_table.get(model, {"input": 0.0, "output": 0.0})
         cost = (input_tokens * prices["input"] + output_tokens * prices["output"]) / 1_000_000
         return round(cost, 6)

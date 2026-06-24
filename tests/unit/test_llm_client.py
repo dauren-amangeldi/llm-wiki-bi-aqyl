@@ -49,7 +49,6 @@ def _make_client(tmp_path: Path, provider: str = "openai") -> Any:
 
     models = {
         "openai": {"openai_api_key": "sk-test", "openai_model": "gpt-5.4-mini"},
-        "ollama": {"ollama_base_url": "http://ollama:11434", "ollama_model": "qwen2.5-coder:14b"},
     }
 
     with patch("llm_wiki.llm.client.openai.AsyncOpenAI") as mock_sdk:
@@ -58,16 +57,15 @@ def _make_client(tmp_path: Path, provider: str = "openai") -> Any:
             mock_settings.llm_provider = provider
             mock_settings.openai_api_key = models.get(provider, {}).get("openai_api_key", "")
             mock_settings.openai_model = "gpt-5.4-mini"
-            mock_settings.ollama_base_url = "http://ollama:11434"
-            mock_settings.ollama_model = "qwen2.5-coder:14b"
             mock_settings.anthropic_api_key = ""
             mock_settings.anthropic_model = "claude-3-5-sonnet"
             mock_settings.llm_timeout_s = 60.0
+            mock_settings.daily_cost_limit_usd = None
+            mock_settings.daily_token_limit = None
             mock_settings.usage_log_path = tmp_path / "usage.log"
             mock_settings.price_table = {
                 "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
                 "gpt-5.4": {"input": 2.50, "output": 15.00},
-                "ollama": {"input": 0.00, "output": 0.00},
             }
             client = LLMClient()
             client._client = mock_sdk.return_value
@@ -87,12 +85,6 @@ def test_compute_cost_gpt_mini(tmp_path: Path) -> None:
     expected = round((1000 * 0.75 + 500 * 4.50) / 1_000_000, 6)
     result = client._compute_cost("gpt-5.4-mini", 1000, 500)
     assert abs(result - expected) < 1e-9
-
-
-def test_compute_cost_ollama_is_free(tmp_path: Path) -> None:
-    """_compute_cost returns 0.0 for ollama (local, no billing)."""
-    client = _make_client(tmp_path)
-    assert client._compute_cost("ollama", 10_000, 5_000) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -323,8 +315,8 @@ def test_aclose_called_within_same_loop_no_runtime_error(tmp_path: Path) -> None
 
     original_unraisable = sys.unraisablehook
 
-    def _catch_sys_unraisable(args: sys.UnraisableHookArgs) -> None:  # type: ignore[attr-defined]
-        unraisable_errors.append(args.exc_value)
+    def _catch_sys_unraisable(args: object) -> None:
+        unraisable_errors.append(args.exc_value)  # type: ignore[attr-defined]
 
     sys.unraisablehook = _catch_sys_unraisable  # type: ignore[attr-defined]
     try:

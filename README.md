@@ -3,59 +3,41 @@
 LLM-powered wiki ingestion system. Upload a PDF or Markdown file → agents extract knowledge,
 synthesize wiki pages, maintain backlinks, and run weekly consistency checks.
 
-## Quick Start (Testing — local Ollama)
+## Quick Start
+
+The default provider is **OpenAI**. Copy the env template and add your API key.
 
 ```bash
-# 1. Start all services (api, worker, beat, redis, ollama).
-#    ollama-init pulls the model automatically on first run — no manual step needed.
-docker compose -f docker-compose.yml -f docker-compose.testing.yml \
-  --env-file .env.testing up --build
+# 1. Configure: copy the template and fill in OPENAI_API_KEY
+cp .env.example .env
+# edit OPENAI_API_KEY in .env
 
-# 2. Initialize the data directory (first time only)
+# 2. Start all services (api, worker, beat, redis)
+docker compose up --build
+
+# 3. Initialize the data directory (first time only)
 docker compose exec api uv run python scripts/init_wiki.py
 
-# 2b. Backfill chunk index for existing wiki pages (after deploy or if /ask is empty)
+# 3b. Backfill chunk index for existing wiki pages (after deploy or if /ask is empty)
 docker compose exec api uv run python scripts/reindex_chunks.py
 
-# 3. Upload a file
+# 4. Upload a file
 curl -X POST http://localhost:8000/api/v1/files \
   -F "file=@/path/to/document.pdf"
 
-# 4. Check processing status  (LW-10, coming soon)
+# 5. Check processing status
 curl http://localhost:8000/api/v1/files/{file_id}
 ```
 
-> **Model size:** the testing profile defaults to `qwen2.5-coder:3b` (~2 GB).
-> Override with `OLLAMA_MODEL=qwen2.5-coder:14b` in `.env.testing` for higher quality.
+The API is served at **http://localhost:8000** (OpenAPI docs at `/docs`). The
+user-facing UI is the separate frontend repository.
 
-## Quick Start (Staging — OpenAI)
+### Staging
 
 ```bash
-# 1. Copy the template and fill in your API key
-cp .env.staging.example .env.staging.local
-# edit OPENAI_API_KEY in .env.staging.local
-
-# 2. Start (no --env-file flag needed — the staging override loads it directly)
+cp .env.staging.example .env.staging.local   # fill in OPENAI_API_KEY
 docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
 ```
-
-## 🌐 Wiki Viewer
-
-A lightweight Streamlit UI for browsing the wiki without entering the Docker container.
-
-### Access
-
-After `docker compose up`, open: **http://localhost:8501**
-
-### Features
-
-- **Wiki Index** — clickable tree of all ingested pages
-- **Wiki Page** — rendered markdown with internal link navigation
-- **Changelog** — ingestion history from `log.md`, filterable by type
-- **Stats** — page count, raw file count, total wiki size, cost summary
-- Read-only — does not modify any data
-
-> **Note:** This is a temporary dev/demo tool. A full Next.js UI is planned for Sprint 3.
 
 ## Development Commands (all inside Docker)
 
@@ -108,18 +90,18 @@ Weekly Celery Beat (Mon 03:00 UTC):
 | LW-8 | Writer Agent — update pages | ✅ Done |
 | LW-9 | Orchestrator (state machine) | ✅ Done |
 | LW-10 | GET /files/{id} status endpoint | ✅ Done |
-| LW-10.1 | Streamlit wiki viewer (read-only UI for wiki, index, log) | ✅ Done |
+| LW-10.1 | Wiki viewer (read-only UI for wiki, index, log) — removed; replaced by the frontend app | ✅ Done |
 | LW-11 | ChromaDB + embeddings infrastructure | ✅ Done |
 | LW-12.1 | SHA-256 file deduplication (POST /files) | ✅ Done |
 | LW-12 | Search Agent v2 (embedding pre-filter + LLM re-rank) | ✅ Done |
 | LW-13 | Backlink mechanics (bidirectional ## Backlinks sync) | ✅ Done |
 | LW-14 | Deterministic Linter (dead links, orphan pages, stale dates) | ✅ Done |
 | LW-15 | LLM Auditor (contradictions, duplicates, suspected stale) + Celery Beat | ✅ Done |
-| LW-16 | GET /wiki/{slug}, /log, /stats + Streamlit deep-linking | ✅ Done |
+| LW-16 | GET /wiki/{slug}, /log, /stats | ✅ Done |
 | LW-17 | Observability (structlog JSON logs + request_id) — OTel deferred | ✅ Done |
 | LW-18 | Runbook | ✅ Done |
 | LW-19 | Rate limiting + budget alerts (in-memory, single-replica) | ✅ Done |
-| LW-20 | POST /api/v1/ask + Streamlit Q&A (AnswerAgent) | ✅ Done |
+| LW-20 | POST /api/v1/ask (AnswerAgent) | ✅ Done |
 | LW-20.1 | Chunk-level retrieval for AnswerAgent (ChunkStore) | ✅ Done |
 
 ## API Docs
@@ -228,8 +210,6 @@ curl -X POST http://localhost:8000/api/v1/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "Что такое LoRA?", "top_k": 5}'
 ```
-
-Or use the Streamlit UI: open http://localhost:8501 and click **❓ Спросить** in the sidebar.
 
 The AnswerAgent never invents facts — if the wiki does not cover the question, the response has `confidence: "low"` and an empty `sources` list. All citations in the answer body are validated against the retrieved sources; hallucinated `[[slug]]` references are stripped automatically.
 

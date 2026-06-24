@@ -37,7 +37,7 @@ celery_app.conf.update(
 # Errors that must NEVER be retried at the Celery level — retrying would be
 # pointless (the model won't appear by itself, credentials won't fix themselves).
 _PERMANENT_ERRORS: tuple[type[Exception], ...] = (
-    openai.NotFoundError,       # model not pulled in Ollama / wrong model name
+    openai.NotFoundError,       # wrong model name / model unavailable
     openai.AuthenticationError, # bad API key
     openai.PermissionDeniedError,
 )
@@ -119,7 +119,7 @@ def process_file_task(self: Any, file_id: str) -> None:
             error=str(exc),
             exc_info=True,
             hint=(
-                "Model not found — run `docker compose exec ollama ollama pull <model>`"
+                "Model not found — check OPENAI_MODEL / ANTHROPIC_MODEL is valid"
                 if isinstance(exc, openai.NotFoundError)
                 else "Check your API credentials."
             ),

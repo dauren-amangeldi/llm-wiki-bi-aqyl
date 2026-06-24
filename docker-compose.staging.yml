@@ -1,4 +1,5 @@
-# Staging profile — uses OpenAI API directly (no Ollama service).
+# Staging profile — built image (no src mount), 2 API workers, OpenAI via
+# .env.staging.local.
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
 

@@ -299,7 +299,7 @@ def test_parse_results_alias() -> None:
 
 
 def test_parse_bare_array() -> None:
-    """[...] — bare array accepted for Ollama / fallback."""
+    """[...] — bare array accepted as a fallback response shape."""
     raw = json.dumps([{"slug": "a", "rerank_score": 0.9}])
     items = _parse_rerank_response(raw)
     assert items[0]["slug"] == "a"

@@ -95,7 +95,8 @@ def test_prepare_fts_query_uses_or_not_and() -> None:
     q = _prepare_fts_query("Как настроить отчёт по продажам?")
     assert " OR " in q
     assert " AND " not in q
-    assert "настроить" in q
+    # Long tokens are stemmed to a prefix (Russian morphology): настроить -> настро*
+    assert "настро" in q
     assert "отчет" in q  # ё folded
     assert '"как"*' not in q  # stop-word dropped
 

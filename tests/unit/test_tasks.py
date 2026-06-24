@@ -26,9 +26,9 @@ from llm_wiki.orchestrator.tasks import celery_app
 
 
 def _make_not_found_exc() -> openai.NotFoundError:
-    req = httpx.Request("POST", "http://ollama:11434/v1/chat/completions")
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     return openai.NotFoundError(
-        "model 'qwen2.5-coder:14b' not found",
+        "model 'gpt-does-not-exist' not found",
         response=httpx.Response(404, request=req),
         body={"error": {"message": "model not found"}},
     )
