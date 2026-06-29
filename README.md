@@ -8,11 +8,11 @@ synthesize wiki pages, maintain backlinks, and run weekly consistency checks.
 The default provider is **OpenAI**. Copy the env template and add your API key.
 
 ```bash
-# 1. Configure: copy the template and fill in OPENAI_API_KEY
+# 1. Configure: copy the template, set OPENAI_API_KEY + POSTGRES_PASSWORD
 cp .env.example .env
-# edit OPENAI_API_KEY in .env
+# edit .env — all config/secrets live here (it is gitignored)
 
-# 2. Start all services (api, worker, beat, redis)
+# 2. Start all services (api, worker, beat, postgres, redis, chroma)
 docker compose up --build
 
 # 3. Initialize the data directory (first time only)
@@ -32,12 +32,19 @@ curl http://localhost:8000/api/v1/files/{file_id}
 The API is served at **http://localhost:8000** (OpenAPI docs at `/docs`). The
 user-facing UI is the separate frontend repository.
 
-### Staging
+### Staging / prod-like (built image, no live-reload, 2 API workers)
+
+Uses the same `.env`:
 
 ```bash
-cp .env.staging.example .env.staging.local   # fill in OPENAI_API_KEY
 docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
 ```
+
+> **Config:** every setting and secret comes from `.env` (gitignored); compose
+> reads it automatically. Nothing is hardcoded in the compose files, and only
+> the API port is published — Postgres/Redis/Chroma stay on the internal
+> network. For production, point `DATABASE_URL` / `S3_*` / `CHROMA_*` at the
+> IT-managed instances and drop the bundled services.
 
 ## Development Commands (all inside Docker)
 

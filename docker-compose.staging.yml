@@ -1,32 +1,21 @@
-# Staging profile — built image (no src mount), 2 API workers, OpenAI via
-# .env.staging.local.
+# Staging/prod-like profile — built image (no src mount, no --reload), 2 API
+# workers. Config still comes from .env (inherited from the base file).
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
 
 services:
   api:
-    env_file:
-      - .env.staging.local
     command: >
       uv run uvicorn llm_wiki.main:app
       --host 0.0.0.0 --port 8000
       --workers 2
     volumes:
-      - app_data:/app/data
-      # No src mount in staging — use the built image
+      - app_data:/app/data   # no ./src mount — use the built image
 
   worker:
-    env_file:
-      - .env.staging.local
-    command: >
-      uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
-      --loglevel=info
-      --concurrency=1
     volumes:
       - app_data:/app/data
 
   beat:
-    env_file:
-      - .env.staging.local
     volumes:
       - app_data:/app/data

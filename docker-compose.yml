@@ -1,14 +1,14 @@
+# All config + secrets come from .env (gitignored). Compose auto-reads .env for
+# ${VAR} interpolation, and the app services read it via env_file. Nothing
+# sensitive is hardcoded here. See .env.example for the full list.
+#
+# Internal services (postgres/redis/chroma) are NOT published to the host — the
+# app reaches them over the compose network. Only the API port is exposed.
+
 x-app-env: &app-env
   env_file:
-    - path: .env.staging
-      required: false   # falls back to pydantic defaults if file absent
-  environment:
-    # Postgres is required (no SQLite). Overrides any DATABASE_URL in .env.staging.
-    DATABASE_URL: postgresql+psycopg://llmwiki:llmwiki@postgres:5432/llmwiki
-    # Vector store runs as its own service (stateless app pods).
-    CHROMA_BACKEND: http
-    CHROMA_HOST: chroma
-    CHROMA_PORT: "8000"
+    - path: .env
+      required: false   # falls back to pydantic defaults if absent
 
 services:
   api:
@@ -17,7 +17,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     volumes:
       - app_data:/app/data
       - ./src:/app/src  # live-reload in dev
@@ -78,15 +78,13 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: llmwiki
-      POSTGRES_PASSWORD: llmwiki     # dev default — override in prod via managed instance
-      POSTGRES_DB: llmwiki
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-llmwiki}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-llmwiki}
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U llmwiki -d llmwiki"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-llmwiki} -d ${POSTGRES_DB:-llmwiki}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -94,8 +92,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -107,8 +103,6 @@ services:
 
   chroma:
     image: chromadb/chroma:latest
-    ports:
-      - "8002:8000"   # 8001 is taken by the storage-sandbox chroma
     volumes:
       - chroma_data:/data
     environment:
