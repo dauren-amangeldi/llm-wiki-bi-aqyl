@@ -15,7 +15,6 @@ import chromadb
 import pytest
 
 from llm_wiki.llm.embeddings import (
-    EmbeddingError,
     EmbeddingModelMismatchError,
     EmbeddingStore,
     HeadingInfo,

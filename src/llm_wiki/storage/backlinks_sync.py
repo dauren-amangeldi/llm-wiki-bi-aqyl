@@ -28,11 +28,10 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterable
-from pathlib import Path
 
 import structlog
 
-from llm_wiki.storage.filesystem import atomic_write
+from llm_wiki.storage.object_store import get_object_store, wiki_key
 from llm_wiki.utils.backlinks import (
     extract_outgoing_links,
     inject_backlink,
@@ -75,7 +74,6 @@ def _lock_for(slug: str) -> threading.Lock:
 
 
 def sync_backlinks_for_page(
-    wiki_dir: Path,
     source_slug: str,
     new_content: str,
     previous_outgoing: Iterable[str] = (),
@@ -127,7 +125,6 @@ def sync_backlinks_for_page(
 
     for target in added:
         _apply_to_target(
-            wiki_dir=wiki_dir,
             target_slug=target,
             source_slug=source_slug,
             operation="add",
@@ -136,7 +133,6 @@ def sync_backlinks_for_page(
 
     for target in removed:
         _apply_to_target(
-            wiki_dir=wiki_dir,
             target_slug=target,
             source_slug=source_slug,
             operation="remove",
@@ -159,37 +155,35 @@ def sync_backlinks_for_page(
 
 
 def _apply_to_target(
-    wiki_dir: Path,
     target_slug: str,
     source_slug: str,
     operation: str,
     log: structlog.types.FilteringBoundLogger,  # type: ignore[type-arg]
 ) -> None:
-    """Apply a single inject or remove operation to *target_slug*'s file.
+    """Apply a single inject or remove operation to *target_slug*'s page.
 
     Acquires the per-slug lock before reading and potentially writing the
-    target file.  Does nothing if the file does not exist or if the
-    operation would produce no change.
+    target page in the object store.  Does nothing if the page does not exist
+    or if the operation would produce no change.
 
     Args:
-        wiki_dir: Directory containing wiki pages.
         target_slug: Slug of the page whose ``## Backlinks`` section to update.
         source_slug: Slug to inject or remove.
         operation: ``"add"`` or ``"remove"``.
         log: Bound structlog logger (already carries ``file_id``/``source_slug``).
     """
-    target_path = wiki_dir / f"{target_slug}.md"
+    store = get_object_store()
+    key = wiki_key(target_slug)
 
     with _lock_for(target_slug):
-        if not target_path.exists():
+        old_content = store.get_text(key)
+        if old_content is None:
             log.warning(
                 "backlink_target_missing",
                 target=target_slug,
                 operation=operation,
             )
             return
-
-        old_content = target_path.read_text(encoding="utf-8")
 
         if operation == "add":
             new_target_content = inject_backlink(old_content, source_slug)
@@ -204,7 +198,7 @@ def _apply_to_target(
             )
             return  # no write needed — idempotent
 
-        atomic_write(target_path, new_target_content)
+        store.put_text(key, new_target_content)
         log.debug(
             "backlink_file_updated",
             target=target_slug,

@@ -170,8 +170,6 @@ def run_weekly_audit(
 
     import asyncio
     import random
-    from pathlib import Path
-    from typing import Literal
 
     from llm_wiki.agents.auditor import AuditorAgent
     from llm_wiki.config import settings
@@ -179,11 +177,18 @@ def run_weekly_audit(
     from llm_wiki.quality.issues_writer import upsert_section
     from llm_wiki.quality.models import IssueSection
 
-    wiki_dir: Path = settings.wiki_dir
+    from llm_wiki.storage.object_store import (
+        WIKI_PREFIX,
+        get_object_store,
+        slug_from_wiki_key,
+    )
+
+    store = get_object_store()
     wiki_pages: list[tuple[str, str]] = []
-    if wiki_dir.exists():
-        for md_file in sorted(wiki_dir.glob("*.md")):
-            wiki_pages.append((md_file.stem, md_file.read_text(encoding="utf-8")))
+    for obj in sorted(store.list_objects(WIKI_PREFIX), key=lambda o: o.key):
+        content = store.get_text(obj.key)
+        if content is not None:
+            wiki_pages.append((slug_from_wiki_key(obj.key), content))
 
     # Optional filtering
     if slugs:

@@ -24,12 +24,10 @@ from llm_wiki.parsers.markdown import parse_markdown_file
 from llm_wiki.parsers.pdf import parse_pdf
 from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
 from llm_wiki.storage.chunk_sync import sync_chunks_for_page
-from llm_wiki.storage.filesystem import atomic_write
 from llm_wiki.storage.index import IndexStorage
 from llm_wiki.storage.wiki_fts import upsert_wiki_fts
 from llm_wiki.utils.backlinks import extract_outgoing_links
 from llm_wiki.storage.log import append_log_entry
-from llm_wiki.utils.ids import new_file_id
 from llm_wiki.storage.metadata import (
     FileRecord,
     append_state_history,
@@ -104,8 +102,7 @@ async def process_file(file_id: str) -> None:
             # STORED — parse raw file to plain text
             # ----------------------------------------------------------------
             logger.info("pipeline_step_start", file_id=file_id, step="STORED")
-            raw_path = _find_raw_file(settings.raw_dir, file_id)
-            file_text = _parse_raw_file(raw_path)
+            file_text = _load_raw_text(file_id)
 
             if "STORED" not in completed:
                 await _transition(session, file_id, "STORED")
@@ -149,7 +146,7 @@ async def process_file(file_id: str) -> None:
                 if not search_results:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
-                    _save_wiki_page(settings.wiki_dir, page)
+                    _save_wiki_page(page)
                     await _index_wiki_page_fts(session, page)
                     sync_chunks_for_page(
                         chunk_store=chunk_store,
@@ -162,7 +159,6 @@ async def process_file(file_id: str) -> None:
                     created_pages.append(page.slug)
                     # Synchronise backlinks: new page has no previous outgoing links
                     sync_backlinks_for_page(
-                        wiki_dir=settings.wiki_dir,
                         source_slug=page.slug,
                         new_content=page.content,
                         previous_outgoing=(),
@@ -170,7 +166,7 @@ async def process_file(file_id: str) -> None:
                     )
                 else:
                     # Scenario B — update existing pages (up to 5)
-                    existing = _load_existing_pages(settings.wiki_dir, search_results[:5])
+                    existing = _load_existing_pages(search_results[:5])
 
                     if existing:
                         # Capture outgoing links BEFORE the Writer Agent rewrites pages
@@ -179,7 +175,7 @@ async def process_file(file_id: str) -> None:
                         }
                         pages_out = await writer.update_pages(file_text, existing, file_id)
                         for p in pages_out:
-                            _save_wiki_page(settings.wiki_dir, p)
+                            _save_wiki_page(p)
                             await _index_wiki_page_fts(session, p)
                             sync_chunks_for_page(
                                 chunk_store=chunk_store,
@@ -191,7 +187,6 @@ async def process_file(file_id: str) -> None:
                             updated_pages.append(p.slug)
                             # Synchronise backlinks using pre-write outgoing links as baseline
                             sync_backlinks_for_page(
-                                wiki_dir=settings.wiki_dir,
                                 source_slug=p.slug,
                                 new_content=p.content,
                                 previous_outgoing=previous_outgoing_by_slug.get(p.slug, []),
@@ -200,7 +195,7 @@ async def process_file(file_id: str) -> None:
                     else:
                         # Search found headings but files are absent — create new
                         page = await writer.create_page(file_text, file_id)
-                        _save_wiki_page(settings.wiki_dir, page)
+                        _save_wiki_page(page)
                         await _index_wiki_page_fts(session, page)
                         sync_chunks_for_page(
                             chunk_store=chunk_store,
@@ -213,7 +208,6 @@ async def process_file(file_id: str) -> None:
                         created_pages.append(page.slug)
                         # Synchronise backlinks: new page has no previous outgoing links
                         sync_backlinks_for_page(
-                            wiki_dir=settings.wiki_dir,
                             source_slug=page.slug,
                             new_content=page.content,
                             previous_outgoing=(),
@@ -309,55 +303,43 @@ async def _transition(session: AsyncSession, file_id: str, state: str) -> None:
     logger.info("state_transition", file_id=file_id, state=state)
 
 
-def _find_raw_file(raw_dir: Path, file_id: str) -> Path:
-    """Return the raw file path for *file_id*, scanning *raw_dir* by stem.
-
-    Args:
-        raw_dir: Directory containing uploaded source files.
-        file_id: UUID used as the file stem.
-
-    Returns:
-        Path to the matching raw file.
+def _load_raw_text(file_id: str) -> str:
+    """Find the uploaded source for *file_id* and extract its plain text.
 
     Raises:
-        FileNotFoundError: If no file with stem *file_id* exists.
-    """
-    for candidate in raw_dir.iterdir():
-        if candidate.stem == file_id:
-            return candidate
-    raise FileNotFoundError(f"Raw file for {file_id!r} not found in {raw_dir}")
-
-
-def _parse_raw_file(path: Path) -> str:
-    """Extract plain text from a raw file depending on its extension.
-
-    Args:
-        path: Path to a PDF or Markdown file.
-
-    Returns:
-        Extracted plain text.
-
-    Raises:
+        FileNotFoundError: If no raw object with stem *file_id* exists.
         ValueError: If the file extension is not ``.pdf`` or ``.md``.
     """
-    ext = path.suffix.lower()
-    if ext == ".pdf":
-        return parse_pdf(path)
-    if ext == ".md":
-        return parse_markdown_file(path).plain_text
+    from llm_wiki.storage.object_store import RAW_PREFIX, get_object_store
+
+    store = get_object_store()
+    key = next(
+        (
+            o.key
+            for o in store.list_objects(RAW_PREFIX)
+            if Path(o.key).stem == file_id
+        ),
+        None,
+    )
+    if key is None:
+        raise FileNotFoundError(f"Raw object for {file_id!r} not found")
+
+    ext = Path(key).suffix.lower()
+    # Parsers read from a path; as_local_path downloads S3 keys to a tempfile.
+    with store.as_local_path(key) as path:
+        if ext == ".pdf":
+            return parse_pdf(path)
+        if ext == ".md":
+            return parse_markdown_file(path).plain_text
     raise ValueError(f"Unsupported file extension: {ext!r}")
 
 
-def _save_wiki_page(wiki_dir: Path, page: WikiPage) -> None:
-    """Atomically write *page.content* to wiki_dir/{slug}.md.
+def _save_wiki_page(page: WikiPage) -> None:
+    """Persist *page.content* to the object store at ``wiki/{slug}.md``."""
+    from llm_wiki.storage.object_store import get_object_store, wiki_key
 
-    Args:
-        wiki_dir: Directory for generated wiki pages.
-        page: The WikiPage to persist.
-    """
-    dest = wiki_dir / f"{page.slug}.md"
-    atomic_write(dest, page.content)
-    logger.debug("wiki_page_saved", slug=page.slug, path=str(dest))
+    get_object_store().put_text(wiki_key(page.slug), page.content)
+    logger.debug("wiki_page_saved", slug=page.slug)
 
 
 async def _index_wiki_page_fts(session: AsyncSession, page: WikiPage) -> None:
@@ -368,23 +350,22 @@ async def _index_wiki_page_fts(session: AsyncSession, page: WikiPage) -> None:
         logger.error("wiki_fts_index_failed", slug=page.slug, error=str(exc))
 
 
-def _load_existing_pages(
-    wiki_dir: Path, search_results: list[SearchHit]
-) -> list[WikiPage]:
-    """Read wiki files for *search_results* that actually exist on disk.
+def _load_existing_pages(search_results: list[SearchHit]) -> list[WikiPage]:
+    """Read wiki pages for *search_results* that exist in the object store.
 
     Args:
-        wiki_dir: Directory containing wiki markdown files.
         search_results: Ranked search results whose slugs to look up.
 
     Returns:
-        WikiPage objects for results that have a corresponding .md file.
+        WikiPage objects for results that have a corresponding stored page.
     """
+    from llm_wiki.storage.object_store import get_object_store, wiki_key
+
+    store = get_object_store()
     pages: list[WikiPage] = []
     for sr in search_results:
-        wiki_path = wiki_dir / f"{sr.slug}.md"
-        if wiki_path.exists():
-            content = wiki_path.read_text(encoding="utf-8")
+        content = store.get_text(wiki_key(sr.slug))
+        if content is not None:
             pages.append(WikiPage(slug=sr.slug, title=sr.title, content=content))
     return pages
 
@@ -434,12 +415,18 @@ def _run_linter_step(file_id: str) -> None:
     from llm_wiki.quality.models import IssueSection
     from llm_wiki.storage.index import IndexStorage
 
-    wiki_dir = settings.wiki_dir
+    from llm_wiki.storage.object_store import (
+        WIKI_PREFIX,
+        get_object_store,
+        slug_from_wiki_key,
+    )
+
+    store = get_object_store()
     wiki_pages: dict[str, str] = {}
-    if wiki_dir.exists():
-        for md_file in wiki_dir.glob("*.md"):
-            slug = md_file.stem
-            wiki_pages[slug] = md_file.read_text(encoding="utf-8")
+    for obj in store.list_objects(WIKI_PREFIX):
+        content = store.get_text(obj.key)
+        if content is not None:
+            wiki_pages[slug_from_wiki_key(obj.key)] = content
 
     # Derive root sections from index.md headings (level-2 headings = sections)
     index_storage = IndexStorage(settings.index_path)

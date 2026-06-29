@@ -506,12 +506,11 @@ class AnswerAgent(BaseAgent):
         return "The wiki does not contain information that answers this question."
 
     def _load_page_body(self, slug: str) -> str:
-        path = self._wiki_dir / f"{slug}.md"
-        if not path.exists():
-            return ""
+        from llm_wiki.storage.object_store import get_object_store, wiki_key
+
         try:
-            return path.read_text(encoding="utf-8")
-        except OSError as exc:
+            return get_object_store().get_text(wiki_key(slug)) or ""
+        except Exception as exc:  # noqa: BLE001
             logger.warning("ask_load_page_failed", slug=slug, error=str(exc))
             return ""
 
@@ -529,8 +528,11 @@ class AnswerAgent(BaseAgent):
         match — this score is treated as a "present" marker and prevents the
         NO_LLM_THRESHOLD refusal path even when embedding recall is weak.
         """
-        if not self._wiki_dir.exists():
-            return []
+        from llm_wiki.storage.object_store import (
+            WIKI_PREFIX,
+            get_object_store,
+            slug_from_wiki_key,
+        )
 
         raw_tokens = re.findall(r"[a-z\u0400-\u04ff0-9]{3,}", question.lower())
         tokens = [t for t in raw_tokens if t not in _STOP_WORDS]
@@ -545,23 +547,25 @@ class AnswerAgent(BaseAgent):
         # Deduplicate while preserving order
         needles = list(dict.fromkeys(needles))
 
+        store = get_object_store()
         scored: list[tuple[int, str, str]] = []
-        for path in self._wiki_dir.glob("*.md"):
-            if path.stem in exclude:
+        for obj in store.list_objects(WIKI_PREFIX):
+            slug = slug_from_wiki_key(obj.key)
+            if slug in exclude:
                 continue
-            try:
-                body = path.read_text(encoding="utf-8").lower()
-            except OSError:
+            raw = store.get_text(obj.key)
+            if raw is None:
                 continue
+            body = raw.lower()
             score = sum(1 for n in needles if n in body)
             if score == 0:
                 continue
             # Extract title from the first H1 if present; fall back to slug
-            title = path.stem.replace("-", " ").title()
+            title = slug.replace("-", " ").title()
             first_line = body.splitlines()[0] if body else ""
             if first_line.startswith("# "):
                 title = first_line[2:].strip()
-            scored.append((score, path.stem, title))
+            scored.append((score, slug, title))
 
         scored.sort(reverse=True)
         return [

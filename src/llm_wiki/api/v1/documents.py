@@ -3,14 +3,13 @@
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, HTTPException, UploadFile
+from fastapi import Depends, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
-from llm_wiki.config import settings
 from llm_wiki.storage.metadata import FileRecord
 
 _MOCK_TAG_SUGGESTIONS: list[dict[str, str]] = [
@@ -155,10 +154,11 @@ async def get_dossier(
     page_count: int | None = None
 
     if fr.created_pages:
+        from llm_wiki.storage.object_store import get_object_store, wiki_key
+
         slug = fr.created_pages[0]
-        wiki_path = settings.wiki_dir / f"{slug}.md"
-        if wiki_path.exists():
-            content = wiki_path.read_text(encoding="utf-8")
+        content = get_object_store().get_text(wiki_key(slug))
+        if content is not None:
             summary = content
             page_count = max(1, len(content) // 3000)
 
@@ -184,12 +184,13 @@ async def get_document_text(
     if not all_pages:
         return DocumentText(content=None, slug=None)
 
+    from llm_wiki.storage.object_store import get_object_store, wiki_key
+
     slug = all_pages[0]
-    wiki_path = settings.wiki_dir / f"{slug}.md"
-    if not wiki_path.exists():
+    content = get_object_store().get_text(wiki_key(slug))
+    if content is None:
         return DocumentText(content=None, slug=slug)
 
-    content = wiki_path.read_text(encoding="utf-8")
     return DocumentText(content=content, format="markdown", slug=slug)
 
 
@@ -258,9 +259,12 @@ async def get_related_documents(
 @router.post("/uploads", status_code=202)
 async def uploads_alias(
     file: UploadFile,
+    response: Response,
     session: AsyncSession = Depends(get_db),
 ) -> object:
     """Alias for POST /api/v1/files — used by the frontend upload component."""
     from llm_wiki.api.routes import upload_file
 
-    return await upload_file(file=file, session=session, _rate_check=None)
+    return await upload_file(
+        file=file, response=response, session=session, _rate_check=None
+    )

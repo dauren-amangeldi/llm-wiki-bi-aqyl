@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import chromadb
@@ -184,8 +184,9 @@ class ChunkStore:
         if chroma_client is not None:
             self._chroma = chroma_client
         else:
-            chroma_path.mkdir(parents=True, exist_ok=True)
-            self._chroma = chromadb.PersistentClient(path=str(chroma_path))
+            from llm_wiki.llm.chroma_client import make_chroma_client
+
+            self._chroma = make_chroma_client(chroma_path)
 
         self._col = self._get_or_create_collection()
 

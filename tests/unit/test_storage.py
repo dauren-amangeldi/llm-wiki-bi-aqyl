@@ -7,15 +7,12 @@ append_log_entry (idempotency, format), and metadata CRUD.
 import threading
 from pathlib import Path
 
-import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.storage.filesystem import atomic_write, ensure_dirs
 from llm_wiki.storage.index import Heading, IndexStorage
 from llm_wiki.storage.log import append_log_entry, _entry_exists
 from llm_wiki.storage.metadata import (
-    Base,
-    FileRecord,
     append_state_history,
     create_file_record,
     ensure_dev_user,
@@ -233,20 +230,6 @@ def test_entry_exists_false_for_missing_file(tmp_path: Path) -> None:
 # ===========================================================================
 # metadata.py — async CRUD
 # ===========================================================================
-
-
-@pytest.fixture
-async def db_session(tmp_path: Path) -> AsyncSession:  # type: ignore[misc]
-    """Yield an async SQLAlchemy session backed by an in-memory SQLite DB."""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-        bind=engine, expire_on_commit=False
-    )
-    async with factory() as session:
-        yield session
-    await engine.dispose()
 
 
 async def test_create_file_record(db_session: AsyncSession) -> None:

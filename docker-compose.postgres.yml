@@ -1,0 +1,46 @@
+# Run the backend against EXTERNAL storage (Postgres + Redis) instead of the
+# local SQLite file. In production these env vars point at the IT-provided
+# managed instances; here they point at the storage-sandbox.
+#
+# Prereq: the storage sandbox is up so its network + Postgres/Redis exist:
+#   docker compose -f ../storage-sandbox/docker-compose.yml up -d
+#
+# Then:
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
+#
+# api/worker/beat run on the sandbox network and use the sandbox Postgres +
+# Redis. The bundled `redis` service still starts (to satisfy depends_on) but
+# is unexposed and unused — in a real k8s deploy you run the image with these
+# env vars and no bundled Redis at all.
+#
+# NOTE: this connects to a FRESH Postgres — existing SQLite data is NOT
+# migrated automatically (that is a separate data-migration step).
+
+services:
+  api:
+    environment:
+      DATABASE_URL: postgresql+psycopg://llmwiki:devpassword@postgres:5432/llmwiki
+      REDIS_URL: redis://redis:6379/0
+    networks: [sandbox]
+
+  worker:
+    environment:
+      DATABASE_URL: postgresql+psycopg://llmwiki:devpassword@postgres:5432/llmwiki
+      REDIS_URL: redis://redis:6379/0
+    networks: [sandbox]
+
+  beat:
+    environment:
+      DATABASE_URL: postgresql+psycopg://llmwiki:devpassword@postgres:5432/llmwiki
+      REDIS_URL: redis://redis:6379/0
+    networks: [sandbox]
+
+  # Bundled Redis only satisfies depends_on; not exposed (no host-port clash).
+  # !reset clears the base ports list (a plain [] would merge, not replace).
+  redis:
+    ports: !reset []
+
+networks:
+  sandbox:
+    external: true
+    name: llmwiki-storage-sandbox_storage

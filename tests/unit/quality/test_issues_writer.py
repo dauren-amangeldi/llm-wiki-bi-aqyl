@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 from llm_wiki.quality.issues_writer import _bootstrap_issues_md, read_section, upsert_section
 from llm_wiki.quality.models import Issue, IssueKind, IssueSection

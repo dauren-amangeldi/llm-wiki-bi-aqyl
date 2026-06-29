@@ -3,24 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from pathlib import Path
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.main import app
-from llm_wiki.storage.metadata import Base
-
-
-@pytest_asyncio.fixture
-async def db_engine(tmp_path: Path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 
 @pytest_asyncio.fixture

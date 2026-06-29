@@ -8,25 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from llm_wiki.api.rate_limit import InMemoryRateLimiter
-from llm_wiki.storage.metadata import Base
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-async def db_engine(tmp_path: Path):  # type: ignore[misc]
-    """In-memory SQLite engine with schema created."""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
 
 
 @pytest.fixture
@@ -177,10 +166,12 @@ async def test_upload_saves_file_to_raw(test_app: tuple) -> None:  # type: ignor
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/api/v1/files", files=_make_upload(content, "doc.pdf"))
 
+    from llm_wiki.storage.object_store import get_object_store, raw_key
+
     file_id = resp.json()["file_id"]
-    saved = raw_dir / f"{file_id}.pdf"
-    assert saved.exists(), f"Expected {saved} to exist"
-    assert saved.read_bytes() == content
+    store = get_object_store()
+    assert store.exists(raw_key(file_id, ".pdf"))
+    assert store.get_bytes(raw_key(file_id, ".pdf")) == content
 
 
 async def test_upload_creates_db_record(test_app: tuple, db_engine) -> None:  # type: ignore[type-arg, misc]
@@ -339,7 +330,10 @@ async def test_budget_exceeded_returns_503(test_app: tuple, tmp_path: Path) -> N
     """POST /files returns 503 when daily cost limit is already exceeded."""
     app, data_tmp, raw_dir = test_app
 
-    # Create a usage.log that shows $2.00 already spent today
+    # Create a usage.log that shows $2.00 already spent today (dynamic date so
+    # the "today" budget window always matches the test run).
+    from datetime import datetime, timezone
+
     usage_log = tmp_path / "usage.log"
     record = {
         "file_id": "prev",
@@ -349,7 +343,7 @@ async def test_budget_exceeded_returns_503(test_app: tuple, tmp_path: Path) -> N
         "output_tokens": 500,
         "cached_input_tokens": 0,
         "cost_usd": 2.00,
-        "timestamp": "2026-06-09T10:00:00+00:00",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "duration_ms": 300,
     }
     usage_log.write_text(json.dumps(record) + "\n")

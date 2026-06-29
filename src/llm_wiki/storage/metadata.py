@@ -1,23 +1,16 @@
-"""SQLite metadata store — file_id, processing states, and timestamps.
+"""PostgreSQL metadata store — files, cases, chat history, users, skills.
 
-Uses SQLAlchemy async ORM. Schema migrated via Alembic in Sprint 2+.
-CRUD functions are implemented in LW-2; state machine integration in LW-9.
-
-Inline migrations (pre-Alembic)
----------------------------------
-Until Alembic is introduced (Sprint 2+), backward-compatible column additions
-are handled by ``run_schema_migrations()``, called from ``main.py`` lifespan.
-Each migration is **idempotent** — safe to run every startup.
+Uses SQLAlchemy async ORM (psycopg driver). Tables are created on startup via
+``Base.metadata.create_all``; schema changes should move to Alembic when needed.
 """
 
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy import JSON, DateTime, Integer, String, select, text, update as sa_update
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy import JSON, DateTime, Integer, String, select, update as sa_update
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from llm_wiki.utils.ids import new_file_id
 
 logger = structlog.get_logger(__name__)
 
@@ -508,21 +501,6 @@ async def resolve_skill_system_prompt(session: AsyncSession, role: str) -> str |
 
 
 # ---------------------------------------------------------------------------
-# Inline schema migrations (pre-Alembic, Sprint 1)
-# Called once from main.py lifespan — idempotent, safe every startup.
-# ---------------------------------------------------------------------------
-
-_MIGRATIONS: list[tuple[str, str, str]] = [
-    # (migration_id, check_column, ddl)
-    # Each tuple: human description, column name to probe, DDL to run if absent.
-    (
-        "LW-12.1 add content_sha256",
-        "content_sha256",
-        "ALTER TABLE files ADD COLUMN content_sha256 VARCHAR(64)",
-    ),
-]
-
-# ---------------------------------------------------------------------------
 # Chat history CRUD
 # ---------------------------------------------------------------------------
 
@@ -592,37 +570,3 @@ async def clear_chat_messages(
     return len(rows)
 
 
-_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS ix_files_content_sha256 ON files (content_sha256)"
-)
-
-
-async def run_schema_migrations(conn: AsyncConnection) -> None:
-    """Apply backward-compatible DDL changes to the *files* table.
-
-    Each migration is idempotent: it checks whether the target column exists
-    via ``PRAGMA table_info(files)`` before running ``ALTER TABLE``.
-    Safe to call on every application startup — exits immediately when the
-    schema is already up to date.
-
-    Args:
-        conn: Active async SQLAlchemy connection (not a session).  Typically
-            obtained from ``engine.begin()`` in the lifespan hook.
-    """
-    # Fetch existing columns once
-    result = await conn.execute(text("PRAGMA table_info(files)"))
-    existing_cols = {row[1] for row in result.fetchall()}  # row[1] = column name
-
-    for migration_id, column_name, ddl in _MIGRATIONS:
-        if column_name not in existing_cols:
-            logger.info("schema_migration_applying", migration=migration_id)
-            await conn.execute(text(ddl))
-            logger.info("schema_migration_done", migration=migration_id)
-        else:
-            logger.debug("schema_migration_skipped", migration=migration_id)
-
-    # Always ensure the index exists (CREATE INDEX IF NOT EXISTS is idempotent)
-    if "content_sha256" in existing_cols or any(
-        col == "content_sha256" for _, col, _ in _MIGRATIONS
-    ):
-        await conn.execute(text(_INDEX_DDL))

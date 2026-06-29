@@ -1,36 +1,51 @@
-"""SQLite FTS5 full-text index for wiki pages (LW-N4).
+"""PostgreSQL full-text index for wiki pages (LW-N4).
 
-Lexical keyword search over ``slug``, ``title``, and ``body`` — no LLM,
-no embeddings.  Updated synchronously whenever the ingestion pipeline
-writes a wiki page to disk.
+Lexical keyword search over ``title`` and ``body`` — no LLM, no embeddings.
+Updated synchronously whenever the ingestion pipeline writes a wiki page.
+
+Backed by a ``tsvector`` GIN index built with the ``russian`` text-search
+config, which does proper Snowball stemming (so ``ценности`` matches
+``ценностей`` natively) and emits ``<mark>`` highlight snippets via
+``ts_headline``.
 """
 
 from __future__ import annotations
-
-import re
-from dataclasses import dataclass
-from pathlib import Path
 
 import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from dataclasses import dataclass
+
 logger = structlog.get_logger(__name__)
 
-_STOPWORDS: frozenset[str] = frozenset({
-    "и", "в", "во", "не", "что", "на", "с", "со", "как", "а", "то", "по", "за", "к", "у",
-    "же", "бы", "или", "для", "от", "из", "о", "об", "это", "при", "над", "до", "про", "чем",
-    "the", "a", "an", "of", "to", "in", "is", "it", "and", "or", "for",
-})
+# PostgreSQL text-search configuration (built-in Snowball stemmer).
+_PG_TS_CONFIG = "russian"
 
-_FTS_DDL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
-    slug UNINDEXED,
-    title,
-    body,
-    tokenize='unicode61'
+# ts_headline options — emit <mark> highlights the frontend already renders.
+_PG_HEADLINE_OPTS = (
+    "StartSel=<mark>, StopSel=</mark>, MaxFragments=1, "
+    "MaxWords=32, MinWords=12, ShortWord=2, HighlightAll=FALSE"
+)
+
+# An OR tsquery (recall-friendly): take websearch's AND query and swap & for |.
+_PG_TSQUERY = (
+    f"replace(websearch_to_tsquery('{_PG_TS_CONFIG}', :q)::text, '&', '|')::tsquery"
+)
+
+# A regular table; tsv is a STORED generated column (the 2-arg to_tsvector with
+# an explicit config is IMMUTABLE, so this is allowed).
+_TABLE_DDL = f"""
+CREATE TABLE IF NOT EXISTS wiki_fts (
+    slug  TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    body  TEXT NOT NULL DEFAULT '',
+    tsv   tsvector GENERATED ALWAYS AS (
+        to_tsvector('{_PG_TS_CONFIG}', coalesce(title, '') || ' ' || coalesce(body, ''))
+    ) STORED
 )
 """
+_INDEX_DDL = "CREATE INDEX IF NOT EXISTS ix_wiki_fts_tsv ON wiki_fts USING GIN (tsv)"
 
 
 @dataclass(frozen=True)
@@ -51,46 +66,10 @@ def extract_page_title(content: str, slug: str) -> str:
     return slug.replace("-", " ").title()
 
 
-def _normalize(s: str) -> str:
-    """Lower-case and fold ``ё`` → ``е`` for consistent FTS matching."""
-    return s.lower().replace("ё", "е")
-
-
-# Long Cyrillic/Latin words are inflected (\u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0438 / \u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0435\u0439 / \u0446\u0435\u043d\u043d\u043e\u0441\u0442\u044c),
-# so we prefix-match on a crude stem rather than the full token. 6 chars keeps
-# the stem specific enough to avoid noise while catching morphological variants.
-_STEM_PREFIX_LEN: int = 6
-
-
-def _stem(token: str) -> str:
-    """Truncate a long word to a stem prefix for morphology-tolerant matching."""
-    return token[:_STEM_PREFIX_LEN] if len(token) > _STEM_PREFIX_LEN else token
-
-
-def _prepare_fts_query(q: str) -> str:
-    """Turn a user query into a safe FTS5 MATCH expression (prefix OR).
-
-    Uses OR so documents need not contain every token (incl. stop-words).
-    Stop-words and single-char tokens are dropped; if nothing remains, falls
-    back to the raw token list so pure-stop-word queries still attempt a match.
-    Long tokens are stemmed to a prefix so Russian/Kazakh inflections still
-    match (``\u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0438`` finds ``\u0446\u0435\u043d\u043d\u043e\u0441\u0442\u0435\u0439``).
-    """
-    tokens = re.findall(r"[\w\u0400-\u04ff]+", _normalize(q), flags=re.UNICODE)
-    meaningful = [t for t in tokens if t not in _STOPWORDS and len(t) >= 2]
-    if not meaningful:
-        meaningful = tokens
-    if not meaningful:
-        return ""
-    # Deduplicate stems while preserving order.
-    stems = list(dict.fromkeys(_stem(t) for t in meaningful))
-    parts = [f'"{s.replace(chr(34), chr(34) * 2)}"*' for s in stems]
-    return " OR ".join(parts)
-
-
 async def ensure_wiki_fts_table(conn: AsyncConnection) -> None:
-    """Create the ``wiki_fts`` virtual table if it does not exist."""
-    await conn.execute(text(_FTS_DDL))
+    """Create the wiki full-text table + GIN index if they do not exist."""
+    await conn.execute(text(_TABLE_DDL))
+    await conn.execute(text(_INDEX_DDL))
 
 
 async def upsert_wiki_fts(
@@ -99,18 +78,28 @@ async def upsert_wiki_fts(
     title: str,
     body: str,
 ) -> None:
-    """Replace the FTS row for *slug* (delete + insert)."""
-    await session.execute(text("DELETE FROM wiki_fts WHERE slug = :slug"), {"slug": slug})
+    """Insert or replace the indexed row for *slug*.
+
+    Original casing is stored — ``to_tsvector`` normalises for matching while
+    ``ts_headline`` uses the original text for readable snippets.
+    """
     await session.execute(
-        text("INSERT INTO wiki_fts(slug, title, body) VALUES (:slug, :title, :body)"),
-        {"slug": slug, "title": _normalize(title), "body": _normalize(body)},
+        text(
+            """
+            INSERT INTO wiki_fts (slug, title, body)
+            VALUES (:slug, :title, :body)
+            ON CONFLICT (slug) DO UPDATE
+                SET title = EXCLUDED.title, body = EXCLUDED.body
+            """
+        ),
+        {"slug": slug, "title": title, "body": body},
     )
     await session.commit()
     logger.debug("wiki_fts_upserted", slug=slug)
 
 
 async def delete_wiki_fts(session: AsyncSession, slug: str) -> None:
-    """Remove a wiki page from the FTS index."""
+    """Remove a wiki page from the index."""
     await session.execute(text("DELETE FROM wiki_fts WHERE slug = :slug"), {"slug": slug})
     await session.commit()
 
@@ -120,23 +109,25 @@ async def keyword_search(
     q: str,
     limit: int = 10,
 ) -> list[WikiFtsHit]:
-    """Run a lexical FTS5 query and return ranked hits with snippets."""
-    fts_q = _prepare_fts_query(q.strip())
-    if not fts_q:
+    """Run a lexical full-text query and return ranked hits with snippets."""
+    term = q.strip()
+    if not term:
         return []
 
     result = await session.execute(
         text(
-            """
+            f"""
+            WITH query AS (SELECT {_PG_TSQUERY} AS tsq)
             SELECT slug, title,
-                   snippet(wiki_fts, 2, '<mark>', '</mark>', '…', 32) AS snippet
-            FROM wiki_fts
-            WHERE wiki_fts MATCH :q
-            ORDER BY rank
+                   ts_headline('{_PG_TS_CONFIG}', body, query.tsq,
+                               '{_PG_HEADLINE_OPTS}') AS snippet
+            FROM wiki_fts, query
+            WHERE tsv @@ query.tsq
+            ORDER BY ts_rank(tsv, query.tsq) DESC
             LIMIT :limit
             """
         ),
-        {"q": fts_q, "limit": limit},
+        {"q": term, "limit": limit},
     )
     rows = result.fetchall()
     return [
@@ -145,33 +136,30 @@ async def keyword_search(
     ]
 
 
-async def rebuild_wiki_fts_from_disk(
-    session: AsyncSession,
-    wiki_dir: Path,
-) -> int:
-    """Rebuild the entire FTS index from ``wiki_dir/*.md``.
+async def rebuild_wiki_fts_from_store(session: AsyncSession) -> int:
+    """Rebuild the entire index from every wiki page in the object store.
 
     Returns:
         Number of pages indexed.
     """
-    if not wiki_dir.exists():
-        return 0
+    from llm_wiki.storage.object_store import (
+        WIKI_PREFIX,
+        get_object_store,
+        slug_from_wiki_key,
+    )
 
+    store = get_object_store()
     await session.execute(text("DELETE FROM wiki_fts"))
-    count = 0
-    for path in sorted(wiki_dir.glob("*.md")):
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        slug = path.stem
-        title = extract_page_title(content, slug)
-        await session.execute(
-            text("INSERT INTO wiki_fts(slug, title, body) VALUES (:slug, :title, :body)"),
-            {"slug": slug, "title": _normalize(title), "body": _normalize(content)},
-        )
-        count += 1
     await session.commit()
+    count = 0
+    for obj in store.list_objects(WIKI_PREFIX):
+        content = store.get_text(obj.key)
+        if content is None:
+            continue
+        slug = slug_from_wiki_key(obj.key)
+        title = extract_page_title(content, slug)
+        await upsert_wiki_fts(session, slug, title, content)
+        count += 1
     logger.info("wiki_fts_rebuilt", pages=count)
     return count
 

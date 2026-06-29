@@ -1,1 +1,1 @@
-"""Storage layer — atomic filesystem I/O, index, log, and SQLite metadata."""
+"""Storage layer — atomic filesystem I/O, index, log, and Postgres metadata."""

@@ -7,23 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from llm_wiki.storage.metadata import Base
 
-
-# ---------------------------------------------------------------------------
-# Fixtures (mirror test_api.py structure)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-async def db_engine(tmp_path: Path):  # type: ignore[misc]
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/dedup_test.db")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
+# ``db_engine`` (Postgres, clean per test) comes from conftest.
 
 
 @pytest.fixture
@@ -145,7 +133,6 @@ async def test_upload_after_failed_allows_retry(tmp_path: Path, db_engine) -> No
     """Uploading identical content after a FAILED ingestion is allowed."""
     from llm_wiki.main import app
     import llm_wiki.api.deps as deps_module
-    from llm_wiki.storage.metadata import get_file_record
 
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

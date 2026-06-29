@@ -12,7 +12,6 @@ v1 historic prompt preserved in docs/prompts.md (LW-6).
 from __future__ import annotations
 
 import json
-import re
 from typing import TYPE_CHECKING
 
 import structlog

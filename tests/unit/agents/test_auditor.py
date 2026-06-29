@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from llm_wiki.agents.auditor import AuditorAgent
-from llm_wiki.quality.models import Issue, IssueKind, IssueSection
+from llm_wiki.quality.models import IssueKind, IssueSection
 
 
 # ---------------------------------------------------------------------------

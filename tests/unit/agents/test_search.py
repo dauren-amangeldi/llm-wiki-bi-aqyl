@@ -10,12 +10,11 @@ Covers:
 from __future__ import annotations
 
 import json
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from llm_wiki.agents.search import SearchAgent, SearchAgentError, _parse_rerank_response
+from llm_wiki.agents.search import SearchAgent, _parse_rerank_response
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 

@@ -31,8 +31,24 @@ class Settings(BaseSettings):
 
     # --- Infrastructure ---
     redis_url: str = "redis://redis:6379/0"
-    database_url: str = "sqlite+aiosqlite:///data/metadata.db"
+    database_url: str = (
+        "postgresql+psycopg://llmwiki:llmwiki@postgres:5432/llmwiki"
+    )
     data_dir: Path = Path("/app/data")
+
+    # --- Vector store (ChromaDB) ---
+    # local = embedded PersistentClient on disk; http = external Chroma server.
+    chroma_backend: Literal["local", "http"] = "local"
+    chroma_host: str = "chroma"
+    chroma_port: int = 8000
+
+    # --- Object storage (raw uploads + wiki pages) ---
+    storage_backend: Literal["local", "s3"] = "local"
+    s3_endpoint: str = "minio:9000"          # host:port, no scheme
+    s3_access_key: str = ""
+    s3_secret_key: str = Field(default="", repr=False)
+    s3_bucket: str = "llm-wiki"
+    s3_secure: bool = False                   # True for https endpoints
 
     # --- API ---
     max_file_size_mb: int = 50

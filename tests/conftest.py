@@ -1,8 +1,67 @@
 """Shared pytest fixtures for all tests."""
 
+import os
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+# Tests require a PostgreSQL instance (no SQLite). Defaults to the storage
+# sandbox; override with TEST_DATABASE_URL. The test DB is wiped per test.
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://llmwiki:devpassword@postgres:5432/llmwiki",
+)
+
+
+@pytest_asyncio.fixture
+async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
+    """A Postgres engine with a freshly-created schema (clean slate per test)."""
+    from llm_wiki.storage.metadata import Base
+    from llm_wiki.storage.wiki_fts import ensure_wiki_fts_table
+
+    engine = create_async_engine(TEST_DATABASE_URL)
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS wiki_fts"))
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+        await ensure_wiki_fts_table(conn)
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+    """An ``AsyncSession`` bound to the per-test Postgres engine."""
+    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        bind=db_engine, expire_on_commit=False, autoflush=False
+    )
+    async with factory() as session:
+        yield session
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-test isolation: object store at a temp dir + fresh rate limiters."""
+    from llm_wiki.config import settings
+    from llm_wiki.storage import object_store
+    import llm_wiki.api.deps as deps
+
+    data = tmp_path / "_objstore"
+    (data / "raw").mkdir(parents=True, exist_ok=True)
+    (data / "wiki").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "data_dir", data, raising=False)
+    monkeypatch.setattr(settings, "storage_backend", "local", raising=False)
+    object_store.reset_object_store()
+    # Rate limiters are module-level singletons that accumulate per-IP counts
+    # across tests — reset so upload/ask tests don't trip 429 on each other.
+    deps._files_rate_limiter = None
+    deps._ask_rate_limiter = None
+    yield
+    object_store.reset_object_store()
 
 
 @pytest.fixture

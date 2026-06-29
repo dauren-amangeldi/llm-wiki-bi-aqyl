@@ -2,6 +2,13 @@ x-app-env: &app-env
   env_file:
     - path: .env.staging
       required: false   # falls back to pydantic defaults if file absent
+  environment:
+    # Postgres is required (no SQLite). Overrides any DATABASE_URL in .env.staging.
+    DATABASE_URL: postgresql+psycopg://llmwiki:llmwiki@postgres:5432/llmwiki
+    # Vector store runs as its own service (stateless app pods).
+    CHROMA_BACKEND: http
+    CHROMA_HOST: chroma
+    CHROMA_PORT: "8000"
 
 services:
   api:
@@ -17,6 +24,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_started
     command: >
       uv run uvicorn llm_wiki.main:app
       --host 0.0.0.0 --port 8000
@@ -34,6 +45,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_started
     command: >
       uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
       --loglevel=info
@@ -51,9 +66,30 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_started
     command: >
       uv run celery -A llm_wiki.orchestrator.tasks.celery_app beat
       --loglevel=info
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: llmwiki
+      POSTGRES_PASSWORD: llmwiki     # dev default — override in prod via managed instance
+      POSTGRES_DB: llmwiki
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmwiki -d llmwiki"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   redis:
@@ -69,6 +105,19 @@ services:
       retries: 5
     restart: unless-stopped
 
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8002:8000"   # 8001 is taken by the storage-sandbox chroma
+    volumes:
+      - chroma_data:/data
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    restart: unless-stopped
+
 volumes:
   redis_data:
   app_data:
+  pg_data:
+  chroma_data:

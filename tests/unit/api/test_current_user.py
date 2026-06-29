@@ -4,24 +4,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.main import app
-from llm_wiki.storage.metadata import Base, get_user_by_id
-
-
-@pytest_asyncio.fixture
-async def db_engine():
-    """In-memory SQLite engine for dependency tests."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
+from llm_wiki.storage.metadata import get_user_by_id
 
 
 @pytest_asyncio.fixture
@@ -42,14 +31,6 @@ async def client(db_engine) -> AsyncGenerator[AsyncClient, None]:
         yield ac
 
     app.dependency_overrides.clear()
-
-
-@pytest_asyncio.fixture
-async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
-    """Direct session for assertions."""
-    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False, autoflush=False)
-    async with factory() as session:
-        yield session
 
 
 async def test_get_current_user_creates_dev_user_by_default(

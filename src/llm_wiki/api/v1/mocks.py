@@ -3,13 +3,12 @@
 from pathlib import Path
 
 from fastapi import Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
-from llm_wiki.config import settings
 from llm_wiki.storage.metadata import FileRecord
 
 
@@ -79,16 +78,24 @@ async def metrics(db: AsyncSession = Depends(get_db)) -> dict:
 async def file_raw(
     file_id: str,
     db: AsyncSession = Depends(get_db),
-) -> FileResponse:
-    """Serve the original PDF/MD from data/raw/."""
+) -> Response:
+    """Serve the original PDF/MD from the object store."""
+    from llm_wiki.storage.object_store import get_object_store, raw_key
+
     fr = await db.get(FileRecord, file_id)
     if not fr:
         raise HTTPException(404, "File not found")
     ext = Path(fr.original_name).suffix
-    path = settings.raw_dir / f"{file_id}{ext}"
-    if not path.exists():
-        raise HTTPException(404, "Raw file not found on disk")
-    return FileResponse(path, filename=fr.original_name)
+    store = get_object_store()
+    key = raw_key(file_id, ext)
+    if not store.exists(key):
+        raise HTTPException(404, "Raw file not found in storage")
+    media_type = "application/pdf" if ext.lower() == ".pdf" else "text/markdown"
+    return Response(
+        content=store.get_bytes(key),
+        media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{fr.original_name}"'},
+    )
 
 
 # ── POST — 200 with stub payload ─────────────────────────────────────────────

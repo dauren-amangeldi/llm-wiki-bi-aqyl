@@ -22,35 +22,17 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.config import settings
 from llm_wiki.main import app
-from llm_wiki.storage.metadata import Base, FileRecord
+from llm_wiki.storage.metadata import FileRecord
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest_asyncio.fixture
-async def db_engine():
-    """Create a fresh in-memory SQLite engine per test."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
-    """Yield an async session bound to the in-memory engine."""
-    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False, autoflush=False)
-    async with factory() as session:
-        yield session
-
 
 @pytest_asyncio.fixture
 async def client(

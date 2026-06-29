@@ -7,12 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_current_user, get_db
+from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db
 from llm_wiki.api.schemas import (
     AdvisorPointResponse,
     AdvisorRequest,
@@ -22,7 +22,6 @@ from llm_wiki.api.schemas import (
     AuditRunRequest,
     AuditRunResponse,
     AuditStatusResponse,
-    CurrentUser,
     FileStatusResponse,
     FileUploadResponse,
     IssueResponse,
@@ -66,6 +65,7 @@ _VALID_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
 )
 async def upload_file(
     file: UploadFile,
+    response: Response,
     session: AsyncSession = Depends(get_db),
     _rate_check: None = Depends(check_files_rate_limit),
 ) -> FileUploadResponse:
@@ -153,6 +153,8 @@ async def upload_file(
             original_file_id=existing.file_id,
             filename=filename,
         )
+        # Documented contract: an exact duplicate is 200, not 202 (no new work).
+        response.status_code = status.HTTP_200_OK
         return FileUploadResponse(
             file_id=existing.file_id,
             task_id=None,
@@ -164,8 +166,9 @@ async def upload_file(
     # New file — persist and enqueue
     # ------------------------------------------------------------------
     file_id = new_file_id()
-    dest = settings.raw_dir / f"{file_id}{ext}"
-    dest.write_bytes(content)
+    from llm_wiki.storage.object_store import get_object_store, raw_key
+
+    get_object_store().put_bytes(raw_key(file_id, ext), content)
 
     await create_file_record(session, file_id, filename, content_sha256=sha)
 
@@ -261,14 +264,14 @@ async def get_wiki_page(
             detail=f"Invalid slug {slug!r}. Must be lowercase alphanumeric with hyphens (min 2 chars).",
         )
 
-    page_path = settings.wiki_dir / f"{slug}.md"
-    if not page_path.exists():
+    from llm_wiki.storage.object_store import get_object_store, wiki_key
+
+    content = get_object_store().get_text(wiki_key(slug))
+    if content is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Wiki page {slug!r} not found.",
         )
-
-    content = page_path.read_text(encoding="utf-8")
 
     # Content negotiation: prefer text/markdown only when explicitly requested
     # and application/json is not also present (v1 simple substring check).
@@ -284,7 +287,14 @@ async def get_wiki_page(
             break
 
     backlinks = extract_backlinks(content)
-    last_updated = datetime.fromtimestamp(page_path.stat().st_mtime, tz=timezone.utc)
+    from llm_wiki.storage.object_store import WIKI_PREFIX
+
+    _key = wiki_key(slug)
+    _mtime = next(
+        (o.last_modified for o in get_object_store().list_objects(WIKI_PREFIX) if o.key == _key),
+        0.0,
+    )
+    last_updated = datetime.fromtimestamp(_mtime, tz=timezone.utc)
 
     # Identify source files: FileRecord rows whose created_pages or updated_pages
     # contain this slug.  The dataset is small (<1 000 rows) so a Python-level
@@ -342,11 +352,18 @@ async def run_lint(
     all_checks = {c.value for c in IssueKind if c.value in {"dead_link", "orphan_page", "stale_date"}}
     active_checks = requested & all_checks if requested else all_checks
 
-    wiki_dir = settings.wiki_dir
+    from llm_wiki.storage.object_store import (
+        WIKI_PREFIX,
+        get_object_store,
+        slug_from_wiki_key,
+    )
+
+    store = get_object_store()
     wiki_pages: dict[str, str] = {}
-    if wiki_dir.exists():
-        for md_file in sorted(wiki_dir.glob("*.md")):
-            wiki_pages[md_file.stem] = md_file.read_text(encoding="utf-8")
+    for obj in store.list_objects(WIKI_PREFIX):
+        content = store.get_text(obj.key)
+        if content is not None:
+            wiki_pages[slug_from_wiki_key(obj.key)] = content
 
     index_storage = IndexStorage(settings.index_path)
     headings = index_storage.read_headings()
@@ -412,7 +429,6 @@ async def run_audit(body: AuditRunRequest | None = None) -> AuditRunResponse:
     """
     from datetime import datetime, timedelta, timezone
 
-    from llm_wiki.config import settings as cfg
 
     if body is None:
         body = AuditRunRequest()
@@ -425,8 +441,9 @@ async def run_audit(body: AuditRunRequest | None = None) -> AuditRunResponse:
     )
 
     # Rough cost estimate: $0.003 per page for sync, $0.0015 for batch
-    wiki_dir = settings.wiki_dir
-    n_pages = len(list(wiki_dir.glob("*.md"))) if wiki_dir.exists() else 0
+    from llm_wiki.storage.object_store import WIKI_PREFIX, get_object_store
+
+    n_pages = len(get_object_store().list_objects(WIKI_PREFIX))
     if body.sample:
         n_pages = min(n_pages, body.sample)
     if body.slugs:
@@ -534,7 +551,7 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
     """Return aggregated statistics: file counts, LLM costs, and last lint run.
 
     Reads the following sources:
-    - SQLite ``files`` table for file counts and average ingestion cost.
+    - ``files`` table for file counts and average ingestion cost.
     - ``data/wiki/*.md`` for wiki page count.
     - ``data/usage.log`` (JSONL) for today's and this month's LLM spend.
     - ``data/issues.md`` mtime for the last Linter run timestamp.
@@ -557,10 +574,10 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
     avg_cost_raw = avg_cost_result.scalar_one()
     avg_cost = round(float(avg_cost_raw), 4) if avg_cost_raw is not None else 0.0
 
-    # --- Filesystem counts ----------------------------------------------------
-    total_wiki_pages = (
-        len(list(settings.wiki_dir.glob("*.md"))) if settings.wiki_dir.exists() else 0
-    )
+    # --- Wiki page count ------------------------------------------------------
+    from llm_wiki.storage.object_store import WIKI_PREFIX, get_object_store
+
+    total_wiki_pages = len(get_object_store().list_objects(WIKI_PREFIX))
 
     # --- Usage log: cost aggregation ------------------------------------------
     cost_today = 0.0

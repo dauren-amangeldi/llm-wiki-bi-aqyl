@@ -6,7 +6,6 @@ extract_outgoing_links.
 
 from __future__ import annotations
 
-import pytest
 
 from llm_wiki.utils.backlinks import (
     extract_backlinks,

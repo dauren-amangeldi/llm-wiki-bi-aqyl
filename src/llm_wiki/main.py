@@ -15,8 +15,8 @@ from llm_wiki.api.v1 import router as v1_router
 from llm_wiki.config import settings
 from llm_wiki.logging_config import configure_logging
 from llm_wiki.storage.filesystem import ensure_dirs
-from llm_wiki.storage.metadata import Base, run_schema_migrations
-from llm_wiki.storage.wiki_fts import ensure_wiki_fts_table, rebuild_wiki_fts_from_disk, wiki_fts_count
+from llm_wiki.storage.metadata import Base
+from llm_wiki.storage.wiki_fts import ensure_wiki_fts_table, rebuild_wiki_fts_from_store, wiki_fts_count
 
 logger = structlog.get_logger(__name__)
 
@@ -27,22 +27,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Configure structured JSON logging before anything else runs.
     configure_logging()
 
-    # Ensure all data directories exist before any request comes in
+    # Ensure local data directories exist (no-op effect for S3-backed raw/wiki;
+    # chroma is still local until phase 3).
     ensure_dirs(settings.raw_dir, settings.wiki_dir, settings.chroma_dir)
 
     async with _engine.begin() as conn:
         # Create all tables for a fresh database
         await conn.run_sync(Base.metadata.create_all)
-        # Apply backward-compatible column additions to existing databases
-        await run_schema_migrations(conn)
         await ensure_wiki_fts_table(conn)
 
     # Backfill FTS from disk when the index is empty but wiki pages exist
     from llm_wiki.api.deps import _SessionLocal
 
     async with _SessionLocal() as session:
-        if await wiki_fts_count(session) == 0 and settings.wiki_dir.exists():
-            indexed = await rebuild_wiki_fts_from_disk(session, settings.wiki_dir)
+        if await wiki_fts_count(session) == 0:
+            indexed = await rebuild_wiki_fts_from_store(session)
             if indexed:
                 logger.info("wiki_fts_startup_backfill", pages=indexed)
 

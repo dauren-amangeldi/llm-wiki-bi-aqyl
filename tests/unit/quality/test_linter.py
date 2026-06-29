@@ -6,7 +6,6 @@ dependency-free.  The Linter is a pure function: no mocking required.
 
 from __future__ import annotations
 
-import pytest
 
 from llm_wiki.quality.linter import run_linter
 from llm_wiki.quality.models import IssueKind
@@ -177,7 +176,6 @@ class TestCombined:
 
     def test_dead_link_fixture(self) -> None:
         """Verify the dead_links fixture has the expected dead links."""
-        import glob
         from pathlib import Path
 
         fixture_dir = (

@@ -2,7 +2,6 @@
 
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel
@@ -10,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
-from llm_wiki.config import settings
 from llm_wiki.storage.wiki_fts import keyword_search
 
 
@@ -54,19 +52,16 @@ def _plain_snippet(content: str, length: int = 200) -> str:
     return text[:length] + ("…" if len(text) > length else "")
 
 
-def _summary_from_path(path: Path, snippet: str | None = None) -> WikiPageSummary | None:
-    """Build a WikiPageSummary from a wiki .md file (snippet overridable)."""
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    slug = path.stem
+def _summary(
+    slug: str, content: str, last_modified: float, snippet: str | None = None
+) -> WikiPageSummary:
+    """Build a WikiPageSummary from a slug + content + mtime."""
     return WikiPageSummary(
         slug=slug,
         title=_extract_title(content, slug),
         snippet=snippet if snippet is not None else _plain_snippet(content),
         size_chars=len(content),
-        updated_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+        updated_at=datetime.fromtimestamp(last_modified, tz=timezone.utc).isoformat(),
         backlinks_count=content.count("[[") - content.count("[[]]"),
     )
 
@@ -80,53 +75,40 @@ async def list_wiki_pages(
 ) -> list[WikiPageSummary]:
     """List wiki pages (newest first), or full-text search when *q* is given.
 
-    With a query, runs the FTS5 lexical index over page **bodies** (ranked,
-    with ``<mark>`` highlight snippets) — keyword search like Ctrl+F, used when
-    the AI advisor is OFF. Without a query, lists all pages by recency.
+    With a query, runs the FTS lexical index over page **bodies** (ranked, with
+    ``<mark>`` highlight snippets) — keyword search like Ctrl+F, used when the
+    AI advisor is OFF. Without a query, lists all pages by recency.
     """
-    wiki_dir = settings.wiki_dir
-    if not wiki_dir.exists():
-        return []
+    from llm_wiki.storage.object_store import (
+        WIKI_PREFIX,
+        get_object_store,
+        slug_from_wiki_key,
+        wiki_key,
+    )
+
+    store = get_object_store()
+    metas = {slug_from_wiki_key(m.key): m for m in store.list_objects(WIKI_PREFIX)}
 
     term = (q or "").strip()
     if term:
         hits = await keyword_search(db, term, limit=limit + offset)
         results: list[WikiPageSummary] = []
         for hit in hits:
-            summary = _summary_from_path(wiki_dir / f"{hit.slug}.md", snippet=hit.snippet)
-            if summary is not None:
-                results.append(summary)
+            content = store.get_text(wiki_key(hit.slug))
+            if content is None:
+                continue
+            meta = metas.get(hit.slug)
+            mtime = meta.last_modified if meta else 0.0
+            results.append(_summary(hit.slug, content, mtime, snippet=hit.snippet))
         return results[offset : offset + limit]
 
-    files = sorted(
-        wiki_dir.glob("*.md"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-    results: list[WikiPageSummary] = []
-    for path in files:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError:
+    ordered = sorted(metas.values(), key=lambda m: m.last_modified, reverse=True)
+    results = []
+    for meta in ordered:
+        content = store.get_text(meta.key)
+        if content is None:
             continue
-        slug = path.stem
-        title = _extract_title(content, slug)
-        if q and q.lower() not in title.lower() and q.lower() not in content.lower():
-            continue
-        results.append(
-            WikiPageSummary(
-                slug=slug,
-                title=title,
-                snippet=_plain_snippet(content),
-                size_chars=len(content),
-                updated_at=datetime.fromtimestamp(
-                    path.stat().st_mtime, tz=timezone.utc
-                ).isoformat(),
-                backlinks_count=content.lower().count("[[")
-                - content.lower().count("[[]]"),
-            )
-        )
+        results.append(_summary(slug_from_wiki_key(meta.key), content, meta.last_modified))
 
     return results[offset : offset + limit]
 
@@ -134,32 +116,37 @@ async def list_wiki_pages(
 @router.get("/wiki/{slug}/full", response_model=WikiPageDetail)
 async def get_wiki_page_detail(slug: str) -> WikiPageDetail:
     """Get full markdown and backlinks for a wiki page."""
-    wiki_dir = settings.wiki_dir
-    path = wiki_dir / f"{slug}.md"
-    if not path.exists():
+    from llm_wiki.storage.object_store import (
+        WIKI_PREFIX,
+        get_object_store,
+        slug_from_wiki_key,
+        wiki_key,
+    )
+
+    store = get_object_store()
+    content = store.get_text(wiki_key(slug))
+    if content is None:
         raise HTTPException(404, f"Wiki page '{slug}' not found")
 
-    content = path.read_text(encoding="utf-8")
     title = _extract_title(content, slug)
 
     backlinks: list[str] = []
     pattern = re.compile(rf"\[\[{re.escape(slug)}\]\]")
-    for other in wiki_dir.glob("*.md"):
-        if other.stem == slug:
+    mtime = 0.0
+    for meta in store.list_objects(WIKI_PREFIX):
+        other_slug = slug_from_wiki_key(meta.key)
+        if other_slug == slug:
+            mtime = meta.last_modified
             continue
-        try:
-            if pattern.search(other.read_text(encoding="utf-8")):
-                backlinks.append(other.stem)
-        except OSError:
-            continue
+        other = store.get_text(meta.key)
+        if other and pattern.search(other):
+            backlinks.append(other_slug)
 
     return WikiPageDetail(
         slug=slug,
         title=title,
         content=content,
         size_chars=len(content),
-        updated_at=datetime.fromtimestamp(
-            path.stat().st_mtime, tz=timezone.utc
-        ).isoformat(),
+        updated_at=datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
         backlinks=sorted(backlinks),
     )

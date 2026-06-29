@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import threading
-import time
 from unittest.mock import patch
 
-import pytest
 
 from llm_wiki.api.rate_limit import InMemoryRateLimiter
 

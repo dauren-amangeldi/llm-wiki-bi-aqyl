@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
-from llm_wiki.agents.answer import NO_LLM_THRESHOLD, AnswerAgent
+from llm_wiki.agents.answer import AnswerAgent
 from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
@@ -37,11 +36,16 @@ def _mock_store(hits: list[SearchHit]) -> EmbeddingStore:
 
 
 def _wiki(tmp_path: Path, pages: dict[str, str]) -> Path:
-    d = tmp_path / "wiki"
-    d.mkdir()
+    """Populate the object store with {slug: body} pages (AnswerAgent reads it).
+
+    Returns a path for the (now-ignored) ``wiki_dir`` AnswerAgent arg.
+    """
+    from llm_wiki.storage.object_store import get_object_store, wiki_key
+
+    store = get_object_store()
     for slug, body in pages.items():
-        (d / f"{slug}.md").write_text(body, encoding="utf-8")
-    return d
+        store.put_text(wiki_key(slug), body)
+    return tmp_path / "wiki"
 
 
 # ---------------------------------------------------------------------------

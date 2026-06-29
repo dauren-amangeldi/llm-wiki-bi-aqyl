@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from llm_wiki.parsers.markdown import ParsedMarkdown, extract_wiki_links, parse_markdown
+from llm_wiki.parsers.markdown import extract_wiki_links, parse_markdown
 from llm_wiki.parsers.pdf import ParseError, parse_pdf
 
 

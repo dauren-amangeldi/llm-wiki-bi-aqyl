@@ -228,7 +228,6 @@ class AuditorAgent(BaseAgent):
         """
         import asyncio
         import io
-        import time
 
         import openai
 
