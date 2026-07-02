@@ -101,7 +101,7 @@ async def _check_redis() -> None:
     from redis.asyncio import Redis
 
     client = Redis.from_url(
-        settings.redis_url, socket_connect_timeout=2, socket_timeout=2
+        settings.redis_url, socket_connect_timeout=3, socket_timeout=3
     )
     try:
         await client.ping()
@@ -115,17 +115,26 @@ async def _check_redis() -> None:
 async def _check_chroma() -> None:
     from llm_wiki.llm.chroma_client import make_chroma_client
 
-    client = make_chroma_client(settings.chroma_dir)
-    await asyncio.to_thread(client.heartbeat)
+    # Build the client AND heartbeat inside the worker thread — constructing an
+    # HttpClient does a synchronous network handshake, so doing it in the event
+    # loop would block every other concurrent check (e.g. starve the redis ping
+    # into a false timeout).
+    def _ping() -> None:
+        make_chroma_client(settings.chroma_dir).heartbeat()
+
+    await asyncio.to_thread(_ping)
 
 
 async def _check_object_store() -> None:
     from llm_wiki.storage.object_store import get_object_store
 
-    store = get_object_store()
-    # Cheap connectivity probe: a HEAD for a non-existent key on S3, or a
-    # path check locally — both exercise the backend without writing data.
-    await asyncio.to_thread(store.exists, "__readyz_probe__")
+    # Cheap connectivity probe (HEAD for a missing key on S3, path check
+    # locally). Resolve the store inside the thread too, so an S3 client that
+    # connects on construction never blocks the event loop.
+    def _probe() -> None:
+        get_object_store().exists("__readyz_probe__")
+
+    await asyncio.to_thread(_probe)
 
 
 @app.get("/readyz", tags=["system"])
