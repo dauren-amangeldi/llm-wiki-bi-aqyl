@@ -294,6 +294,8 @@ class LLMClient:
         file_id: str,
         agent_type: Literal["search", "writer", "lint", "audit", "answer", "advisor"],
         response_format: Literal["text", "json"] = "text",
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "response",
     ) -> tuple[str, LLMUsage]:
         """Send a completion request and return the response with usage.
 
@@ -307,7 +309,13 @@ class LLMClient:
             system: System message content.
             file_id: Correlation ID for usage tracking and structured logs.
             agent_type: Which agent is making the call (used in usage log).
-            response_format: ``'text'`` or ``'json'`` (structured JSON output).
+            response_format: ``'text'`` or ``'json'`` (loose JSON mode).
+            json_schema: When provided, request **strict Structured Outputs** —
+                the model is constrained to return JSON that exactly matches this
+                JSON Schema (OpenAI ``response_format=json_schema, strict=true``).
+                Takes precedence over ``response_format``. For Anthropic the
+                schema is injected into the system prompt as a fallback.
+            schema_name: Name for the schema (OpenAI requires a non-empty name).
 
         Returns:
             Tuple of ``(response_text, LLMUsage)``.  The usage record is
@@ -335,7 +343,7 @@ class LLMClient:
         for attempt in range(self._MAX_RETRIES):
             try:
                 text, input_tokens, output_tokens, cached = await self._call_provider(
-                    prompt, system, response_format
+                    prompt, system, response_format, json_schema, schema_name
                 )
                 duration_ms = int((time.monotonic() - start) * 1000)
                 cost = self._compute_cost(self._model, input_tokens, output_tokens)
@@ -387,6 +395,8 @@ class LLMClient:
         prompt: str,
         system: str,
         response_format: Literal["text", "json"],
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "response",
     ) -> tuple[str, int, int, int]:
         """Dispatch to the right SDK and return (text, in_tok, out_tok, cached).
 
@@ -394,19 +404,27 @@ class LLMClient:
             prompt: User message.
             system: System message.
             response_format: ``'text'`` or ``'json'``.
+            json_schema: Strict Structured Outputs schema (see ``complete``).
+            schema_name: Name for the schema.
 
         Returns:
             Tuple of ``(response_text, input_tokens, output_tokens, cached_tokens)``.
         """
         if self._provider == "openai":
-            return await self._call_openai(prompt, system, response_format)
-        return await self._call_anthropic(prompt, system, response_format)
+            return await self._call_openai(
+                prompt, system, response_format, json_schema, schema_name
+            )
+        return await self._call_anthropic(
+            prompt, system, response_format, json_schema
+        )
 
     async def _call_openai(
         self,
         prompt: str,
         system: str,
         response_format: Literal["text", "json"],
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "response",
     ) -> tuple[str, int, int, int]:
         """Call the OpenAI Chat Completions API.
 
@@ -414,6 +432,9 @@ class LLMClient:
             prompt: User message.
             system: System message.
             response_format: ``'text'`` or ``'json'``.
+            json_schema: When set, use strict Structured Outputs instead of the
+                loose ``json_object`` mode.
+            schema_name: Name for the schema.
 
         Returns:
             ``(text, input_tokens, output_tokens, cached_tokens)``
@@ -428,7 +449,16 @@ class LLMClient:
             ],
             "timeout": settings.llm_timeout_s,
         }
-        if response_format == "json":
+        if json_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "schema": json_schema,
+                    "strict": True,
+                },
+            }
+        elif response_format == "json":
             kwargs["response_format"] = {"type": "json_object"}
 
         response = await self._client.chat.completions.create(**kwargs)
@@ -445,23 +475,31 @@ class LLMClient:
         prompt: str,
         system: str,
         response_format: Literal["text", "json"],
+        json_schema: dict[str, Any] | None = None,
     ) -> tuple[str, int, int, int]:
         """Call Anthropic Messages API.
 
         JSON output is requested via a system-prompt instruction rather than
-        a native parameter, since Anthropic does not yet support
-        ``response_format=json_object``.
+        a native parameter, since Anthropic does not support OpenAI's
+        ``response_format`` shapes. When a ``json_schema`` is given it is
+        injected into the system prompt as a best-effort strictness hint.
 
         Args:
             prompt: User message.
             system: System message.
             response_format: ``'text'`` or ``'json'``.
+            json_schema: Optional schema injected into the system prompt.
 
         Returns:
             ``(text, input_tokens, output_tokens, cached_tokens)``
         """
         effective_system = system
-        if response_format == "json":
+        if json_schema is not None:
+            effective_system += (
+                "\nRespond ONLY with valid JSON (no markdown fences) that matches "
+                "this JSON Schema:\n" + json.dumps(json_schema, ensure_ascii=False)
+            )
+        elif response_format == "json":
             effective_system += "\nRespond ONLY with valid JSON, no markdown fences."
 
         from llm_wiki.config import settings

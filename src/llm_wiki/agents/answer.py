@@ -44,6 +44,22 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Strict Structured Outputs schema for the answer response. Enforced server-side
+# by OpenAI (response_format=json_schema, strict=true) so the payload is
+# guaranteed to be valid JSON with exactly these fields — no fence-stripping or
+# best-effort parsing surprises. Every property must be listed in ``required``
+# and ``additionalProperties`` must be false for strict mode to accept it.
+_ANSWER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "used_sources": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["answer", "confidence", "used_sources"],
+    "additionalProperties": False,
+}
+
 # ---------------------------------------------------------------------------
 # Tunables — picked conservatively for the v1 heading-only index
 # ---------------------------------------------------------------------------
@@ -260,6 +276,8 @@ class AnswerAgent(BaseAgent):
             file_id=file_id,
             agent_type="answer",
             response_format="json",
+            json_schema=_ANSWER_SCHEMA,
+            schema_name="wiki_answer",
         )
 
         provided_slugs = {slug for slug, _ in loaded}
@@ -356,6 +374,8 @@ class AnswerAgent(BaseAgent):
             file_id=file_id,
             agent_type="answer",
             response_format="json",
+            json_schema=_ANSWER_SCHEMA,
+            schema_name="wiki_answer",
         )
 
         # Stage 4: parse + validate
@@ -477,6 +497,8 @@ class AnswerAgent(BaseAgent):
             file_id=file_id,
             agent_type="answer",
             response_format="json",
+            json_schema=_ANSWER_SCHEMA,
+            schema_name="wiki_answer",
         )
 
         # Stage 5: parse and validate

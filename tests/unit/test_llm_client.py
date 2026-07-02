@@ -160,6 +160,39 @@ async def test_complete_text_format_no_response_format_key(tmp_path: Path) -> No
     assert "response_format" not in call_kwargs
 
 
+async def test_complete_json_schema_uses_structured_outputs(tmp_path: Path) -> None:
+    """A json_schema arg triggers strict Structured Outputs (not json_object)."""
+    client = _make_client(tmp_path)
+    mock_response = _make_openai_response(
+        '{"answer": "x", "confidence": "high", "used_sources": []}'
+    )
+    create_mock = AsyncMock(return_value=mock_response)
+    client._client.chat = MagicMock()
+    client._client.chat.completions.create = create_mock
+
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    await client.complete(
+        "p",
+        "s",
+        "fid",
+        "answer",
+        response_format="json",
+        json_schema=schema,
+        schema_name="wiki_answer",
+    )
+
+    rf = create_mock.call_args.kwargs.get("response_format")
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["strict"] is True
+    assert rf["json_schema"]["name"] == "wiki_answer"
+    assert rf["json_schema"]["schema"] == schema
+
+
 # ---------------------------------------------------------------------------
 # Retry logic
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 """FastAPI application entry point."""
 
+import asyncio
 from contextlib import asynccontextmanager
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 
 import structlog
 from fastapi import FastAPI
@@ -79,7 +80,83 @@ app.include_router(v1_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])
+@app.get("/healthz", tags=["system"])
 async def health_check() -> JSONResponse:
-    """Liveness probe — returns 200 when the service is up."""
-    logger.info("health_check", service=settings.service_name)
+    """Liveness probe — returns 200 when the process is up. No dependency checks.
+
+    ``/health`` is kept for backward compatibility; ``/healthz`` is the
+    Kubernetes-style alias used by liveness probes.
+    """
     return JSONResponse({"status": "ok", "service": settings.service_name})
+
+
+async def _check_postgres() -> None:
+    from sqlalchemy import text
+
+    async with _engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+
+
+async def _check_redis() -> None:
+    from redis.asyncio import Redis
+
+    client = Redis.from_url(
+        settings.redis_url, socket_connect_timeout=2, socket_timeout=2
+    )
+    try:
+        await client.ping()
+    finally:
+        try:
+            await client.aclose()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+
+
+async def _check_chroma() -> None:
+    from llm_wiki.llm.chroma_client import make_chroma_client
+
+    client = make_chroma_client(settings.chroma_dir)
+    await asyncio.to_thread(client.heartbeat)
+
+
+async def _check_object_store() -> None:
+    from llm_wiki.storage.object_store import get_object_store
+
+    store = get_object_store()
+    # Cheap connectivity probe: a HEAD for a non-existent key on S3, or a
+    # path check locally — both exercise the backend without writing data.
+    await asyncio.to_thread(store.exists, "__readyz_probe__")
+
+
+@app.get("/readyz", tags=["system"])
+async def readiness() -> JSONResponse:
+    """Readiness probe — 200 only when all backing services are reachable.
+
+    Checks Postgres, Redis, Chroma and the object store concurrently and
+    returns 503 (with a per-dependency breakdown) if any is unavailable, so
+    the orchestrator can hold traffic until the pod is truly ready.
+    """
+    checks = {
+        "postgres": _check_postgres,
+        "redis": _check_redis,
+        "chroma": _check_chroma,
+        "object_store": _check_object_store,
+    }
+    results: dict[str, str] = {}
+
+    async def _run(name: str, fn: Callable[[], Awaitable[None]]) -> None:
+        try:
+            await asyncio.wait_for(fn(), timeout=5.0)
+            results[name] = "ok"
+        except Exception as exc:  # noqa: BLE001 - report, don't raise
+            results[name] = f"error: {type(exc).__name__}: {exc}"
+
+    await asyncio.gather(*(_run(name, fn) for name, fn in checks.items()))
+
+    ready = all(v == "ok" for v in results.values())
+    if not ready:
+        logger.warning("readyz_not_ready", checks=results)
+    return JSONResponse(
+        {"status": "ready" if ready else "not_ready", "checks": results},
+        status_code=200 if ready else 503,
+    )

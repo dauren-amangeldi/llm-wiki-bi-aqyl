@@ -25,6 +25,18 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     worker_concurrency=1,  # MVP: single worker to avoid index.md race conditions
+    # At-least-once delivery: ack only AFTER the task finishes, and re-queue if
+    # the worker dies mid-task (OOM / SIGKILL / eviction). Combined with the
+    # persisted state_history the pipeline resumes instead of duplicating work.
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    # With acks_late, keep at most one un-acked message per worker so a crash
+    # re-queues a single task, not a whole prefetched batch.
+    worker_prefetch_multiplier=1,
+    # Redis re-delivers an un-acked message after this many seconds. Must exceed
+    # the longest possible pipeline run so a slow (not dead) task is not
+    # re-queued while still processing.
+    broker_transport_options={"visibility_timeout": 3600},
     beat_schedule={
         # LW-15: weekly semantic audit via OpenAI Batch API (-50% cost, 24 h SLA)
         "weekly-audit": {
@@ -43,7 +55,13 @@ _PERMANENT_ERRORS: tuple[type[Exception], ...] = (
 )
 
 
-@celery_app.task(bind=True, max_retries=3, name="llm_wiki.orchestrator.tasks.process_file")
+@celery_app.task(
+    bind=True,
+    max_retries=3,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name="llm_wiki.orchestrator.tasks.process_file",
+)
 def process_file_task(self: Any, file_id: str) -> None:
     """Celery task: run the ingestion pipeline for a single file.
 

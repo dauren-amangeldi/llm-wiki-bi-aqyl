@@ -77,6 +77,34 @@ async def test_health_check(test_app: tuple) -> None:  # type: ignore[type-arg]
     assert resp.json()["status"] == "ok"
 
 
+async def test_healthz_liveness(test_app: tuple) -> None:  # type: ignore[type-arg]
+    """GET /healthz (liveness alias) returns 200 without touching dependencies."""
+    app, *_ = test_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+async def test_readyz_reports_all_dependencies(test_app: tuple) -> None:  # type: ignore[type-arg]
+    """GET /readyz returns a per-dependency breakdown and the right status code.
+
+    The local object store (temp dir) is always reachable; external services may
+    be down in the unit environment, so we assert on structure + status coupling
+    rather than a fixed 200.
+    """
+    app, *_ = test_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/readyz")
+
+    body = resp.json()
+    assert set(body["checks"]) == {"postgres", "redis", "chroma", "object_store"}
+    assert body["checks"]["object_store"] == "ok"
+    ready = all(v == "ok" for v in body["checks"].values())
+    assert body["status"] == ("ready" if ready else "not_ready")
+    assert resp.status_code == (200 if ready else 503)
+
+
 async def test_upload_pdf_returns_202(test_app: tuple, tmp_path: Path) -> None:  # type: ignore[type-arg]
     """POST /files with a valid PDF returns 202 with file_id and task_id."""
     app, data_tmp, raw_dir = test_app
