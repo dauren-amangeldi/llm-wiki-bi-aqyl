@@ -484,6 +484,20 @@ async def get_audit_status(task_id: str) -> AuditStatusResponse:
     )
 
 
+def _format_log_entry(fr) -> str:  # type: ignore[no-untyped-def]
+    """Render one ingestion-log entry (matches the former log.md block shape)."""
+    ts = fr.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    created = ", ".join(fr.created_pages) if fr.created_pages else "none"
+    updated = ", ".join(fr.updated_pages) if fr.updated_pages else "none"
+    return (
+        f"## {ts} — {fr.original_name}\n\n"
+        f"- **File ID**: {fr.file_id}\n"
+        f"- **Created**: {created}\n"
+        f"- **Updated**: {updated}\n"
+        f"- **Cost**: ${(fr.cost_usd or 0.0):.4f}"
+    )
+
+
 @router.get(
     "/log",
     response_model=LogResponse,
@@ -493,43 +507,57 @@ async def get_audit_status(task_id: str) -> AuditStatusResponse:
 async def get_log(
     page: int = Query(1, ge=1, description="1-based page number"),
     per_page: int = Query(50, ge=1, le=200, description="Entries per page (max 200)"),
+    session: AsyncSession = Depends(get_db),
 ) -> LogResponse:
-    """Return paginated entries from ``log.md``, newest first.
+    """Return the ingestion changelog, newest first, from the ``files`` table.
 
-    Each entry is a Markdown block starting with a ``## TIMESTAMP — filename``
-    header and running until the next such header or EOF.
+    Each entry is a Markdown block with a ``## TIMESTAMP — filename`` header
+    (the same shape the former ``log.md`` used), rendered from the FileRecord.
 
     Args:
         page: 1-based page number.
         per_page: Number of entries per page (1–200).
 
     Returns:
-        ``LogResponse`` with ``total`` count and ``entries`` slice for the
-        requested page.
+        ``LogResponse`` with ``total`` count and ``entries`` slice.
     """
-    if not settings.log_path.exists():
+    from sqlalchemy import func, select
+
+    from llm_wiki.storage.metadata import FileRecord
+
+    total = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(FileRecord)
+                .where(FileRecord.status == "DONE")
+            )
+        ).scalar_one()
+    )
+    if total == 0:
         return LogResponse(page=page, per_page=per_page, total=0, entries=[])
 
-    content = settings.log_path.read_text(encoding="utf-8")
-    matches = list(_LOG_HEADER_RE.finditer(content))
-    if not matches:
-        return LogResponse(page=page, per_page=per_page, total=0, entries=[])
-
-    # Slice the raw text between consecutive header positions so each entry
-    # includes its own header line and all body lines up to the next header.
-    raw_entries: list[str] = []
-    for i, m in enumerate(matches):
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
-        raw_entries.append(content[start:end].rstrip())
-
-    raw_entries.reverse()  # newest first (log.md is append-only, chronological)
-
-    total = len(raw_entries)
     offset = (page - 1) * per_page
-    page_entries = raw_entries[offset : offset + per_page]
+    rows = (
+        (
+            await session.execute(
+                select(FileRecord)
+                .where(FileRecord.status == "DONE")
+                .order_by(FileRecord.created_at.desc())
+                .offset(offset)
+                .limit(per_page)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
-    return LogResponse(page=page, per_page=per_page, total=total, entries=page_entries)
+    return LogResponse(
+        page=page,
+        per_page=per_page,
+        total=total,
+        entries=[_format_log_entry(fr) for fr in rows],
+    )
 
 
 @router.get(
@@ -594,11 +622,9 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
                 logger.warning("usage_log_parse_error", line=raw_line[:120])
 
     # --- Last lint run --------------------------------------------------------
-    last_lint_run: datetime | None = None
-    if settings.issues_path.exists():
-        last_lint_run = datetime.fromtimestamp(
-            settings.issues_path.stat().st_mtime, tz=timezone.utc
-        )
+    from llm_wiki.quality.issues_writer import issues_last_updated
+
+    last_lint_run: datetime | None = issues_last_updated()
 
     # --- Budget percentage (LW-19) -------------------------------------------
     budget_limit = settings.daily_cost_limit_usd

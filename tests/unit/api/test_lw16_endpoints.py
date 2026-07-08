@@ -193,31 +193,25 @@ class TestGetWikiPage:
 # GET /api/v1/log
 # ---------------------------------------------------------------------------
 
-_LOG_ENTRY_1 = (
-    "## 2026-01-01T00:00:00Z — alpha.pdf\n\n"
-    "- **File ID**: file-001\n"
-    "- **Created**: alpha\n"
-    "- **Updated**: none\n"
-    "- **Cost**: $0.0050\n"
-)
-_LOG_ENTRY_2 = (
-    "## 2026-02-01T00:00:00Z — beta.pdf\n\n"
-    "- **File ID**: file-002\n"
-    "- **Created**: beta\n"
-    "- **Updated**: none\n"
-    "- **Cost**: $0.0060\n"
-)
-_LOG_ENTRY_3 = (
-    "## 2026-03-01T00:00:00Z — gamma.pdf\n\n"
-    "- **File ID**: file-003\n"
-    "- **Created**: none\n"
-    "- **Updated**: gamma\n"
-    "- **Cost**: $0.0070\n"
-)
-
-
 class TestGetLog:
-    async def test_empty_when_log_absent(self, client: AsyncClient) -> None:
+    async def _seed(self, db_session: AsyncSession) -> None:
+        await _insert_file_record(
+            db_session, "file-001", original_name="alpha.pdf",
+            created_pages=["alpha"], cost_usd=0.005,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await _insert_file_record(
+            db_session, "file-002", original_name="beta.pdf",
+            created_pages=["beta"], cost_usd=0.006,
+            created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        )
+        await _insert_file_record(
+            db_session, "file-003", original_name="gamma.pdf",
+            updated_pages=["gamma"], cost_usd=0.007,
+            created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+
+    async def test_empty_when_no_files(self, client: AsyncClient) -> None:
         r = await client.get("/api/v1/log")
         assert r.status_code == 200
         data = r.json()
@@ -225,11 +219,9 @@ class TestGetLog:
         assert data["entries"] == []
 
     async def test_three_entries_newest_first(
-        self, client: AsyncClient, tmp_path: Path
+        self, client: AsyncClient, db_session: AsyncSession
     ) -> None:
-        log_content = "# Ingestion Log\n\n" + _LOG_ENTRY_1 + _LOG_ENTRY_2 + _LOG_ENTRY_3
-        (tmp_path / "log.md").write_text(log_content, encoding="utf-8")
-
+        await self._seed(db_session)
         r = await client.get("/api/v1/log")
         assert r.status_code == 200
         data = r.json()
@@ -241,11 +233,9 @@ class TestGetLog:
         assert "2026-01-01" in data["entries"][2]
 
     async def test_pagination_page2(
-        self, client: AsyncClient, tmp_path: Path
+        self, client: AsyncClient, db_session: AsyncSession
     ) -> None:
-        log_content = "# Ingestion Log\n\n" + _LOG_ENTRY_1 + _LOG_ENTRY_2 + _LOG_ENTRY_3
-        (tmp_path / "log.md").write_text(log_content, encoding="utf-8")
-
+        await self._seed(db_session)
         r = await client.get("/api/v1/log?page=2&per_page=1")
         assert r.status_code == 200
         data = r.json()
@@ -263,11 +253,13 @@ class TestGetLog:
         assert r.status_code == 422
 
     async def test_page_beyond_total_returns_empty_entries(
-        self, client: AsyncClient, tmp_path: Path
+        self, client: AsyncClient, db_session: AsyncSession
     ) -> None:
-        log_content = "# Ingestion Log\n\n" + _LOG_ENTRY_1
-        (tmp_path / "log.md").write_text(log_content, encoding="utf-8")
-
+        await _insert_file_record(
+            db_session, "file-001", original_name="alpha.pdf",
+            created_pages=["alpha"], cost_usd=0.005,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
         r = await client.get("/api/v1/log?page=99")
         assert r.status_code == 200
         data = r.json()
@@ -321,8 +313,11 @@ class TestGetStats:
         ]
         (tmp_path / "usage.log").write_text("\n".join(usage_lines) + "\n")
 
-        # issues.md for last_lint_run
-        (tmp_path / "issues.md").write_text("# Issues\n")
+        # An issues-report row so last_lint_run is populated.
+        from llm_wiki.quality.issues_writer import upsert_section
+        from llm_wiki.quality.models import IssueSection
+
+        upsert_section(tmp_path / "issues.md", IssueSection.AUTO_DETECTED, [])
 
         r = await client.get("/api/v1/stats")
         assert r.status_code == 200

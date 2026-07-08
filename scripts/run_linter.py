@@ -87,9 +87,15 @@ def main() -> None:
 
     # --------------------------------------------------------- load wiki pages
     wiki_pages: dict[str, str] = {}
-    if wiki_dir.exists():
+    if args.wiki_dir and wiki_dir.exists():
+        # Explicit --wiki-dir: read markdown fixtures from disk.
         for md_file in sorted(wiki_dir.glob("*.md")):
             wiki_pages[md_file.stem] = md_file.read_text(encoding="utf-8")
+    else:
+        # Default: wiki pages live in Postgres.
+        from llm_wiki.storage import wiki_store
+
+        wiki_pages = dict(wiki_store.get_all_pages())
 
     if not wiki_pages:
         _print_or_json(
@@ -101,14 +107,12 @@ def main() -> None:
         sys.exit(0)
 
     # --------------------------------------------------- index root sections
-    index_path = wiki_dir.parent / "index.md"
-    if not index_path.exists():
-        index_path = settings.index_path
-    index_root_sections: set[str] = set()
-    if index_path.exists():
-        index_storage = IndexStorage(index_path)
-        headings = index_storage.read_headings()
-        index_root_sections = {h.section.lower().replace(" ", "-") for h in headings}
+    index_storage = IndexStorage()
+    index_root_sections: set[str] = {
+        h.text.lower().replace(" ", "-")
+        for h in index_storage.read_headings()
+        if h.slug is None
+    }
 
     # ------------------------------------------------------------------ run
     requested = {c.strip() for c in args.checks.split(",") if c.strip()}

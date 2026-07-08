@@ -136,29 +136,27 @@ def upsert_section(
         section: Which section to replace (auto-detected or llm-flagged).
         issues: Fresh issue snapshot.  Pass ``[]`` to clear the section.
     """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from llm_wiki.storage.metadata import IssuesReport, get_sync_engine
+
     stamped = _stamp_issues(issues)
-    new_block = _render_section(section, stamped)
-    key = str(section)
-    pattern = re.compile(
-        _SECTION_RE_TEMPLATE.format(key=re.escape(key)),
-        re.DOTALL,
-    )
+    content = _render_section(section, stamped)
+    now = datetime.now(timezone.utc)
 
-    if issues_path.exists():
-        content = issues_path.read_text(encoding="utf-8")
-    else:
-        # Bootstrap file with both sections
-        content = _bootstrap_issues_md()
-
-    if pattern.search(content):
-        new_content = pattern.sub(new_block, content)
-    else:
-        # Section sentinels missing — append the section
-        if not content.endswith("\n\n"):
-            content = content.rstrip("\n") + "\n\n"
-        new_content = content + new_block + "\n"
-
-    atomic_write(issues_path, new_content)
+    with get_sync_engine().begin() as conn:
+        ins = pg_insert(IssuesReport).values(
+            section=str(section), content=content, updated_at=now
+        )
+        conn.execute(
+            ins.on_conflict_do_update(
+                index_elements=[IssuesReport.section],
+                set_={
+                    "content": ins.excluded.content,
+                    "updated_at": ins.excluded.updated_at,
+                },
+            )
+        )
     logger.info(
         "issues_section_updated",
         section=str(section),
@@ -167,31 +165,33 @@ def upsert_section(
 
 
 def read_section(issues_path: Path, section: IssueSection) -> str:
-    """Return the raw Markdown content inside *section*'s sentinel block.
+    """Return the rendered Markdown content stored for *section*.
 
     Args:
-        issues_path: Path to ``data/issues.md``.
-        section: Which section to extract.
+        issues_path: Ignored (kept for backwards-compatible call sites).
+        section: Which section to read.
 
     Returns:
-        Content string, or empty string if file or section is absent.
+        Content string, or empty string if the section has never been written.
     """
-    if not issues_path.exists():
-        return ""
-    key = str(section)
-    pattern = re.compile(
-        _SECTION_RE_TEMPLATE.format(key=re.escape(key)),
-        re.DOTALL,
-    )
-    content = issues_path.read_text(encoding="utf-8")
-    m = pattern.search(content)
-    return m.group(0) if m else ""
+    from sqlalchemy import select
+
+    from llm_wiki.storage.metadata import IssuesReport, get_sync_engine
+
+    with get_sync_engine().connect() as conn:
+        row = conn.execute(
+            select(IssuesReport.content).where(IssuesReport.section == str(section))
+        ).first()
+    return "" if row is None else str(row[0])
 
 
-def _bootstrap_issues_md() -> str:
-    """Return the initial ``issues.md`` content with both empty sections."""
-    parts = [_ISSUES_HEADER, ""]
-    for section in IssueSection:
-        parts.append(_render_section(section, []))
-        parts.append("")
-    return "\n".join(parts)
+def issues_last_updated() -> datetime | None:
+    """Return the most recent issues-section update time (for stats), or None."""
+    from sqlalchemy import func, select
+
+    from llm_wiki.storage.metadata import IssuesReport, get_sync_engine
+
+    with get_sync_engine().connect() as conn:
+        return conn.execute(
+            select(func.max(IssuesReport.updated_at))
+        ).scalar_one_or_none()

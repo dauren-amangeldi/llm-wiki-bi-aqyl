@@ -70,119 +70,62 @@ def test_ensure_dirs_idempotent(tmp_path: Path) -> None:
 # ===========================================================================
 
 
-def _make_index(tmp_path: Path, content: str = "# Wiki Index\n") -> IndexStorage:
-    idx = tmp_path / "index.md"
-    idx.write_text(content, encoding="utf-8")
-    return IndexStorage(idx)
+def test_index_read_headings_empty(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """read_headings on an empty index returns an empty list."""
+    assert IndexStorage().read_headings() == []
 
 
-def test_index_read_headings_empty_file(tmp_path: Path) -> None:
-    """read_headings on an empty file returns an empty list."""
-    storage = IndexStorage(tmp_path / "index.md")
-    assert storage.read_headings() == []
+def test_index_add_and_read_pages(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """add_page persists a (slug, title, level, section) row readable via read_pages."""
+    storage = IndexStorage()
+    storage.add_page("transformers", "AI Models", title="Transformers")
+    assert storage.read_pages() == [("transformers", "Transformers", 2, "AI Models")]
 
 
-def test_index_read_headings_parses_levels(tmp_path: Path) -> None:
-    """read_headings extracts heading levels and text correctly."""
-    content = "# Top\n## Second\n### Third\n"
-    storage = _make_index(tmp_path, content)
+def test_index_read_headings_has_section_and_entry(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """read_headings emits a section header (no slug) then the page entry (slug)."""
+    storage = IndexStorage()
+    storage.add_page("gpt", "AI Models", title="GPT")
     headings = storage.read_headings()
-    assert len(headings) == 3
-    assert headings[0] == Heading(level=1, text="Top")
-    assert headings[1] == Heading(level=2, text="Second")
-    assert headings[2] == Heading(level=3, text="Third")
+    assert Heading(level=2, text="AI Models", slug=None) in headings
+    assert any(h.slug == "gpt" for h in headings)
 
 
-def test_index_read_headings_extracts_slug(tmp_path: Path) -> None:
-    """read_headings should populate the slug field when [[slug]] is present."""
-    content = "## [[my-page]]\n"
-    storage = _make_index(tmp_path, content)
-    headings = storage.read_headings()
-    assert headings[0].slug == "my-page"
-
-
-def test_index_add_page_creates_section(tmp_path: Path) -> None:
-    """add_page creates a new section when none exists."""
-    storage = _make_index(tmp_path)
-    storage.add_page("transformers", "AI Models")
-    content = (tmp_path / "index.md").read_text()
-    assert "## AI Models" in content
-    assert "[[transformers]]" in content
-
-
-def test_index_add_page_under_existing_section(tmp_path: Path) -> None:
-    """add_page appends under an existing section."""
-    content = "# Wiki Index\n\n## AI Models\n- [[bert]]\n"
-    storage = _make_index(tmp_path, content)
-    storage.add_page("gpt", "AI Models")
-    result = (tmp_path / "index.md").read_text()
-    # Both slugs must be present and gpt must appear after bert
-    assert "[[bert]]" in result
-    assert "[[gpt]]" in result
-    assert result.index("[[bert]]") < result.index("[[gpt]]")
-
-
-def test_index_add_page_idempotent(tmp_path: Path) -> None:
+def test_index_add_page_idempotent(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
     """add_page called twice with the same slug does not create duplicates."""
-    storage = _make_index(tmp_path)
+    storage = IndexStorage()
     storage.add_page("transformers", "AI Models")
     storage.add_page("transformers", "AI Models")
-    content = (tmp_path / "index.md").read_text()
-    assert content.count("[[transformers]]") == 1
+    assert len(storage.read_pages()) == 1
 
 
-def test_index_add_page_concurrent(tmp_path: Path) -> None:
-    """Concurrent add_page calls must not corrupt the index."""
-    index_path = tmp_path / "index.md"
-    index_path.write_text("# Wiki Index\n", encoding="utf-8")
-    storage = IndexStorage(index_path)
-    errors: list[Exception] = []
-
-    def add(slug: str) -> None:
-        try:
-            storage.add_page(slug, "Concurrent")
-        except Exception as exc:
-            errors.append(exc)
-
-    slugs = [f"page-{i}" for i in range(8)]
-    threads = [threading.Thread(target=add, args=(s,)) for s in slugs]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert errors == [], f"Exceptions during concurrent writes: {errors}"
-    content = index_path.read_text(encoding="utf-8")
-    for slug in slugs:
-        assert f"[[{slug}]]" in content, f"Missing [[{slug}]] after concurrent writes"
+def test_index_add_page_updates_on_conflict(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """Re-adding a slug updates its title/section."""
+    storage = IndexStorage()
+    storage.add_page("p", "Old", title="P")
+    storage.add_page("p", "New", title="P2")
+    assert storage.read_pages() == [("p", "P2", 2, "New")]
 
 
-def test_index_move_page(tmp_path: Path) -> None:
-    """move_page relocates an entry from one section to another."""
-    content = "# Wiki\n\n## Old Section\n- [[target]]\n\n## New Section\n- [[other]]\n"
-    storage = _make_index(tmp_path, content)
+def test_index_move_page(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """move_page changes an entry's section."""
+    storage = IndexStorage()
+    storage.add_page("target", "Old Section")
     storage.move_page("target", "New Section")
-    result = (tmp_path / "index.md").read_text()
-    assert "[[target]]" in result
-    # Entry must now appear inside New Section, not Old Section
-    new_start = result.index("## New Section")
-    assert result.index("[[target]]") > new_start
-    # Should appear only once
-    assert result.count("[[target]]") == 1
+    assert storage.read_pages()[0][3] == "New Section"
 
 
-def test_index_get_backlinks_empty(tmp_path: Path) -> None:
-    """get_backlinks returns empty list when there are no cross-references."""
-    storage = _make_index(tmp_path, "# Wiki\n\n## X\n- [[page-a]]\n")
-    assert storage.get_backlinks("page-b") == []
+def test_index_remove_page(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """remove_page deletes the entry."""
+    storage = IndexStorage()
+    storage.add_page("gone", "X")
+    storage.remove_page("gone")
+    assert storage.read_pages() == []
 
 
-def test_index_get_backlinks_finds_inline_refs(tmp_path: Path) -> None:
-    """get_backlinks returns slugs that share a line with the target."""
-    content = "# Wiki\n\n## X\n- [[page-a]] and [[page-b]]\n- [[page-c]]\n"
-    storage = _make_index(tmp_path, content)
-    backlinks = storage.get_backlinks("page-b")
-    assert "page-a" in backlinks
+def test_index_get_backlinks_returns_empty(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """Index-level co-occurrence is no longer tracked; get_backlinks is a stub."""
+    assert IndexStorage().get_backlinks("anything") == []
 
 
 # ===========================================================================

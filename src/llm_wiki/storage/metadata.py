@@ -103,6 +103,32 @@ class EmbeddingMeta(Base):
     dim: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class WikiIndexEntry(Base):
+    """The wiki knowledge-map index — one row per page (replaces index.md)."""
+
+    __tablename__ = "wiki_index"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False, default="")
+    section: Mapped[str] = mapped_column(String, nullable=False, default="General")
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class IssuesReport(Base):
+    """Rendered quality-issues sections (replaces issues.md). One row per section."""
+
+    __tablename__ = "issues_report"
+
+    section: Mapped[str] = mapped_column(String, primary_key=True)  # auto-detected | llm-flagged
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
 # Synchronous engine for the (synchronous) vector stores. The app's main engine
 # is async; embedding upsert/query are sync (LLMClient.embed is sync), so they
 # share their own sync psycopg engine against the same DATABASE_URL.

@@ -11,33 +11,16 @@ from llm_wiki.storage.filesystem import ensure_dirs
 
 
 def main() -> None:
-    """Create all required data directories and seed empty marker files."""
-    dirs = [settings.raw_dir, settings.wiki_dir]
-    ensure_dirs(*dirs)
+    """Create the local data directories used by the local object-store backend.
 
-    lang = settings.wiki_language.lower()
-    index_header = "# Карта знаний\n" if lang == "ru" else "# Wiki Index\n"
-    log_header = "# Журнал изменений\n" if lang == "ru" else "# Ingestion Log\n"
+    The wiki index, ingestion log and quality issues now live in Postgres
+    (tables created on app startup), so no markdown marker files are needed.
+    """
+    ensure_dirs(settings.raw_dir, settings.wiki_dir)
 
-    from llm_wiki.quality.issues_writer import _bootstrap_issues_md  # type: ignore[attr-defined]
-    issues_template = _bootstrap_issues_md()
-
-    for path, content in [
-        (settings.index_path, index_header),
-        (settings.log_path, log_header),
-        (settings.usage_log_path, ""),
-    ]:
-        if not path.exists():
-            path.write_text(content, encoding="utf-8")
-            print(f"Created {path}")
-        else:
-            print(f"Already exists: {path}")
-
-    if not settings.issues_path.exists():
-        settings.issues_path.write_text(issues_template, encoding="utf-8")
-        print(f"Created {settings.issues_path}")
-    else:
-        print(f"Already exists: {settings.issues_path}")
+    if not settings.usage_log_path.exists():
+        settings.usage_log_path.write_text("", encoding="utf-8")
+        print(f"Created {settings.usage_log_path}")
 
     print("Done. data/ structure is ready.")
 

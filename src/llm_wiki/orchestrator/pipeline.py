@@ -26,7 +26,6 @@ from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
 from llm_wiki.storage.chunk_sync import sync_chunks_for_page
 from llm_wiki.storage.index import IndexStorage
 from llm_wiki.utils.backlinks import extract_outgoing_links
-from llm_wiki.storage.log import append_log_entry
 from llm_wiki.storage.metadata import (
     FileRecord,
     append_state_history,
@@ -239,19 +238,11 @@ async def process_file(file_id: str) -> None:
                     await _transition(session, file_id, "LINTED")
 
             # ----------------------------------------------------------------
-            # LOGGED — append to log.md, persist cost
+            # LOGGED — persist LLM cost to the FileRecord. The /log changelog is
+            # rendered from the files table, so there is no separate log.md.
             # ----------------------------------------------------------------
             if "LOGGED" not in completed:
-                record = await get_file_record(session, file_id)
                 cost = _sum_cost(settings.usage_log_path, file_id)
-                append_log_entry(
-                    log_path=settings.log_path,
-                    file_id=file_id,
-                    original_name=record.original_name if record else "unknown",
-                    created_pages=list(record.created_pages) if record else [],
-                    updated_pages=list(record.updated_pages) if record else [],
-                    cost_usd=cost,
-                )
                 from sqlalchemy import update as sa_update
 
                 await session.execute(
@@ -414,16 +405,13 @@ def _run_linter_step(file_id: str) -> None:
 
     wiki_pages: dict[str, str] = dict(wiki_store.get_all_pages())
 
-    # Derive root sections from index.md headings (level-2 headings = sections)
-    index_storage = IndexStorage(settings.index_path)
-    headings = index_storage.read_headings()
-    # Root sections are those whose heading level is 2 (## Section Name)
-    index_root_sections: set[str] = set()
-    for h in headings:
-        # Treat the first heading per section as a root slug placeholder
-        # (slugified lower-case version of the section name)
-        section_slug = h.section.lower().replace(" ", "-")
-        index_root_sections.add(section_slug)
+    # Root sections are the index section headers (entries with no slug).
+    index_storage = IndexStorage()
+    index_root_sections: set[str] = {
+        h.text.lower().replace(" ", "-")
+        for h in index_storage.read_headings()
+        if h.slug is None
+    }
 
     from datetime import datetime, timezone
 

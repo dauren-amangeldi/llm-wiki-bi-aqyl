@@ -174,21 +174,18 @@ def test_model_mismatch_raises_on_init(vector_engine: Any, monkeypatch: pytest.M
         EmbeddingStore(llm_client=_mock_llm(), engine=vector_engine)
 
 
-def test_vector_failure_does_not_break_index(tmp_path: Path) -> None:
-    """If EmbeddingStore.upsert_heading raises, IndexStorage.add_page still writes."""
+def test_vector_failure_does_not_break_index(db_engine) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """If EmbeddingStore.upsert_heading raises, IndexStorage.add_page still persists."""
     from llm_wiki.storage.index import IndexStorage
-
-    index_path = tmp_path / "index.md"
-    index_path.write_text("# Wiki Index\n\n## General\n\n")
 
     broken_store = MagicMock()
     broken_store.upsert_heading.side_effect = RuntimeError("vector store is down")
 
-    storage = IndexStorage(index_path=index_path, embedding_store=broken_store)
-    # Must NOT raise even though embedding store throws
+    storage = IndexStorage(embedding_store=broken_store)
+    # Must NOT raise even though the embedding mirror throws.
     storage.add_page("test-page", "General")
 
-    assert "[[test-page]]" in index_path.read_text()
+    assert any(slug == "test-page" for slug, *_ in storage.read_pages())
 
 
 def test_search_hit_is_frozen() -> None:

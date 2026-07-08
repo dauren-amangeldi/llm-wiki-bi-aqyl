@@ -101,10 +101,6 @@ def main() -> None:
     from llm_wiki.llm.embeddings import EmbeddingStore, HeadingInfo
     from llm_wiki.storage.index import IndexStorage
 
-    if not settings.index_path.exists():
-        print(f"ERROR: index.md not found at {settings.index_path}", file=sys.stderr)
-        sys.exit(1)
-
     if not settings.openai_api_key:
         print(
             "ERROR: OPENAI_API_KEY is required for embeddings. Set it in your .env file.",
@@ -112,27 +108,14 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Parse all headings from index.md
-    index_storage = IndexStorage(settings.index_path)
-    raw_headings = index_storage.read_headings()
+    # Read all page entries from the wiki index (Postgres)
+    index_storage = IndexStorage()
+    heading_infos: list[HeadingInfo] = [
+        HeadingInfo(slug=slug, title=title or slug, section=section, level=level)
+        for slug, title, level, section in index_storage.read_pages()
+    ]
 
-    # Build HeadingInfo list from parsed headings (only those with a slug)
-    heading_infos: list[HeadingInfo] = []
-    current_section = "General"
-    for h in raw_headings:
-        if h.level == 2 and h.slug is None:
-            current_section = h.text
-        if h.slug:
-            heading_infos.append(
-                HeadingInfo(
-                    slug=h.slug,
-                    title=h.text.replace(f"[[{h.slug}]]", "").strip(" —") or h.slug,
-                    section=current_section,
-                    level=h.level,
-                )
-            )
-
-    print(f"Found {len(heading_infos)} headings in {settings.index_path}")
+    print(f"Found {len(heading_infos)} headings in the wiki index")
 
     if args.dry_run:
         print("\n--- DRY RUN — no changes written ---")
