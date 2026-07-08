@@ -88,28 +88,24 @@ def main() -> None:
         print(f"Backfill complete: {total} chunk record(s) updated.")
         return
 
-    wiki_dir: Path = settings.wiki_dir
-    if not wiki_dir.exists():
-        print(f"Wiki directory does not exist: {wiki_dir}", file=sys.stderr)
-        sys.exit(1)
+    from llm_wiki.storage import wiki_store
 
-    pages = sorted(wiki_dir.glob("*.md"))
+    pages = wiki_store.get_all_pages()  # list[(slug, content)] from Postgres
     if not pages:
         print("No wiki pages found — nothing to index.")
         return
 
-    print(f"Found {len(pages)} wiki page(s) in {wiki_dir}")
+    print(f"Found {len(pages)} wiki page(s) in Postgres")
 
     # Dry-run: just count chunks without touching pgvector or the API
     if args.dry_run:
         total_chunks = 0
-        for path in pages:
-            content = path.read_text(encoding="utf-8")
+        for slug, content in pages:
             chunks = chunk_markdown(
                 content, settings.chunk_max_chars, settings.chunk_overlap_chars
             )
             total_chunks += len(chunks)
-            print(f"  {path.stem}: {len(chunks)} chunk(s)")
+            print(f"  {slug}: {len(chunks)} chunk(s)")
         print(f"\n[dry-run] Would index {total_chunks} chunks across {len(pages)} pages.")
         return
 
@@ -117,14 +113,12 @@ def main() -> None:
     llm = LLMClient()
     store = ChunkStore(llm_client=llm)
 
-    print("Clearing existing chunks collection…")
+    print("Clearing existing chunks…")
     store.clear()
 
     slug_map = _load_slug_file_map()
     indexed_pages = 0
-    for i, path in enumerate(pages, start=1):
-        slug = path.stem
-        content = path.read_text(encoding="utf-8")
+    for i, (slug, content) in enumerate(pages, start=1):
         title = _extract_title(content, slug)
         source_file_id = slug_map.get(slug, "reindex-chunks")
         store.upsert_page(

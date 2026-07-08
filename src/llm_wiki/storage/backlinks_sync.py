@@ -31,7 +31,7 @@ from collections.abc import Iterable
 
 import structlog
 
-from llm_wiki.storage.object_store import get_object_store, wiki_key
+from llm_wiki.storage import wiki_store
 from llm_wiki.utils.backlinks import (
     extract_outgoing_links,
     inject_backlink,
@@ -172,11 +172,8 @@ def _apply_to_target(
         operation: ``"add"`` or ``"remove"``.
         log: Bound structlog logger (already carries ``file_id``/``source_slug``).
     """
-    store = get_object_store()
-    key = wiki_key(target_slug)
-
     with _lock_for(target_slug):
-        old_content = store.get_text(key)
+        old_content = wiki_store.get_page(target_slug)
         if old_content is None:
             log.warning(
                 "backlink_target_missing",
@@ -198,7 +195,8 @@ def _apply_to_target(
             )
             return  # no write needed — idempotent
 
-        store.put_text(key, new_target_content)
+        title = wiki_store.extract_page_title(new_target_content, target_slug)
+        wiki_store.save_page(target_slug, title, new_target_content)
         log.debug(
             "backlink_file_updated",
             target=target_slug,

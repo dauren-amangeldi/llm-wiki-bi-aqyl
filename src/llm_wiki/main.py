@@ -17,7 +17,7 @@ from llm_wiki.config import settings
 from llm_wiki.logging_config import configure_logging
 from llm_wiki.storage.filesystem import ensure_dirs
 from llm_wiki.storage.metadata import Base
-from llm_wiki.storage.wiki_fts import ensure_wiki_fts_table, rebuild_wiki_fts_from_store, wiki_fts_count
+from llm_wiki.storage.wiki_fts import ensure_wiki_fts_table
 
 logger = structlog.get_logger(__name__)
 
@@ -41,15 +41,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_wiki_fts_table(conn)
 
-    # Backfill FTS from disk when the index is empty but wiki pages exist
+    # Seed default skills on an empty database. (Wiki pages live in wiki_fts,
+    # which is the source of truth — no S3 backfill needed.)
     from llm_wiki.api.deps import _SessionLocal
 
     async with _SessionLocal() as session:
-        if await wiki_fts_count(session) == 0:
-            indexed = await rebuild_wiki_fts_from_store(session)
-            if indexed:
-                logger.info("wiki_fts_startup_backfill", pages=indexed)
-
         from llm_wiki.storage.metadata import seed_skills, skills_count
 
         if await skills_count(session) == 0:

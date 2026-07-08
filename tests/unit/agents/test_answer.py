@@ -6,12 +6,19 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 
 from llm_wiki.agents.answer import AnswerAgent
 from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 from llm_wiki.storage.metadata import FileRecord
+
+
+@pytest.fixture(autouse=True)
+def _wiki_db(db_engine):  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """AnswerAgent reads wiki pages from Postgres — give each test a clean DB."""
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +47,10 @@ def _wiki(tmp_path: Path, pages: dict[str, str]) -> Path:
 
     Returns a path for the (now-ignored) ``wiki_dir`` AnswerAgent arg.
     """
-    from llm_wiki.storage.object_store import get_object_store, wiki_key
+    from llm_wiki.storage import wiki_store
 
-    store = get_object_store()
     for slug, body in pages.items():
-        store.put_text(wiki_key(slug), body)
+        wiki_store.save_page(slug, wiki_store.extract_page_title(body, slug), body)
     return tmp_path / "wiki"
 
 

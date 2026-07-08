@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from llm_wiki.api.deps import get_db
 from llm_wiki.config import settings
 from llm_wiki.main import app
+from llm_wiki.storage import wiki_store
 from llm_wiki.storage.metadata import create_file_record, update_file_status
 
 
@@ -23,7 +24,7 @@ async def client(
     data_dir = tmp_path / "data"
     wiki_dir = data_dir / "wiki"
     wiki_dir.mkdir(parents=True)
-    (wiki_dir / "sample-page.md").write_text("# Sample\n\nBody text.", encoding="utf-8")
+    wiki_store.save_page("sample-page", "Sample", "# Sample\n\nBody text.")
     object.__setattr__(settings, "data_dir", data_dir)
 
     factory = async_sessionmaker(bind=db_engine, expire_on_commit=False, autoflush=False)

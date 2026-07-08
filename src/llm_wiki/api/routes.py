@@ -270,9 +270,9 @@ async def get_wiki_page(
             detail=f"Invalid slug {slug!r}. Must be lowercase alphanumeric with hyphens (min 2 chars).",
         )
 
-    from llm_wiki.storage.object_store import get_object_store, wiki_key
+    from llm_wiki.storage import wiki_store
 
-    content = get_object_store().get_text(wiki_key(slug))
+    content = wiki_store.get_page(slug)
     if content is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -293,14 +293,8 @@ async def get_wiki_page(
             break
 
     backlinks = extract_backlinks(content)
-    from llm_wiki.storage.object_store import WIKI_PREFIX
-
-    _key = wiki_key(slug)
-    _mtime = next(
-        (o.last_modified for o in get_object_store().list_objects(WIKI_PREFIX) if o.key == _key),
-        0.0,
-    )
-    last_updated = datetime.fromtimestamp(_mtime, tz=timezone.utc)
+    _meta = wiki_store.get_page_meta(slug)
+    last_updated = _meta.updated_at if _meta else datetime.now(timezone.utc)
 
     # Identify source files: FileRecord rows whose created_pages or updated_pages
     # contain this slug.  The dataset is small (<1 000 rows) so a Python-level
@@ -358,18 +352,9 @@ async def run_lint(
     all_checks = {c.value for c in IssueKind if c.value in {"dead_link", "orphan_page", "stale_date"}}
     active_checks = requested & all_checks if requested else all_checks
 
-    from llm_wiki.storage.object_store import (
-        WIKI_PREFIX,
-        get_object_store,
-        slug_from_wiki_key,
-    )
+    from llm_wiki.storage import wiki_store
 
-    store = get_object_store()
-    wiki_pages: dict[str, str] = {}
-    for obj in store.list_objects(WIKI_PREFIX):
-        content = store.get_text(obj.key)
-        if content is not None:
-            wiki_pages[slug_from_wiki_key(obj.key)] = content
+    wiki_pages: dict[str, str] = dict(wiki_store.get_all_pages())
 
     index_storage = IndexStorage(settings.index_path)
     headings = index_storage.read_headings()
@@ -447,9 +432,9 @@ async def run_audit(body: AuditRunRequest | None = None) -> AuditRunResponse:
     )
 
     # Rough cost estimate: $0.003 per page for sync, $0.0015 for batch
-    from llm_wiki.storage.object_store import WIKI_PREFIX, get_object_store
+    from llm_wiki.storage import wiki_store
 
-    n_pages = len(get_object_store().list_objects(WIKI_PREFIX))
+    n_pages = wiki_store.count()
     if body.sample:
         n_pages = min(n_pages, body.sample)
     if body.slugs:
@@ -581,9 +566,9 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
     avg_cost = round(float(avg_cost_raw), 4) if avg_cost_raw is not None else 0.0
 
     # --- Wiki page count ------------------------------------------------------
-    from llm_wiki.storage.object_store import WIKI_PREFIX, get_object_store
+    from llm_wiki.storage import wiki_store
 
-    total_wiki_pages = len(get_object_store().list_objects(WIKI_PREFIX))
+    total_wiki_pages = wiki_store.count()
 
     # --- Usage log: cost aggregation ------------------------------------------
     cost_today = 0.0

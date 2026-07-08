@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from llm_wiki.api.deps import get_db
 from llm_wiki.config import settings
 from llm_wiki.main import app
+from llm_wiki.storage import wiki_store
 
 
 @pytest_asyncio.fixture
@@ -25,13 +26,15 @@ async def client(
     object.__setattr__(settings, "data_dir", tmp_path)
     wiki_dir = tmp_path / "wiki"
     wiki_dir.mkdir(exist_ok=True)
-    (wiki_dir / "transformers.md").write_text(
+    wiki_store.save_page(
+        "transformers",
+        "Transformers",
         "# Transformers\n\nDeep learning architecture.\n\nSee also [[attention]].\n",
-        encoding="utf-8",
     )
-    (wiki_dir / "attention.md").write_text(
+    wiki_store.save_page(
+        "attention",
+        "Attention",
         "# Attention\n\nUses [[transformers]] mechanisms.\n",
-        encoding="utf-8",
     )
 
     factory = async_sessionmaker(bind=db_engine, expire_on_commit=False, autoflush=False)

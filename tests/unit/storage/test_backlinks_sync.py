@@ -12,9 +12,17 @@ from __future__ import annotations
 import threading
 from unittest.mock import patch
 
+import pytest
+
+from llm_wiki.storage import wiki_store
 from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
-from llm_wiki.storage.object_store import get_object_store, wiki_key
 from llm_wiki.utils.backlinks import extract_backlinks
+
+
+@pytest.fixture(autouse=True)
+def _wiki_db(db_engine):  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """backlinks_sync reads/writes wiki pages in Postgres — clean DB per test."""
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -23,14 +31,13 @@ from llm_wiki.utils.backlinks import extract_backlinks
 
 
 def _make_wiki(pages: dict[str, str]) -> None:
-    """Populate the object store with the given {slug: content} pages."""
-    store = get_object_store()
+    """Populate the wiki store (Postgres) with the given {slug: content} pages."""
     for slug, content in pages.items():
-        store.put_text(wiki_key(slug), content)
+        wiki_store.save_page(slug, wiki_store.extract_page_title(content, slug), content)
 
 
 def _read(slug: str) -> str:
-    return get_object_store().get_text(wiki_key(slug)) or ""
+    return wiki_store.get_page(slug) or ""
 
 
 # ===========================================================================
@@ -138,7 +145,7 @@ def test_missing_target_no_exception() -> None:
     )
 
     assert "nonexistent" in result["added"]  # detected as added
-    assert not get_object_store().exists(wiki_key("nonexistent"))  # no page created
+    assert not wiki_store.page_exists("nonexistent")  # no page created
 
 
 # ===========================================================================
@@ -173,7 +180,7 @@ def test_no_write_when_unchanged() -> None:
     """The store is NOT written when the content would not change."""
     _make_wiki({"target": "# Target\n\n## Backlinks\n\n- [[source]]\n"})
 
-    with patch.object(get_object_store(), "put_text") as mock_write:
+    with patch("llm_wiki.storage.wiki_store.save_page") as mock_write:
         sync_backlinks_for_page(
             source_slug="source",
             new_content="# Source\n\n[[target]].\n",
@@ -186,7 +193,7 @@ def test_no_write_when_no_diff() -> None:
     """No writes if previous_outgoing == new outgoing (nothing changed)."""
     _make_wiki({"page-b": "# B\n\n## Backlinks\n\n- [[page-a]]\n"})
 
-    with patch.object(get_object_store(), "put_text") as mock_write:
+    with patch("llm_wiki.storage.wiki_store.save_page") as mock_write:
         sync_backlinks_for_page(
             source_slug="page-a",
             new_content="# A\n\n[[page-b]].\n",

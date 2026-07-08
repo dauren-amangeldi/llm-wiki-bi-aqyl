@@ -25,7 +25,6 @@ from llm_wiki.parsers.pdf import parse_pdf
 from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
 from llm_wiki.storage.chunk_sync import sync_chunks_for_page
 from llm_wiki.storage.index import IndexStorage
-from llm_wiki.storage.wiki_fts import upsert_wiki_fts
 from llm_wiki.utils.backlinks import extract_outgoing_links
 from llm_wiki.storage.log import append_log_entry
 from llm_wiki.storage.metadata import (
@@ -147,7 +146,6 @@ async def process_file(file_id: str) -> None:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
                     _save_wiki_page(page)
-                    await _index_wiki_page_fts(session, page)
                     sync_chunks_for_page(
                         chunk_store=chunk_store,
                         slug=page.slug,
@@ -176,7 +174,6 @@ async def process_file(file_id: str) -> None:
                         pages_out = await writer.update_pages(file_text, existing, file_id)
                         for p in pages_out:
                             _save_wiki_page(p)
-                            await _index_wiki_page_fts(session, p)
                             sync_chunks_for_page(
                                 chunk_store=chunk_store,
                                 slug=p.slug,
@@ -196,7 +193,6 @@ async def process_file(file_id: str) -> None:
                         # Search found headings but files are absent — create new
                         page = await writer.create_page(file_text, file_id)
                         _save_wiki_page(page)
-                        await _index_wiki_page_fts(session, page)
                         sync_chunks_for_page(
                             chunk_store=chunk_store,
                             slug=page.slug,
@@ -343,23 +339,15 @@ def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
 
 
 def _save_wiki_page(page: WikiPage) -> None:
-    """Persist *page.content* to the object store at ``wiki/{slug}.md``."""
-    from llm_wiki.storage.object_store import get_object_store, wiki_key
+    """Persist the wiki page to Postgres (source of truth + FTS in one write)."""
+    from llm_wiki.storage import wiki_store
 
-    get_object_store().put_text(wiki_key(page.slug), page.content)
+    wiki_store.save_page(page.slug, page.title, page.content)
     logger.debug("wiki_page_saved", slug=page.slug)
 
 
-async def _index_wiki_page_fts(session: AsyncSession, page: WikiPage) -> None:
-    """Update the FTS5 index after a wiki page is saved (LW-N4)."""
-    try:
-        await upsert_wiki_fts(session, page.slug, page.title, page.content)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("wiki_fts_index_failed", slug=page.slug, error=str(exc))
-
-
 def _load_existing_pages(search_results: list[SearchHit]) -> list[WikiPage]:
-    """Read wiki pages for *search_results* that exist in the object store.
+    """Read wiki pages (from Postgres) for the slugs in *search_results*.
 
     Args:
         search_results: Ranked search results whose slugs to look up.
@@ -367,12 +355,11 @@ def _load_existing_pages(search_results: list[SearchHit]) -> list[WikiPage]:
     Returns:
         WikiPage objects for results that have a corresponding stored page.
     """
-    from llm_wiki.storage.object_store import get_object_store, wiki_key
+    from llm_wiki.storage import wiki_store
 
-    store = get_object_store()
     pages: list[WikiPage] = []
     for sr in search_results:
-        content = store.get_text(wiki_key(sr.slug))
+        content = wiki_store.get_page(sr.slug)
         if content is not None:
             pages.append(WikiPage(slug=sr.slug, title=sr.title, content=content))
     return pages
@@ -423,18 +410,9 @@ def _run_linter_step(file_id: str) -> None:
     from llm_wiki.quality.models import IssueSection
     from llm_wiki.storage.index import IndexStorage
 
-    from llm_wiki.storage.object_store import (
-        WIKI_PREFIX,
-        get_object_store,
-        slug_from_wiki_key,
-    )
+    from llm_wiki.storage import wiki_store
 
-    store = get_object_store()
-    wiki_pages: dict[str, str] = {}
-    for obj in store.list_objects(WIKI_PREFIX):
-        content = store.get_text(obj.key)
-        if content is not None:
-            wiki_pages[slug_from_wiki_key(obj.key)] = content
+    wiki_pages: dict[str, str] = dict(wiki_store.get_all_pages())
 
     # Derive root sections from index.md headings (level-2 headings = sections)
     index_storage = IndexStorage(settings.index_path)

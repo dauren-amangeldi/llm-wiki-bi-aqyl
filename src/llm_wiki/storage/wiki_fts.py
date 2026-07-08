@@ -40,12 +40,19 @@ CREATE TABLE IF NOT EXISTS wiki_fts (
     slug  TEXT PRIMARY KEY,
     title TEXT NOT NULL DEFAULT '',
     body  TEXT NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
     tsv   tsvector GENERATED ALWAYS AS (
         to_tsvector('{_PG_TS_CONFIG}', coalesce(title, '') || ' ' || coalesce(body, ''))
     ) STORED
 )
 """
 _INDEX_DDL = "CREATE INDEX IF NOT EXISTS ix_wiki_fts_tsv ON wiki_fts USING GIN (tsv)"
+# Add the timestamp columns to tables created before wiki pages moved into Postgres.
+_ALTER_DDL = (
+    "ALTER TABLE wiki_fts ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()",
+    "ALTER TABLE wiki_fts ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()",
+)
 
 
 @dataclass(frozen=True)
@@ -67,9 +74,11 @@ def extract_page_title(content: str, slug: str) -> str:
 
 
 async def ensure_wiki_fts_table(conn: AsyncConnection) -> None:
-    """Create the wiki full-text table + GIN index if they do not exist."""
+    """Create the wiki table + GIN index (and backfill new columns) if needed."""
     await conn.execute(text(_TABLE_DDL))
     await conn.execute(text(_INDEX_DDL))
+    for stmt in _ALTER_DDL:
+        await conn.execute(text(stmt))
 
 
 async def upsert_wiki_fts(

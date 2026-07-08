@@ -195,18 +195,9 @@ def run_weekly_audit(
     from llm_wiki.quality.issues_writer import upsert_section
     from llm_wiki.quality.models import IssueSection
 
-    from llm_wiki.storage.object_store import (
-        WIKI_PREFIX,
-        get_object_store,
-        slug_from_wiki_key,
-    )
+    from llm_wiki.storage import wiki_store
 
-    store = get_object_store()
-    wiki_pages: list[tuple[str, str]] = []
-    for obj in sorted(store.list_objects(WIKI_PREFIX), key=lambda o: o.key):
-        content = store.get_text(obj.key)
-        if content is not None:
-            wiki_pages.append((slug_from_wiki_key(obj.key), content))
+    wiki_pages: list[tuple[str, str]] = wiki_store.get_all_pages()
 
     # Optional filtering
     if slugs:

@@ -154,10 +154,10 @@ async def get_dossier(
     page_count: int | None = None
 
     if fr.created_pages:
-        from llm_wiki.storage.object_store import get_object_store, wiki_key
+        from llm_wiki.storage import wiki_store
 
         slug = fr.created_pages[0]
-        content = get_object_store().get_text(wiki_key(slug))
+        content = wiki_store.get_page(slug)
         if content is not None:
             summary = content
             page_count = max(1, len(content) // 3000)
@@ -184,10 +184,10 @@ async def get_document_text(
     if not all_pages:
         return DocumentText(content=None, slug=None)
 
-    from llm_wiki.storage.object_store import get_object_store, wiki_key
+    from llm_wiki.storage import wiki_store
 
     slug = all_pages[0]
-    content = get_object_store().get_text(wiki_key(slug))
+    content = wiki_store.get_page(slug)
     if content is None:
         return DocumentText(content=None, slug=slug)
 

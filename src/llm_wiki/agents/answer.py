@@ -528,10 +528,10 @@ class AnswerAgent(BaseAgent):
         return "The wiki does not contain information that answers this question."
 
     def _load_page_body(self, slug: str) -> str:
-        from llm_wiki.storage.object_store import get_object_store, wiki_key
+        from llm_wiki.storage import wiki_store
 
         try:
-            return get_object_store().get_text(wiki_key(slug)) or ""
+            return wiki_store.get_page(slug) or ""
         except Exception as exc:  # noqa: BLE001
             logger.warning("ask_load_page_failed", slug=slug, error=str(exc))
             return ""
@@ -550,11 +550,7 @@ class AnswerAgent(BaseAgent):
         match — this score is treated as a "present" marker and prevents the
         NO_LLM_THRESHOLD refusal path even when embedding recall is weak.
         """
-        from llm_wiki.storage.object_store import (
-            WIKI_PREFIX,
-            get_object_store,
-            slug_from_wiki_key,
-        )
+        from llm_wiki.storage import wiki_store
 
         raw_tokens = re.findall(r"[a-z\u0400-\u04ff0-9]{3,}", question.lower())
         tokens = [t for t in raw_tokens if t not in _STOP_WORDS]
@@ -569,14 +565,9 @@ class AnswerAgent(BaseAgent):
         # Deduplicate while preserving order
         needles = list(dict.fromkeys(needles))
 
-        store = get_object_store()
         scored: list[tuple[int, str, str]] = []
-        for obj in store.list_objects(WIKI_PREFIX):
-            slug = slug_from_wiki_key(obj.key)
+        for slug, raw in wiki_store.get_all_pages():
             if slug in exclude:
-                continue
-            raw = store.get_text(obj.key)
-            if raw is None:
                 continue
             body = raw.lower()
             score = sum(1 for n in needles if n in body)

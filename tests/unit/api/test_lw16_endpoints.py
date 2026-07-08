@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from llm_wiki.api.deps import get_db
 from llm_wiki.config import settings
 from llm_wiki.main import app
+from llm_wiki.storage import wiki_store
 from llm_wiki.storage.metadata import FileRecord
 
 
@@ -97,7 +98,7 @@ async def _insert_file_record(
 class TestGetWikiPage:
     async def test_200_json_default(self, client: AsyncClient, tmp_path: Path) -> None:
         content = "# Transformers\n\nBody text.\n\n## Backlinks\n\n- [[gpt]]\n"
-        (tmp_path / "wiki" / "transformers.md").write_text(content, encoding="utf-8")
+        wiki_store.save_page("transformers", "Transformers", content)
 
         r = await client.get("/api/v1/wiki/transformers")
 
@@ -113,7 +114,7 @@ class TestGetWikiPage:
 
     async def test_200_markdown_accept(self, client: AsyncClient, tmp_path: Path) -> None:
         content = "# Transformers\n\nBody.\n"
-        (tmp_path / "wiki" / "transformers.md").write_text(content, encoding="utf-8")
+        wiki_store.save_page("transformers", "Transformers", content)
 
         r = await client.get(
             "/api/v1/wiki/transformers",
@@ -127,7 +128,7 @@ class TestGetWikiPage:
     async def test_markdown_not_returned_when_json_preferred(
         self, client: AsyncClient, tmp_path: Path
     ) -> None:
-        (tmp_path / "wiki" / "page-aa.md").write_text("# Page\n\nBody.", encoding="utf-8")
+        wiki_store.save_page("page-aa", "Page", "# Page\n\nBody.")
 
         r = await client.get(
             "/api/v1/wiki/page-aa",
@@ -158,7 +159,7 @@ class TestGetWikiPage:
         self, client: AsyncClient, tmp_path: Path, db_session: AsyncSession
     ) -> None:
         content = "# My Page\n\nContent.\n"
-        (tmp_path / "wiki" / "my-page.md").write_text(content, encoding="utf-8")
+        wiki_store.save_page("my-page", "My Page", content)
 
         t1 = datetime.now(timezone.utc) - timedelta(hours=2)
         t2 = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -178,7 +179,11 @@ class TestGetWikiPage:
         self, client: AsyncClient, tmp_path: Path
     ) -> None:
         # No # heading — title should be derived from slug
-        (tmp_path / "wiki" / "no-title.md").write_text("Just body text.\n", encoding="utf-8")
+        wiki_store.save_page(
+            "no-title",
+            wiki_store.extract_page_title("Just body text.\n", "no-title"),
+            "Just body text.\n",
+        )
         r = await client.get("/api/v1/wiki/no-title")
         assert r.status_code == 200
         assert r.json()["title"] == "No Title"
@@ -291,7 +296,7 @@ class TestGetStats:
     ) -> None:
         # 3 wiki pages
         for name in ("alpha", "beta", "gamma"):
-            (tmp_path / "wiki" / f"{name}.md").write_text(f"# {name}\n")
+            wiki_store.save_page(name, name, f"# {name}\n")
 
         # 2 DONE file records
         await _insert_file_record(db_session, "file-1", cost_usd=0.10)
