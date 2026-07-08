@@ -102,7 +102,7 @@ async def process_file(file_id: str) -> None:
             # STORED — parse raw file to plain text
             # ----------------------------------------------------------------
             logger.info("pipeline_step_start", file_id=file_id, step="STORED")
-            file_text = _load_raw_text(file_id)
+            file_text = _load_raw_text(file_id, record.raw_key)
 
             if "STORED" not in completed:
                 await _transition(session, file_id, "STORED")
@@ -303,24 +303,32 @@ async def _transition(session: AsyncSession, file_id: str, state: str) -> None:
     logger.info("state_transition", file_id=file_id, state=state)
 
 
-def _load_raw_text(file_id: str) -> str:
+def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
     """Find the uploaded source for *file_id* and extract its plain text.
 
+    Uses the date-partitioned key persisted on the FileRecord (*stored_key*)
+    when available; falls back to a legacy scan of the ``raw/`` prefix for
+    files uploaded before date-partitioning.
+
     Raises:
-        FileNotFoundError: If no raw object with stem *file_id* exists.
+        FileNotFoundError: If no raw object for *file_id* exists.
         ValueError: If the file extension is not ``.pdf`` or ``.md``.
     """
     from llm_wiki.storage.object_store import RAW_PREFIX, get_object_store
 
     store = get_object_store()
-    key = next(
-        (
-            o.key
-            for o in store.list_objects(RAW_PREFIX)
-            if Path(o.key).stem == file_id
-        ),
-        None,
-    )
+    key: str | None
+    if stored_key and store.exists(stored_key):
+        key = stored_key
+    else:
+        key = next(
+            (
+                o.key
+                for o in store.list_objects(RAW_PREFIX)
+                if Path(o.key).stem == file_id
+            ),
+            None,
+        )
     if key is None:
         raise FileNotFoundError(f"Raw object for {file_id!r} not found")
 

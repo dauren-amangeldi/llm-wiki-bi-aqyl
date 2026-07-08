@@ -143,6 +143,9 @@ class FileRecord(Base):
         String(64), nullable=True, index=True
     )
     original_name: Mapped[str] = mapped_column(String, nullable=False)
+    # Date-partitioned object-store key (YYYY/MM/DD/<file_id><ext>). NULL for
+    # rows created before date-partitioning (read via the legacy raw/ path).
+    raw_key: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="RECEIVED")
     state_history: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
     created_pages: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -358,6 +361,7 @@ async def create_file_record(
     file_id: str,
     original_name: str,
     content_sha256: str | None = None,
+    raw_key: str | None = None,
 ) -> FileRecord:
     """Insert a new FileRecord in RECEIVED state and return it.
 
@@ -373,6 +377,7 @@ async def create_file_record(
         file_id=file_id,
         content_sha256=content_sha256,
         original_name=original_name,
+        raw_key=raw_key,
         status="RECEIVED",
         state_history=[],
         created_pages=[],

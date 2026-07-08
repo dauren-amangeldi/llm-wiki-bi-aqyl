@@ -1,6 +1,6 @@
 """Object storage abstraction — local filesystem or S3/MinIO.
 
-Raw uploads (``raw/{file_id}{ext}``) and generated wiki pages
+Raw uploads (``YYYY/MM/DD/{file_id}{ext}``) and generated wiki pages
 (``wiki/{slug}.md``) are addressed by *key*, not by filesystem path, so the
 same code works whether the bytes live on a local volume (dev) or in
 S3/MinIO (production — pods are ephemeral and must not hold data).
@@ -15,6 +15,7 @@ import io
 import os
 import tempfile
 from collections.abc import Iterator
+from datetime import datetime
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,12 +26,24 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 # Key prefixes (forward-slash keys, S3-style — also valid local subpaths).
+# RAW_PREFIX is the *legacy* raw location; new uploads are date-partitioned
+# (YYYY/MM/DD/...) per the BI S3 storage standard.
 RAW_PREFIX = "raw/"
 WIKI_PREFIX = "wiki/"
 
 
-def raw_key(file_id: str, ext: str) -> str:
-    """Storage key for an uploaded source file."""
+def raw_key(file_id: str, ext: str, created_at: datetime) -> str:
+    """Date-partitioned storage key for an uploaded source file.
+
+    Layout: ``YYYY/MM/DD/<file_id><ext>`` (BI S3 standard — ГОД/Месяц/День).
+    The filename is the UUID file_id + extension: only letters/digits/hyphens,
+    no spaces, well under the 150-character limit.
+    """
+    return f"{created_at:%Y/%m/%d}/{file_id}{ext}"
+
+
+def legacy_raw_key(file_id: str, ext: str) -> str:
+    """Pre-date-partitioning key (``raw/<file_id><ext>``) for reading old uploads."""
     return f"{RAW_PREFIX}{file_id}{ext}"
 
 

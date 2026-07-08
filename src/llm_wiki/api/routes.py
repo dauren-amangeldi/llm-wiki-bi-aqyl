@@ -166,11 +166,17 @@ async def upload_file(
     # New file — persist and enqueue
     # ------------------------------------------------------------------
     file_id = new_file_id()
+    from datetime import datetime, timezone
+
     from llm_wiki.storage.object_store import get_object_store, raw_key
 
-    get_object_store().put_bytes(raw_key(file_id, ext), content)
+    created_at = datetime.now(timezone.utc)
+    key = raw_key(file_id, ext, created_at)
+    get_object_store().put_bytes(key, content)
 
-    await create_file_record(session, file_id, filename, content_sha256=sha)
+    await create_file_record(
+        session, file_id, filename, content_sha256=sha, raw_key=key
+    )
 
     task = process_file_task.delay(file_id)
 

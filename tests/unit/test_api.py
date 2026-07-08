@@ -194,12 +194,17 @@ async def test_upload_saves_file_to_raw(test_app: tuple) -> None:  # type: ignor
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/api/v1/files", files=_make_upload(content, "doc.pdf"))
 
+    from datetime import datetime, timezone
+
     from llm_wiki.storage.object_store import get_object_store, raw_key
 
     file_id = resp.json()["file_id"]
     store = get_object_store()
-    assert store.exists(raw_key(file_id, ".pdf"))
-    assert store.get_bytes(raw_key(file_id, ".pdf")) == content
+    # Upload stores under a date-partitioned key (YYYY/MM/DD/<file_id>.pdf);
+    # recompute it with today's UTC date to locate the object.
+    key = raw_key(file_id, ".pdf", datetime.now(timezone.utc))
+    assert store.exists(key)
+    assert store.get_bytes(key) == content
 
 
 async def test_upload_creates_db_record(test_app: tuple, db_engine) -> None:  # type: ignore[type-arg, misc]

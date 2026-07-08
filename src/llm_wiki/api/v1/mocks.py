@@ -80,14 +80,14 @@ async def file_raw(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Serve the original PDF/MD from the object store."""
-    from llm_wiki.storage.object_store import get_object_store, raw_key
+    from llm_wiki.storage.object_store import get_object_store, legacy_raw_key
 
     fr = await db.get(FileRecord, file_id)
     if not fr:
         raise HTTPException(404, "File not found")
     ext = Path(fr.original_name).suffix
     store = get_object_store()
-    key = raw_key(file_id, ext)
+    key = fr.raw_key or legacy_raw_key(file_id, ext)
     if not store.exists(key):
         raise HTTPException(404, "Raw file not found in storage")
     media_type = "application/pdf" if ext.lower() == ".pdf" else "text/markdown"
