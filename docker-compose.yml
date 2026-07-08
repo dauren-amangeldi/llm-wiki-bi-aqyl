@@ -2,8 +2,9 @@
 # ${VAR} interpolation, and the app services read it via env_file. Nothing
 # sensitive is hardcoded here. See .env.example for the full list.
 #
-# Internal services (postgres/redis/chroma) are NOT published to the host — the
-# app reaches them over the compose network. Only the API port is exposed.
+# Internal services (postgres/redis) are NOT published to the host — the app
+# reaches them over the compose network. Only the API port is exposed.
+# Vector search lives inside Postgres via the pgvector extension (no separate DB).
 
 x-app-env: &app-env
   env_file:
@@ -26,8 +27,6 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      chroma:
-        condition: service_started
     command: >
       uv run uvicorn llm_wiki.main:app
       --host 0.0.0.0 --port 8000
@@ -47,8 +46,6 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      chroma:
-        condition: service_started
     command: >
       uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
       --loglevel=info
@@ -68,15 +65,13 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      chroma:
-        condition: service_started
     command: >
       uv run celery -A llm_wiki.orchestrator.tasks.celery_app beat
       --loglevel=info
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16   # Postgres 16 + pgvector extension (vector search)
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-llmwiki}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -101,17 +96,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  chroma:
-    image: chromadb/chroma:latest
-    volumes:
-      - chroma_data:/data
-    environment:
-      IS_PERSISTENT: "TRUE"
-      ANONYMIZED_TELEMETRY: "FALSE"
-    restart: unless-stopped
-
 volumes:
   redis_data:
   app_data:
   pg_data:
-  chroma_data:

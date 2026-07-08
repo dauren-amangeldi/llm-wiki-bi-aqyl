@@ -1,26 +1,33 @@
-"""ChromaDB-backed embedding store for wiki page headings.
+"""pgvector-backed embedding store for wiki page headings.
 
 Uses OpenAI text-embedding-3-small (via LLMClient.embed) to index all
 headings from index.md.  Vector similarity search provides a fast pre-filter
 for the Search Agent (LW-12) before the more expensive LLM re-rank step.
 
-Distance metric: cosine.  ChromaDB stores cosine distance in [0, 2], so
+Storage: the ``heading_embeddings`` table in PostgreSQL (pgvector extension),
+one row per heading. Distance metric: cosine (``<=>``), so
     similarity = 1.0 - distance
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
-import chromadb
 import structlog
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import Engine
+
+from llm_wiki.storage.metadata import (
+    EmbeddingMeta,
+    HeadingEmbedding,
+    get_sync_engine,
+)
 
 logger = structlog.get_logger(__name__)
 
-_COLLECTION_NAME = "headings"
+_SCOPE = "headings"
 
 
 class EmbeddingError(RuntimeError):
@@ -28,7 +35,7 @@ class EmbeddingError(RuntimeError):
 
 
 class EmbeddingModelMismatchError(EmbeddingError):
-    """Raised when the stored collection uses a different model than config."""
+    """Raised when the stored vectors use a different model than config."""
 
 
 @dataclass(frozen=True)
@@ -49,55 +56,47 @@ class SearchHit:
 
 
 class EmbeddingStore:
-    """Thin wrapper around ChromaDB + OpenAI embeddings.
+    """Thin wrapper around PostgreSQL/pgvector + OpenAI embeddings.
 
-    Stores one embedding per wiki heading (level-1 and level-2 only).
-    Metadata stored per entry: slug, title, section, level, last_indexed_at.
+    Stores one embedding per wiki heading (level-1 and level-2 only) in the
+    ``heading_embeddings`` table. Metadata per row: slug, title, section, level,
+    file_id, last_indexed_at.
 
     Design principles:
-    - Synchronous: ChromaDB's Python client is synchronous; embedding calls
-      use LLMClient.embed() (also sync) to keep the interface simple.
-    - Idempotent: upsert operations are safe to call repeatedly.
-    - Isolated: failures do NOT propagate to the caller unless embedding_store
-      is the primary operation.  index.md (source of truth) writes happen
-      before Chroma updates.
+    - Synchronous: embedding calls use ``LLMClient.embed`` (sync); the store
+      uses its own synchronous SQLAlchemy engine (the app's main engine is
+      async, but these calls happen in sync contexts too — the Celery worker).
+    - Idempotent: upsert operations are safe to call repeatedly (ON CONFLICT).
+    - Isolated: failures do NOT propagate to the caller unless the embedding
+      store is the primary operation. index.md (source of truth) writes happen
+      before vector updates.
     """
 
     def __init__(
         self,
-        chroma_path: Path,
         llm_client: "LLMClient",  # noqa: F821 — avoids circular import at top level
-        chroma_client: chromadb.ClientAPI | None = None,
+        engine: Engine | None = None,
     ) -> None:
-        """Initialise and validate the ChromaDB collection.
+        """Initialise the store and validate the model/dim guard.
 
         Args:
-            chroma_path: Directory for ChromaDB persistence (created if absent).
             llm_client: Client used to call the OpenAI embeddings API.
-            chroma_client: Optional pre-constructed ChromaDB client (used in tests
-                to inject an in-memory ``EphemeralClient``).
+            engine: Optional synchronous SQLAlchemy engine (injected in tests);
+                defaults to the shared sync engine on ``DATABASE_URL``.
 
         Raises:
-            EmbeddingModelMismatchError: If an existing collection was created with
+            EmbeddingModelMismatchError: If existing vectors were created with
                 a different embedding model or dimension than the current config.
         """
         from llm_wiki.config import settings
-
-        # Import here to avoid polluting the top-level namespace unnecessarily.
         from llm_wiki.llm.client import LLMClient  # noqa: PLC0415
 
         self._llm: LLMClient = llm_client  # type: ignore[assignment]
         self._model: str = settings.embedding_model
         self._dim: int = settings.embedding_dimensions
+        self._engine: Engine = engine or get_sync_engine()
 
-        if chroma_client is not None:
-            self._chroma = chroma_client
-        else:
-            from llm_wiki.llm.chroma_client import make_chroma_client
-
-            self._chroma = make_chroma_client(chroma_path)
-
-        self._col = self._get_or_create_collection()
+        self._validate_meta()
 
     # ------------------------------------------------------------------
     # Public API
@@ -115,13 +114,6 @@ class EmbeddingStore:
 
         Idempotent: calling with the same *slug* replaces the existing entry.
 
-        Args:
-            slug: Unique page identifier (e.g. ``"transformers"``).
-            title: Human-readable page title used to compute the embedding.
-            section: index.md section containing this heading.
-            level: Markdown heading level (1 = ``#``, 2 = ``##``, …).
-            file_id: Correlation ID passed to usage tracking.
-
         Raises:
             EmbeddingError: If the OpenAI API call fails after all retries.
         """
@@ -130,21 +122,17 @@ class EmbeddingStore:
         except Exception as exc:
             raise EmbeddingError(f"embed failed for slug {slug!r}: {exc}") from exc
 
-        self._col.upsert(
-            ids=[slug],
-            embeddings=[vectors[0]],
-            metadatas=[
-                {
-                    "slug": slug,
-                    "title": title,
-                    "section": section,
-                    "level": level,
-                    "file_id": file_id,
-                    "last_indexed_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ],
-            documents=[title],
-        )
+        row = {
+            "slug": slug,
+            "title": title,
+            "section": section,
+            "level": level,
+            "file_id": file_id,
+            "last_indexed_at": datetime.now(timezone.utc),
+            "embedding": vectors[0],
+        }
+        with self._engine.begin() as conn:
+            conn.execute(self._upsert_stmt([row]))
         logger.debug("embedding_upserted", slug=slug, section=section)
 
     def upsert_many(
@@ -157,11 +145,6 @@ class EmbeddingStore:
 
         Processes in chunks of ``EMBEDDING_BATCH_SIZE`` (config) to stay
         within the OpenAI embeddings API input limit.
-
-        Args:
-            headings: List of ``HeadingInfo`` objects with slug/title/section/level.
-            file_id: Default correlation / source file ID for usage tracking.
-            slug_to_file_id: Optional per-slug file_id overrides (LW-N3).
         """
         if not headings:
             return
@@ -179,61 +162,60 @@ class EmbeddingStore:
             except Exception as exc:
                 raise EmbeddingError(f"batch embed failed at offset {i}: {exc}") from exc
 
-            self._col.upsert(
-                ids=[h.slug for h in chunk],
-                embeddings=vectors,
-                metadatas=[
-                    {
-                        "slug": h.slug,
-                        "title": h.title,
-                        "section": h.section,
-                        "level": h.level,
-                        "file_id": slug_map.get(h.slug, file_id),
-                        "last_indexed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                    for h in chunk
-                ],
-                documents=[h.title for h in chunk],
-            )
+            now = datetime.now(timezone.utc)
+            rows = [
+                {
+                    "slug": h.slug,
+                    "title": h.title,
+                    "section": h.section,
+                    "level": h.level,
+                    "file_id": slug_map.get(h.slug, file_id),
+                    "last_indexed_at": now,
+                    "embedding": vec,
+                }
+                for h, vec in zip(chunk, vectors, strict=True)
+            ]
+            with self._engine.begin() as conn:
+                conn.execute(self._upsert_stmt(rows))
         logger.info("embedding_batch_upserted", count=len(headings))
 
     def backfill_file_id(self, slug: str, file_id: str) -> bool:
-        """Set ``file_id`` metadata on an existing heading without re-embedding."""
+        """Set ``file_id`` on an existing heading without re-embedding."""
         try:
-            self._col.update(ids=[slug], metadatas=[{"file_id": file_id}])
+            with self._engine.begin() as conn:
+                conn.execute(
+                    update(HeadingEmbedding)
+                    .where(HeadingEmbedding.slug == slug)
+                    .values(file_id=file_id)
+                )
             return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("embedding_backfill_failed", slug=slug, error=str(exc))
             return False
 
     def update_metadata(self, slug: str, section: str) -> None:
-        """Update only the *section* metadata for an existing heading.
+        """Update only the *section* for an existing heading (no re-embed).
 
-        Called by ``IndexStorage.move_page``.  The embedding vector is NOT
-        recomputed since the heading title has not changed.
-
-        Args:
-            slug: Page slug whose metadata to update.
-            section: New section name.
+        Called by ``IndexStorage.move_page``.
         """
         try:
-            self._col.update(
-                ids=[slug],
-                metadatas=[{"section": section}],
-            )
+            with self._engine.begin() as conn:
+                conn.execute(
+                    update(HeadingEmbedding)
+                    .where(HeadingEmbedding.slug == slug)
+                    .values(section=section)
+                )
             logger.debug("embedding_metadata_updated", slug=slug, section=section)
         except Exception as exc:  # noqa: BLE001
-            # Non-fatal: log and continue (Chroma is a cache, not source of truth)
             logger.warning("embedding_metadata_update_failed", slug=slug, error=str(exc))
 
     def delete(self, slug: str) -> None:
-        """Remove the embedding for *slug*.  No-op if not present.
-
-        Args:
-            slug: Page slug to remove.
-        """
+        """Remove the embedding for *slug*. No-op if not present."""
         try:
-            self._col.delete(ids=[slug])
+            with self._engine.begin() as conn:
+                conn.execute(
+                    delete(HeadingEmbedding).where(HeadingEmbedding.slug == slug)
+                )
             logger.debug("embedding_deleted", slug=slug)
         except Exception as exc:  # noqa: BLE001
             logger.warning("embedding_delete_failed", slug=slug, error=str(exc))
@@ -241,119 +223,122 @@ class EmbeddingStore:
     def query(self, text: str, top_k: int = 20, file_id: str = "") -> list[SearchHit]:
         """Return the *top_k* most similar headings to *text*.
 
-        Args:
-            text: Query string (e.g. a document summary).
-            top_k: Maximum number of results to return.
-            file_id: Correlation ID for embedding usage tracking.
-
         Returns:
-            SearchHit list sorted by descending similarity.  Empty if the
-            collection is empty or the embedding API call fails.
+            SearchHit list sorted by descending similarity. Empty if the table
+            is empty.
 
         Raises:
             EmbeddingError: If the OpenAI embeddings API call fails.
         """
-        current_count = self.count()
-        if current_count == 0:
+        if self.count() == 0:
             return []
 
-        n = min(top_k, current_count)
         try:
             vectors = self._llm.embed([text], file_id=file_id)
         except Exception as exc:
             raise EmbeddingError(f"embed failed during query: {exc}") from exc
 
-        results = self._col.query(
-            query_embeddings=[vectors[0]],
-            n_results=n,
-            include=["metadatas", "distances"],  # type: ignore[list-item]
-        )
-
-        hits: list[SearchHit] = []
-        ids: list[str] = results.get("ids", [[]])[0]  # type: ignore[index]
-        distances: list[float] = results.get("distances", [[]])[0]  # type: ignore[index]
-        metas: list[dict[str, object]] = results.get("metadatas", [[]])[0]  # type: ignore[index]
-
-        for slug, dist, meta in zip(ids, distances, metas, strict=True):
-            similarity = max(0.0, 1.0 - float(dist))
-            hits.append(
-                SearchHit(
-                    slug=slug,
-                    title=str(meta.get("title", slug)),
-                    section=str(meta.get("section", "")),
-                    similarity=similarity,
-                )
+        qvec = vectors[0]
+        distance = HeadingEmbedding.embedding.cosine_distance(qvec)
+        stmt = (
+            select(
+                HeadingEmbedding.slug,
+                HeadingEmbedding.title,
+                HeadingEmbedding.section,
+                distance.label("distance"),
             )
+            .order_by(distance)
+            .limit(top_k)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
 
+        hits = [
+            SearchHit(
+                slug=r.slug,
+                title=r.title or r.slug,
+                section=r.section or "",
+                similarity=max(0.0, 1.0 - float(r.distance)),
+            )
+            for r in rows
+        ]
         hits.sort(key=lambda h: h.similarity, reverse=True)
         return hits
 
     def count(self) -> int:
-        """Return the number of headings currently indexed.
-
-        Returns:
-            Non-negative integer.
-        """
-        return self._col.count()  # type: ignore[no-any-return]
+        """Return the number of headings currently indexed."""
+        with self._engine.connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(HeadingEmbedding)).scalar_one()
+            )
 
     def clear(self) -> None:
-        """Delete ALL entries from the collection.
-
-        Used by ``scripts/reindex.py`` before a full rebuild.
-        """
-        self._chroma.delete_collection(_COLLECTION_NAME)
-        self._col = self._get_or_create_collection(fresh=True)
+        """Delete ALL heading embeddings. Used by ``scripts/reindex.py``."""
+        with self._engine.begin() as conn:
+            conn.execute(delete(HeadingEmbedding))
+        self._write_meta()
         logger.info("embedding_collection_cleared")
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _get_or_create_collection(
-        self, fresh: bool = False
-    ) -> chromadb.Collection:
-        """Return (or create) the headings collection, validating model metadata.
-
-        Args:
-            fresh: If True, do not validate existing metadata (used after clear()).
-
-        Returns:
-            ChromaDB Collection object.
-
-        Raises:
-            EmbeddingModelMismatchError: If the stored model/dim differs from config.
-        """
-        wanted_meta = {
-            "hnsw:space": "cosine",
-            "embedding_model": self._model,
-            "embedding_dim": str(self._dim),
-        }
-
-        # Suppress noisy ChromaDB telemetry logs
-        logging.getLogger("chromadb").setLevel(logging.WARNING)
-
-        col = self._chroma.get_or_create_collection(
-            name=_COLLECTION_NAME,
-            metadata=wanted_meta,
+    def _upsert_stmt(self, rows: list[dict[str, object]]):  # type: ignore[no-untyped-def]
+        """Build an INSERT ... ON CONFLICT(slug) DO UPDATE statement."""
+        ins = pg_insert(HeadingEmbedding).values(rows)
+        return ins.on_conflict_do_update(
+            index_elements=[HeadingEmbedding.slug],
+            set_={
+                "title": ins.excluded.title,
+                "section": ins.excluded.section,
+                "level": ins.excluded.level,
+                "file_id": ins.excluded.file_id,
+                "last_indexed_at": ins.excluded.last_indexed_at,
+                "embedding": ins.excluded.embedding,
+            },
         )
 
-        if not fresh:
-            stored = col.metadata or {}
-            stored_model = stored.get("embedding_model")
-            stored_dim = stored.get("embedding_dim")
-            if stored_model and stored_model != self._model:
+    def _validate_meta(self) -> None:
+        """Guard against a model/dim change without a reindex.
+
+        Mirrors the old ChromaDB collection-metadata check: if a prior build
+        used a different embedding model or dimension, refuse to run so stale
+        vectors are never mixed with new ones.
+        """
+        with self._engine.begin() as conn:
+            stored = conn.execute(
+                select(EmbeddingMeta.model, EmbeddingMeta.dim).where(
+                    EmbeddingMeta.scope == _SCOPE
+                )
+            ).first()
+            if stored is None:
+                conn.execute(self._meta_upsert_stmt())
+                return
+            if stored.model != self._model:
                 raise EmbeddingModelMismatchError(
-                    f"ChromaDB collection was built with model {stored_model!r}, "
+                    f"heading_embeddings were built with model {stored.model!r}, "
                     f"but config says {self._model!r}. "
                     "Run: docker compose exec api uv run python scripts/reindex.py"
                 )
-            if stored_dim and stored_dim != str(self._dim):
+            if stored.dim != self._dim:
                 raise EmbeddingModelMismatchError(
-                    f"ChromaDB collection dimension {stored_dim} != config {self._dim}. "
+                    f"heading_embeddings dimension {stored.dim} != config {self._dim}. "
                     "Run: docker compose exec api uv run python scripts/reindex.py"
                 )
 
-        return col
+    def _write_meta(self) -> None:
+        """Record the current model/dim for the headings scope."""
+        with self._engine.begin() as conn:
+            conn.execute(self._meta_upsert_stmt())
+
+    def _meta_upsert_stmt(self):  # type: ignore[no-untyped-def]
+        ins = pg_insert(EmbeddingMeta).values(
+            scope=_SCOPE, model=self._model, dim=self._dim
+        )
+        return ins.on_conflict_do_update(
+            index_elements=[EmbeddingMeta.scope],
+            set_={"model": ins.excluded.model, "dim": ins.excluded.dim},
+        )
 
 
 @dataclass

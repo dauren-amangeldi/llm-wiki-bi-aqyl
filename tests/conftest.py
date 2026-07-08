@@ -25,12 +25,27 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
 
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
+        # pgvector must exist before create_all builds the vector() columns.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.execute(text("DROP TABLE IF EXISTS wiki_fts"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
         await ensure_wiki_fts_table(conn)
     yield engine
     await engine.dispose()
+
+
+@pytest.fixture
+def vector_engine(db_engine: AsyncEngine):  # type: ignore[no-untyped-def]
+    """A synchronous engine to the test DB for the (sync) vector stores.
+
+    Depends on ``db_engine`` so the pgvector extension + tables already exist.
+    """
+    from sqlalchemy import create_engine
+
+    engine = create_engine(TEST_DATABASE_URL)
+    yield engine
+    engine.dispose()
 
 
 @pytest_asyncio.fixture

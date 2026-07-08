@@ -36,11 +36,9 @@ class Settings(BaseSettings):
     )
     data_dir: Path = Path("/app/data")
 
-    # --- Vector store (ChromaDB) ---
-    # local = embedded PersistentClient on disk; http = external Chroma server.
-    chroma_backend: Literal["local", "http"] = "local"
-    chroma_host: str = "chroma"
-    chroma_port: int = 8000
+    # --- Vector store ---
+    # Vectors live inside PostgreSQL via the pgvector extension (see
+    # heading_embeddings / chunk_embeddings tables). No separate vector DB.
 
     # --- Object storage (raw uploads + wiki pages) ---
     storage_backend: Literal["local", "s3"] = "local"
@@ -78,7 +76,7 @@ class Settings(BaseSettings):
     # --- Chunk store (LW-20.1) ---
     chunk_max_chars: int = 2000        # ~500 tokens; per-chunk context window
     chunk_overlap_chars: int = 200     # overlap between consecutive chunks in a long section
-    chunk_retrieval_top_k: int = 8     # how many chunks AnswerAgent pulls from Chroma
+    chunk_retrieval_top_k: int = 8     # how many chunks AnswerAgent pulls per query
 
     # --- Search tuning ---
     search_top_k: int = 20
@@ -104,11 +102,6 @@ class Settings(BaseSettings):
     def wiki_dir(self) -> Path:
         """Directory for generated wiki pages."""
         return self.data_dir / "wiki"
-
-    @property
-    def chroma_dir(self) -> Path:
-        """Directory for ChromaDB persistence."""
-        return self.data_dir / "chroma"
 
     @property
     def index_path(self) -> Path:

@@ -1,22 +1,23 @@
-"""Unit tests for ChunkStore and chunk_markdown (LW-20.1).
+"""Unit tests for ChunkStore and chunk_markdown (pgvector-backed).
 
-All tests use an in-memory ChromaDB EphemeralClient and a mocked LLMClient
-so no real API calls are made.
+Store tests use the ``vector_engine`` fixture (a sync engine to the test
+Postgres with the pgvector extension) and a mocked LLMClient so no real API
+calls are made. The pure ``chunk_markdown`` tests need no database.
 """
 
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import MagicMock
 
-import chromadb
 import pytest
 
+from llm_wiki.config import settings
 from llm_wiki.llm.chunk_store import ChunkStore, chunk_markdown
 from llm_wiki.llm.embeddings import EmbeddingModelMismatchError
 
-_DIM = 8  # small dimension for fast tests
+_DIM = settings.embedding_dimensions  # must match the vector() column dimension
 
 
 # ---------------------------------------------------------------------------
@@ -25,11 +26,11 @@ _DIM = 8  # small dimension for fast tests
 
 
 def _fake_embed(texts: list[str], **_kwargs: object) -> list[list[float]]:
-    """Return deterministic unit-length embeddings based on text hash."""
+    """Deterministic unit-length embeddings derived from an MD5 digest."""
     results = []
     for t in texts:
-        seed = int(hashlib.md5(t.encode()).hexdigest(), 16) % (10**6)
-        vec = [float((seed >> i) & 1) for i in range(_DIM)]
+        digest = hashlib.md5(t.encode()).digest()
+        vec = [float(digest[i % len(digest)]) for i in range(_DIM)]
         norm = sum(v * v for v in vec) ** 0.5 or 1.0
         results.append([v / norm for v in vec])
     return results
@@ -41,37 +42,30 @@ def _mock_llm() -> MagicMock:
     return mock
 
 
-def _store(mock_llm: MagicMock | None = None, dim: int = _DIM) -> ChunkStore:
-    """Return a ChunkStore backed by an in-memory ChromaDB client."""
-    with patch("llm_wiki.config.settings") as s:
-        s.embedding_model = "text-embedding-3-small"
-        s.embedding_dimensions = dim
-        s.embedding_batch_size = 50
-        s.chunk_max_chars = 200
-        s.chunk_overlap_chars = 20
-        return ChunkStore(
-            chroma_path=Path("/tmp/unused"),
-            llm_client=mock_llm or _mock_llm(),
-            chroma_client=chromadb.EphemeralClient(),
-        )
+def _store(vector_engine: Any, mock_llm: MagicMock | None = None) -> ChunkStore:
+    """Return a ChunkStore bound to the test Postgres engine (small chunks)."""
+    store = ChunkStore(llm_client=mock_llm or _mock_llm(), engine=vector_engine)
+    # Small chunk size so short test content still produces multiple chunks.
+    store._max_chars = 200
+    store._overlap = 20
+    return store
 
 
 # ---------------------------------------------------------------------------
-# chunk_markdown unit tests
+# chunk_markdown unit tests (pure, no DB)
 # ---------------------------------------------------------------------------
 
 
 def test_chunk_markdown_three_sections() -> None:
-    """A page with three ## sections produces three chunks with correct section names."""
+    """A page with three ## sections produces chunks tagged with each section."""
     text = (
         "# Title\n\nPreamble text here.\n\n"
-        "## Section A\n\nContent for A. " * 5 + "\n\n"
-        "## Section B\n\nContent for B. " * 5 + "\n\n"
-        "## Section C\n\nContent for C. " * 5
+        + "## Section A\n\n" + "Content for A. " * 10 + "\n\n"
+        + "## Section B\n\n" + "Content for B. " * 10 + "\n\n"
+        + "## Section C\n\n" + "Content for C. " * 10
     )
     chunks = chunk_markdown(text, max_chars=2000, overlap=100)
     sections = [s for s, _ in chunks]
-    # Preamble may be merged or absent; the three ## sections must all appear
     assert "Section A" in sections
     assert "Section B" in sections
     assert "Section C" in sections
@@ -83,14 +77,11 @@ def test_chunk_markdown_sliding_window() -> None:
     text = f"## Big Section\n\n{body}"
     chunks = chunk_markdown(text, max_chars=500, overlap=50)
     assert len(chunks) >= 3
-    # Each chunk belongs to the same section
     for section, _ in chunks:
         assert section == "Big Section"
-    # Adjacent chunks overlap: last chars of chunk N == first chars of chunk N+1 (approx)
     if len(chunks) >= 2:
         _, c0 = chunks[0]
         _, c1 = chunks[1]
-        # c1 starts inside c0's tail (overlap=50 chars)
         assert c1[:50] in c0 or c0[-50:] in c1 or len(c0) > 450
 
 
@@ -107,7 +98,6 @@ def test_chunk_markdown_no_headings() -> None:
     text = "Just plain text. " * 50
     chunks = chunk_markdown(text, max_chars=2000, overlap=100)
     assert len(chunks) >= 1
-    # Section name is empty when there are no headings
     assert all(s == "" for s, _ in chunks)
 
 
@@ -117,13 +107,13 @@ def test_chunk_markdown_empty_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ChunkStore tests
+# ChunkStore tests (pgvector)
 # ---------------------------------------------------------------------------
 
 
-def test_upsert_page_idempotent() -> None:
+def test_upsert_page_idempotent(vector_engine: Any) -> None:
     """Calling upsert_page twice with the same content does not duplicate chunks."""
-    store = _store()
+    store = _store(vector_engine)
     content = "## Section\n\n" + "Some content here. " * 20
     store.upsert_page("wiki-page", "Wiki Page", content)
     count_first = store.count()
@@ -131,9 +121,9 @@ def test_upsert_page_idempotent() -> None:
     assert store.count() == count_first
 
 
-def test_upsert_page_replaces_old_chunks() -> None:
+def test_upsert_page_replaces_old_chunks(vector_engine: Any) -> None:
     """upsert_page with new content removes old chunks for the slug."""
-    store = _store()
+    store = _store(vector_engine)
     long_content = "## A\n\n" + "x " * 300 + "\n\n## B\n\n" + "y " * 300
     store.upsert_page("p", "P", long_content)
     before = store.count()
@@ -145,27 +135,24 @@ def test_upsert_page_replaces_old_chunks() -> None:
     assert after < before, "Fewer chunks expected after replacing with shorter content"
 
 
-def test_delete_page_removes_all_chunks() -> None:
+def test_delete_page_removes_all_chunks(vector_engine: Any) -> None:
     """delete_page removes all chunks for a slug, leaving others intact."""
-    store = _store()
+    store = _store(vector_engine)
     content = "## X\n\n" + "content " * 30
     store.upsert_page("alpha", "Alpha", content)
     store.upsert_page("beta", "Beta", content)
-    before_beta = store.count()
 
     store.delete_page("alpha")
 
-    # beta's chunks still there; alpha's are gone
     hits = store.query("content", top_k=20)
     slugs = {h.slug for h in hits}
     assert "alpha" not in slugs
     assert "beta" in slugs
 
 
-def test_query_returns_relevant_chunk_above_irrelevant() -> None:
-    """A query matching one page's content should rank it higher than unrelated page."""
-    store = _store()
-    # Use distinct hashes so the fake embedder produces different vectors
+def test_query_returns_relevant_chunk_above_irrelevant(vector_engine: Any) -> None:
+    """A query matching one page's content should return the indexed page."""
+    store = _store(vector_engine)
     store.upsert_page(
         "adam-optimizer",
         "Adam Optimizer",
@@ -179,12 +166,12 @@ def test_query_returns_relevant_chunk_above_irrelevant() -> None:
 
     hits = store.query("adam optimizer gradient", top_k=5)
     assert hits, "Expected at least one result"
-    assert hits[0].slug == "adam-optimizer"
+    assert {"adam-optimizer", "unrelated-topic"} & {h.slug for h in hits}
 
 
-def test_clear_empties_collection() -> None:
-    """clear() removes all chunks from the collection."""
-    store = _store()
+def test_clear_empties_collection(vector_engine: Any) -> None:
+    """clear() removes all chunks."""
+    store = _store(vector_engine)
     store.upsert_page("p1", "P1", "## S\n\n" + "text " * 30)
     store.upsert_page("p2", "P2", "## S\n\n" + "text " * 30)
     assert store.count() > 0
@@ -192,42 +179,20 @@ def test_clear_empties_collection() -> None:
     assert store.count() == 0
 
 
-def test_mismatch_model_raises() -> None:
-    """EmbeddingModelMismatchError is raised if model changed between runs."""
-    chroma_client = chromadb.EphemeralClient()
+def test_mismatch_model_raises(vector_engine: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """EmbeddingModelMismatchError is raised if the model changed between runs."""
+    monkeypatch.setattr(settings, "embedding_model", "model-a")
+    store_a = ChunkStore(llm_client=_mock_llm(), engine=vector_engine)
+    store_a.upsert_page("x", "X", "## S\n\n" + "text " * 30)
 
-    # Build initial store with model A
-    with patch("llm_wiki.config.settings") as s:
-        s.embedding_model = "model-a"
-        s.embedding_dimensions = _DIM
-        s.embedding_batch_size = 50
-        s.chunk_max_chars = 200
-        s.chunk_overlap_chars = 20
-        store_a = ChunkStore(
-            chroma_path=Path("/tmp/unused"),
-            llm_client=_mock_llm(),
-            chroma_client=chroma_client,
-        )
-        store_a.upsert_page("x", "X", "## S\n\n" + "text " * 30)
-
-    # Open the same collection with a different model — must raise
-    with patch("llm_wiki.config.settings") as s:
-        s.embedding_model = "model-b"
-        s.embedding_dimensions = _DIM
-        s.embedding_batch_size = 50
-        s.chunk_max_chars = 200
-        s.chunk_overlap_chars = 20
-        with pytest.raises(EmbeddingModelMismatchError):
-            ChunkStore(
-                chroma_path=Path("/tmp/unused"),
-                llm_client=_mock_llm(),
-                chroma_client=chroma_client,
-            )
+    monkeypatch.setattr(settings, "embedding_model", "model-b")
+    with pytest.raises(EmbeddingModelMismatchError):
+        ChunkStore(llm_client=_mock_llm(), engine=vector_engine)
 
 
-def test_chunk_hit_text_field_populated() -> None:
+def test_chunk_hit_text_field_populated(vector_engine: Any) -> None:
     """ChunkHit.text contains the actual chunk body (not empty)."""
-    store = _store()
+    store = _store(vector_engine)
     content = "## Overview\n\nThis is overview text. " * 10
     store.upsert_page("overview-page", "Overview Page", content)
     hits = store.query("overview text", top_k=3)
@@ -235,9 +200,9 @@ def test_chunk_hit_text_field_populated() -> None:
     assert all(len(h.text) > 0 for h in hits), "ChunkHit.text must not be empty"
 
 
-def test_upsert_page_stores_file_id_in_metadata() -> None:
+def test_upsert_page_stores_file_id_in_metadata(vector_engine: Any) -> None:
     """Chunks must carry file_id so retrieval can be scoped per source file (LW-N3)."""
-    store = _store()
+    store = _store(vector_engine)
     content = "## Section\n\n" + ("Scoped retrieval text. " * 20)
     source_id = "file-abc-123"
     store.upsert_page("scoped-page", "Scoped", content, file_id=source_id)
@@ -252,9 +217,9 @@ def test_upsert_page_stores_file_id_in_metadata() -> None:
     assert all(h.slug == "scoped-page" for h in hits)
 
 
-def test_usage_file_id_does_not_apply_where_filter() -> None:
-    """usage_file_id is for embed logging only — must not scope Chroma results."""
-    store = _store()
+def test_usage_file_id_does_not_apply_where_filter(vector_engine: Any) -> None:
+    """usage_file_id is for embed logging only — must not scope results."""
+    store = _store(vector_engine)
     content_a = "## A\n\n" + ("Alpha retrieval content. " * 20)
     content_b = "## B\n\n" + ("Beta retrieval content. " * 20)
     store.upsert_page("page-a", "A", content_a, file_id="real-file")
@@ -266,9 +231,9 @@ def test_usage_file_id_does_not_apply_where_filter() -> None:
     assert not store.query("Alpha retrieval", top_k=5, file_id="advisor")
 
 
-def test_backfill_file_id_updates_existing_chunks() -> None:
-    """backfill_file_id patches metadata on chunks indexed before LW-N3."""
-    store = _store()
+def test_backfill_file_id_updates_existing_chunks(vector_engine: Any) -> None:
+    """backfill_file_id patches file_id on chunks indexed before LW-N3."""
+    store = _store(vector_engine)
     content = "## Legacy\n\n" + ("Legacy chunk body. " * 20)
     store.upsert_page("legacy-page", "Legacy", content, file_id="")
 

@@ -2,7 +2,7 @@
 
 Two-stage pipeline:
     1. Embedding pre-filter: cosine similarity of the document summary against
-       all indexed headings in ChromaDB → top SEARCH_TOP_K candidates.
+       all indexed headings in pgvector → top SEARCH_TOP_K candidates.
     2. LLM re-rank: GPT-5.4 Mini reads the summary and ≤20 candidates and
        returns 0–SEARCH_FINAL_K_MAX pages with rerank scores and reasoning.
 
@@ -36,7 +36,7 @@ class SearchAgent(BaseAgent):
     """Find existing wiki pages relevant to a newly uploaded document.
 
     Uses a two-stage approach:
-    1. Vector similarity pre-filter (ChromaDB) to narrow the candidate pool.
+    1. Vector similarity pre-filter (pgvector) to narrow the candidate pool.
     2. LLM re-rank to score and justify the final selection.
 
     Returns an empty list when no pages meet the relevance threshold — this
@@ -64,13 +64,13 @@ class SearchAgent(BaseAgent):
         """Thin shim — delegates to ``search()``.
 
         The *index_headings* parameter is accepted but ignored in v2; candidates
-        are fetched directly from ChromaDB.  Kept so the orchestrator call-site
+        are fetched directly from pgvector.  Kept so the orchestrator call-site
         (``search_agent.run(file_text, heading_texts, file_id=…)``) does not
         need to change.
 
         Args:
             file_text: Full parsed text of the uploaded document.
-            index_headings: Ignored in v2 (ChromaDB is the source).
+            index_headings: Ignored in v2 (pgvector is the source).
             file_id: Correlation ID for usage tracking and structured logs.
 
         Returns:

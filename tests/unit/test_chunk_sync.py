@@ -9,10 +9,8 @@ from llm_wiki.storage.chunk_sync import sync_chunks_for_page
 
 def test_sync_noop_when_store_is_none() -> None:
     """sync_chunks_for_page is a complete no-op when chunk_store=None."""
-    # We pass a sentinel that would raise if any attribute is accessed
-    sentinel = MagicMock(spec=[])  # no attributes allowed
+    # No store → must return without raising (nothing to assert on None).
     sync_chunks_for_page(chunk_store=None, slug="s", title="T", content="c")
-    sentinel.upsert_page.assert_not_called()
 
 
 def test_sync_calls_upsert_page() -> None:

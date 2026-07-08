@@ -1,13 +1,13 @@
-"""ChromaDB-backed chunk store for wiki page *bodies* (LW-20.1).
+"""pgvector-backed chunk store for wiki page *bodies* (LW-20.1).
 
-Why a second collection instead of reusing ``headings``?
----------------------------------------------------------
-``EmbeddingStore`` (``headings`` collection) stores one embedding per page
+Why a second table instead of reusing ``heading_embeddings``?
+------------------------------------------------------------
+``EmbeddingStore`` (``heading_embeddings``) stores one embedding per page
 **title**. It was designed for the *SearchAgent*: "given a new document,
 which existing wiki pages should be updated?"  That is a page-level
 classification task that works perfectly with title embeddings.
 
-``ChunkStore`` (``chunks`` collection) stores one embedding per ~500-token
+``ChunkStore`` (``chunk_embeddings``) stores one embedding per ~500-token
 **text fragment** of a page body.  It is designed for the *AnswerAgent*:
 "given a user question, which paragraph actually contains the answer?"
 That is a passage-level retrieval task where title embeddings have poor
@@ -16,29 +16,29 @@ recall — a page titled "Training Runs" may contain the only mention of
 the nearest neighbour for the query "what optimizer do we use?".
 
 The two tasks require different granularity, different top-k thresholds,
-and different ID namespaces.  Merging them into one collection would
-degrade both: heading-vs-chunk similarity scores are not comparable, and
-the SearchAgent would start returning chunk IDs (``slug#0003``) instead
-of page slugs.
-
-Collection name: ``chunks`` (never ``headings``).
+and different ID namespaces, so they live in separate tables.
 """
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
-import chromadb
 import structlog
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import Engine
 
 from llm_wiki.llm.embeddings import EmbeddingModelMismatchError
+from llm_wiki.storage.metadata import (
+    ChunkEmbedding,
+    EmbeddingMeta,
+    get_sync_engine,
+)
 
 logger = structlog.get_logger(__name__)
 
-_COLLECTION_NAME = "chunks"
+_SCOPE = "chunks"
 _MIN_CHUNK_CHARS = 100  # discard chunks shorter than this (noise)
 
 
@@ -73,16 +73,6 @@ def chunk_markdown(
     2. Sections longer than *max_chars* are further split with a sliding
        window of size *max_chars* and stride *max_chars - overlap*.
     3. Chunks shorter than ``_MIN_CHUNK_CHARS`` characters are discarded.
-
-    Uses the heading regex directly rather than ``parsers/markdown.py``'s
-    token stream because we need the *text span* of each section, not just
-    the heading metadata.
-
-    Args:
-        text: Raw Markdown page content.
-        max_chars: Maximum characters per chunk.
-        overlap: Character overlap between consecutive chunks from the same
-            long section.
 
     Returns:
         List of ``(section_name, chunk_text)`` pairs.  ``section_name`` is the
@@ -142,35 +132,35 @@ def chunk_markdown(
 
 
 class ChunkStore:
-    """ChromaDB-backed chunk index for wiki page bodies.
+    """pgvector-backed chunk index for wiki page bodies.
 
-    Stores one embedding per text chunk (≈500 tokens) so that the
-    ``AnswerAgent`` can retrieve the specific paragraphs that contain the
-    answer to a user question, rather than just the closest page title.
+    Stores one embedding per text chunk (≈500 tokens) in ``chunk_embeddings``
+    so that the ``AnswerAgent`` can retrieve the specific paragraphs that
+    contain the answer to a user question, rather than just the closest page
+    title.
 
     Design principles mirror ``EmbeddingStore``:
-    - Synchronous: ChromaDB's Python client is synchronous.
+    - Synchronous: embedding calls are sync; the store uses a sync engine.
     - Idempotent: ``upsert_page`` deletes old chunks before inserting new ones.
-    - Isolated: failures are logged and NOT propagated (wiki/*.md is the
-      source of truth; Chroma is a cache).
+    - Isolated: failures are logged and NOT propagated (the wiki page is the
+      source of truth; this index is a cache).
     """
 
     def __init__(
         self,
-        chroma_path: Path,
         llm_client: "LLMClient",  # noqa: F821
-        chroma_client: chromadb.ClientAPI | None = None,
+        engine: Engine | None = None,
     ) -> None:
-        """Initialise and validate the ChromaDB chunks collection.
+        """Initialise the store and validate the model/dim guard.
 
         Args:
-            chroma_path: Directory for ChromaDB persistence.
             llm_client: Used to call the embeddings API.
-            chroma_client: Optional pre-constructed client (injected in tests).
+            engine: Optional synchronous SQLAlchemy engine (injected in tests);
+                defaults to the shared sync engine on ``DATABASE_URL``.
 
         Raises:
-            EmbeddingModelMismatchError: If the stored collection was built
-                with a different embedding model or dimension.
+            EmbeddingModelMismatchError: If existing vectors were built with a
+                different embedding model or dimension.
         """
         from llm_wiki.config import settings
         from llm_wiki.llm.client import LLMClient  # noqa: PLC0415
@@ -180,15 +170,9 @@ class ChunkStore:
         self._dim: int = settings.embedding_dimensions
         self._max_chars: int = settings.chunk_max_chars
         self._overlap: int = settings.chunk_overlap_chars
+        self._engine: Engine = engine or get_sync_engine()
 
-        if chroma_client is not None:
-            self._chroma = chroma_client
-        else:
-            from llm_wiki.llm.chroma_client import make_chroma_client
-
-            self._chroma = make_chroma_client(chroma_path)
-
-        self._col = self._get_or_create_collection()
+        self._validate_meta()
 
     # ------------------------------------------------------------------
     # Public API
@@ -203,15 +187,8 @@ class ChunkStore:
     ) -> None:
         """Replace all chunks for *slug* with a fresh chunking of *content*.
 
-        Idempotent: calling with the same content produces the same result.
-        Old chunks for this slug are always deleted first so stale fragments
-        from a previous longer version of the page do not accumulate.
-
-        Args:
-            slug: Page identifier (e.g. ``"transformers"``).
-            title: Human-readable page title (stored in metadata for UI).
-            content: Full markdown content of the wiki page.
-            file_id: Correlation ID for usage tracking.
+        Idempotent: old chunks for this slug are always deleted first so stale
+        fragments from a previous longer version of the page do not accumulate.
         """
         # Delete stale chunks before inserting new ones.
         self.delete_page(slug)
@@ -225,51 +202,42 @@ class ChunkStore:
         try:
             vectors = self._llm.embed(chunk_texts, file_id=file_id)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "chunk_store_embed_failed", slug=slug, error=str(exc)
-            )
+            logger.warning("chunk_store_embed_failed", slug=slug, error=str(exc))
             return
 
-        ids = [f"{slug}#{i:04d}" for i in range(len(chunks))]
-        metadatas = [
+        rows = [
             {
+                "id": f"{slug}#{i:04d}",
                 "slug": slug,
                 "title": title,
                 "section": section_name,
                 "chunk_idx": i,
                 "file_id": file_id,
+                "document": ch_text,
+                "embedding": vec,
             }
-            for i, (section_name, _) in enumerate(chunks)
+            for i, ((section_name, ch_text), vec) in enumerate(
+                zip(chunks, vectors, strict=True)
+            )
         ]
 
         try:
-            self._col.upsert(
-                ids=ids,
-                embeddings=vectors,
-                metadatas=metadatas,
-                documents=chunk_texts,
-            )
+            with self._engine.begin() as conn:
+                conn.execute(self._upsert_stmt(rows))
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "chunk_store_chroma_upsert_failed", slug=slug, error=str(exc)
-            )
+            logger.warning("chunk_store_upsert_failed", slug=slug, error=str(exc))
             return
 
         logger.debug("chunk_store_upserted", slug=slug, n_chunks=len(chunks))
 
     def delete_page(self, slug: str) -> None:
-        """Remove all chunks for *slug*.  No-op if none exist.
-
-        Args:
-            slug: Page identifier whose chunks should be removed.
-        """
+        """Remove all chunks for *slug*. No-op if none exist."""
         try:
-            self._col.delete(where={"slug": slug})
+            with self._engine.begin() as conn:
+                conn.execute(delete(ChunkEmbedding).where(ChunkEmbedding.slug == slug))
             logger.debug("chunk_store_deleted", slug=slug)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "chunk_store_delete_failed", slug=slug, error=str(exc)
-            )
+            logger.warning("chunk_store_delete_failed", slug=slug, error=str(exc))
 
     def query(
         self,
@@ -287,133 +255,152 @@ class ChunkStore:
             file_id: When set (and *file_ids* is empty), restrict to this source file.
             file_ids: When set, restrict results to these source file IDs.
             usage_file_id: Correlation ID for embedding usage logging only — never
-                applied as a ChromaDB metadata filter.
+                applied as a metadata filter.
 
         Returns:
-            List of ``ChunkHit`` sorted by descending similarity.  Empty if
-            the collection is empty or the embeddings call fails.
+            List of ``ChunkHit`` sorted by descending similarity. Empty if the
+            table is empty or the embeddings call fails.
         """
-        where_filter: dict[str, object] | None = None
-        if file_ids:
-            where_filter = {"file_id": {"$in": file_ids}}
-        elif file_id:
-            where_filter = {"file_id": file_id}
-
         embed_tag = usage_file_id or file_id or "chunk-query"
-        current_count = self.count()
-        if current_count == 0:
+        if self.count() == 0:
             return []
 
-        n = min(top_k, current_count)
         try:
             vectors = self._llm.embed([text], file_id=embed_tag)
         except Exception as exc:  # noqa: BLE001
             logger.warning("chunk_store_query_embed_failed", error=str(exc))
             return []
 
+        qvec = vectors[0]
+        distance = ChunkEmbedding.embedding.cosine_distance(qvec)
+        stmt = select(
+            ChunkEmbedding.slug,
+            ChunkEmbedding.title,
+            ChunkEmbedding.section,
+            ChunkEmbedding.chunk_idx,
+            ChunkEmbedding.document,
+            ChunkEmbedding.file_id,
+            distance.label("distance"),
+        )
+        if file_ids:
+            stmt = stmt.where(ChunkEmbedding.file_id.in_(file_ids))
+        elif file_id:
+            stmt = stmt.where(ChunkEmbedding.file_id == file_id)
+        stmt = stmt.order_by(distance).limit(top_k)
+
         try:
-            results = self._col.query(
-                query_embeddings=[vectors[0]],
-                n_results=n,
-                where=where_filter,  # type: ignore[arg-type]
-                include=["metadatas", "distances", "documents"],  # type: ignore[list-item]
-            )
+            with self._engine.connect() as conn:
+                rows = conn.execute(stmt).all()
         except Exception as exc:  # noqa: BLE001
             logger.warning("chunk_store_query_failed", error=str(exc))
             return []
 
-        hits: list[ChunkHit] = []
-        ids: list[str] = results.get("ids", [[]])[0]  # type: ignore[index]
-        distances: list[float] = results.get("distances", [[]])[0]  # type: ignore[index]
-        metas: list[dict[str, object]] = results.get("metadatas", [[]])[0]  # type: ignore[index]
-        docs: list[str] = results.get("documents", [[]])[0]  # type: ignore[index]
-
-        for _id, dist, meta, doc in zip(ids, distances, metas, docs, strict=True):
-            similarity = max(0.0, 1.0 - float(dist))
-            hits.append(
-                ChunkHit(
-                    slug=str(meta.get("slug", "")),
-                    title=str(meta.get("title", "")),
-                    section=str(meta.get("section", "")),
-                    chunk_idx=int(meta.get("chunk_idx", 0)),
-                    text=doc,
-                    similarity=similarity,
-                    file_id=str(meta.get("file_id", "")),
-                )
+        hits = [
+            ChunkHit(
+                slug=r.slug,
+                title=r.title or "",
+                section=r.section or "",
+                chunk_idx=int(r.chunk_idx),
+                text=r.document,
+                similarity=max(0.0, 1.0 - float(r.distance)),
+                file_id=r.file_id or "",
             )
-
+            for r in rows
+        ]
         hits.sort(key=lambda h: h.similarity, reverse=True)
         return hits
 
     def count(self) -> int:
-        """Return the total number of chunk embeddings in the collection."""
-        return self._col.count()  # type: ignore[no-any-return]
+        """Return the total number of chunk embeddings."""
+        with self._engine.connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(ChunkEmbedding)).scalar_one()
+            )
 
     def count_by_file_id(self, file_id: str) -> int:
         """Return how many chunks are tagged with *file_id*."""
-        result = self._col.get(where={"file_id": file_id}, include=[])
-        return len(result.get("ids", []))
+        with self._engine.connect() as conn:
+            return int(
+                conn.execute(
+                    select(func.count())
+                    .select_from(ChunkEmbedding)
+                    .where(ChunkEmbedding.file_id == file_id)
+                ).scalar_one()
+            )
 
     def backfill_file_id(self, slug: str, file_id: str) -> int:
-        """Set ``file_id`` metadata on all existing chunks for *slug*.
+        """Set ``file_id`` on all existing chunks for *slug*.
 
         Returns:
-            Number of chunk records updated.
+            Number of chunk rows updated.
         """
-        existing = self._col.get(where={"slug": slug}, include=["metadatas"])
-        ids: list[str] = existing.get("ids", [])
-        if not ids:
-            return 0
-        metas: list[dict[str, object]] = existing.get("metadatas", [])
-        updated_metas: list[dict[str, object]] = []
-        for meta in metas:
-            merged = dict(meta)
-            merged["file_id"] = file_id
-            updated_metas.append(merged)
-        self._col.update(ids=ids, metadatas=updated_metas)
-        return len(ids)
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                update(ChunkEmbedding)
+                .where(ChunkEmbedding.slug == slug)
+                .values(file_id=file_id)
+            )
+        return int(result.rowcount or 0)
 
     def clear(self) -> None:
-        """Delete ALL chunks.  Used by ``scripts/reindex_chunks.py``."""
-        self._chroma.delete_collection(_COLLECTION_NAME)
-        self._col = self._get_or_create_collection(fresh=True)
+        """Delete ALL chunks. Used by ``scripts/reindex_chunks.py``."""
+        with self._engine.begin() as conn:
+            conn.execute(delete(ChunkEmbedding))
+        self._write_meta()
         logger.info("chunk_store_cleared")
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _get_or_create_collection(
-        self, fresh: bool = False
-    ) -> chromadb.Collection:
-        """Return (or create) the chunks collection, validating model metadata."""
-        wanted_meta = {
-            "hnsw:space": "cosine",
-            "embedding_model": self._model,
-            "embedding_dim": str(self._dim),
-        }
-
-        logging.getLogger("chromadb").setLevel(logging.WARNING)
-
-        col = self._chroma.get_or_create_collection(
-            name=_COLLECTION_NAME,
-            metadata=wanted_meta,
+    def _upsert_stmt(self, rows: list[dict[str, object]]):  # type: ignore[no-untyped-def]
+        """Build an INSERT ... ON CONFLICT(id) DO UPDATE statement."""
+        ins = pg_insert(ChunkEmbedding).values(rows)
+        return ins.on_conflict_do_update(
+            index_elements=[ChunkEmbedding.id],
+            set_={
+                "slug": ins.excluded.slug,
+                "title": ins.excluded.title,
+                "section": ins.excluded.section,
+                "chunk_idx": ins.excluded.chunk_idx,
+                "file_id": ins.excluded.file_id,
+                "document": ins.excluded.document,
+                "embedding": ins.excluded.embedding,
+            },
         )
 
-        if not fresh:
-            stored = col.metadata or {}
-            stored_model = stored.get("embedding_model")
-            stored_dim = stored.get("embedding_dim")
-            if stored_model and stored_model != self._model:
+    def _validate_meta(self) -> None:
+        """Guard against a model/dim change without a reindex."""
+        with self._engine.begin() as conn:
+            stored = conn.execute(
+                select(EmbeddingMeta.model, EmbeddingMeta.dim).where(
+                    EmbeddingMeta.scope == _SCOPE
+                )
+            ).first()
+            if stored is None:
+                conn.execute(self._meta_upsert_stmt())
+                return
+            if stored.model != self._model:
                 raise EmbeddingModelMismatchError(
-                    f"chunks collection was built with model {stored_model!r}, "
+                    f"chunk_embeddings were built with model {stored.model!r}, "
                     f"but config says {self._model!r}. "
                     "Run: docker compose exec api uv run python scripts/reindex_chunks.py"
                 )
-            if stored_dim and stored_dim != str(self._dim):
+            if stored.dim != self._dim:
                 raise EmbeddingModelMismatchError(
-                    f"chunks collection dimension {stored_dim} != config {self._dim}. "
+                    f"chunk_embeddings dimension {stored.dim} != config {self._dim}. "
                     "Run: docker compose exec api uv run python scripts/reindex_chunks.py"
                 )
 
-        return col
+    def _write_meta(self) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(self._meta_upsert_stmt())
+
+    def _meta_upsert_stmt(self):  # type: ignore[no-untyped-def]
+        ins = pg_insert(EmbeddingMeta).values(
+            scope=_SCOPE, model=self._model, dim=self._dim
+        )
+        return ins.on_conflict_do_update(
+            index_elements=[EmbeddingMeta.scope],
+            set_={"model": ins.excluded.model, "dim": ins.excluded.dim},
+        )

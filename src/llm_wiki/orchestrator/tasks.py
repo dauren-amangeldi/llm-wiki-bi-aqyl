@@ -218,14 +218,14 @@ def run_weekly_audit(
         logger.info("weekly_audit_no_pages")
         return {"issues_found": 0, "mode": mode, "dry_run": dry_run}
 
-    # Build related pairs from ChromaDB (cosine > 0.6)
+    # Build related pairs from pgvector (cosine > 0.6)
     related_pairs: list[tuple[str, str]] = []
     try:
         from llm_wiki.llm.embeddings import EmbeddingStore
 
         llm_tmp = LLMClient()
         emb_store = EmbeddingStore(
-            chroma_path=settings.chroma_dir, llm_client=llm_tmp
+            llm_client=llm_tmp
         )
         for slug, _ in wiki_pages:
             hits = emb_store.query(
@@ -234,7 +234,7 @@ def run_weekly_audit(
                 file_id="weekly-audit",
             )
             for hit in hits:
-                if hit.score >= 0.6 and hit.slug != slug:
+                if hit.similarity >= 0.6 and hit.slug != slug:
                     pair = tuple(sorted([slug, hit.slug]))
                     if pair not in related_pairs:
                         related_pairs.append(pair)  # type: ignore[arg-type]

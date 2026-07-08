@@ -23,7 +23,7 @@ def sync_chunks_for_page(
     """Update the chunk index for one wiki page after it was saved to disk.
 
     No-op when *chunk_store* is ``None`` (feature flag / test isolation).
-    Swallows all exceptions so a Chroma failure never aborts the ingestion
+    Swallows all exceptions so a pgvector failure never aborts the ingestion
     pipeline.
 
     Args:

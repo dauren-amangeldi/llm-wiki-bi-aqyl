@@ -120,7 +120,7 @@ async def ask_document(
 
     llm = LLMClient()
     try:
-        store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        store = EmbeddingStore(llm_client=llm)
         agent = AnswerAgent(llm, store)
         result = await agent.answer_for_document(
             question=body.question,
@@ -213,7 +213,7 @@ async def ask_case(
 
     llm = LLMClient()
     try:
-        store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        store = EmbeddingStore(llm_client=llm)
         agent = AnswerAgent(llm, store)
         result = await agent.answer_for_case(
             question=body.question,

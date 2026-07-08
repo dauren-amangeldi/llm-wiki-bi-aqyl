@@ -12,7 +12,7 @@ from llm_wiki.storage.filesystem import ensure_dirs
 
 def main() -> None:
     """Create all required data directories and seed empty marker files."""
-    dirs = [settings.raw_dir, settings.wiki_dir, settings.chroma_dir]
+    dirs = [settings.raw_dir, settings.wiki_dir]
     ensure_dirs(*dirs)
 
     lang = settings.wiki_language.lower()

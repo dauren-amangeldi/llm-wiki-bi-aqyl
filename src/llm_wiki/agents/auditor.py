@@ -16,7 +16,7 @@ Architecture:
     API, -50% cost, 24 h SLA).
   - Pages are chunked in groups of ``BATCH_SIZE`` (50) to stay within
     token limits.
-  - Topically-related pairs (for contradictions) are derived from ChromaDB
+  - Topically-related pairs (for contradictions) are derived from pgvector
     cosine similarity > 0.6 by the caller; ``AuditorAgent`` just receives
     them.
 """
@@ -80,7 +80,7 @@ class AuditorAgent(BaseAgent):
             wiki_pages: Pairs of ``(slug, markdown_content)`` for every page
                 to audit.
             related_pairs: Pairs of slug names that are topically related
-                (cosine similarity > 0.6 from ChromaDB).  Used for
+                (cosine similarity > 0.6 from pgvector).  Used for
                 contradiction checks.  Pass ``None`` for an empty set.
             current_year: Override the year used for staleness reasoning
                 (injected into the prompt as today's date).  Defaults to the

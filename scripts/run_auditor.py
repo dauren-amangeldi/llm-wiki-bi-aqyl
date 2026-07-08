@@ -184,13 +184,13 @@ def main() -> None:
 
         llm_tmp = LLMClient()
         emb_store = EmbeddingStore(
-            chroma_path=settings.chroma_dir, llm_client=llm_tmp
+            llm_client=llm_tmp
         )
         page_slugs = {slug for slug, _ in all_pages}
         for slug, _ in all_pages:
             hits = emb_store.query(slug, top_k=5, file_id="run-auditor")
             for hit in hits:
-                if hit.score >= 0.6 and hit.slug != slug and hit.slug in page_slugs:
+                if hit.similarity >= 0.6 and hit.slug != slug and hit.slug in page_slugs:
                     pair = tuple(sorted([slug, hit.slug]))
                     if pair not in related_pairs:
                         related_pairs.append(pair)  # type: ignore[arg-type]

@@ -1,4 +1,4 @@
-"""Rebuild the ``chunks`` ChromaDB collection from all wiki pages.
+"""Rebuild the ``chunks`` pgvector collection from all wiki pages.
 
 Run this:
   - On first deploy (after wiki pages already exist but chunks collection is empty).
@@ -25,12 +25,12 @@ if str(_SRC) not in sys.path:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Rebuild the chunks ChromaDB collection from wiki pages."
+        description="Rebuild the chunks pgvector collection from wiki pages."
     )
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compute chunks but do NOT write to ChromaDB or call the embeddings API.",
+        help="Compute chunks but do NOT write to pgvector or call the embeddings API.",
     )
     p.add_argument(
         "--batch-size",
@@ -83,7 +83,7 @@ def main() -> None:
             print("No slug→file_id mappings found in metadata.db.")
             return
         llm = LLMClient()
-        store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        store = ChunkStore(llm_client=llm)
         total = sum(store.backfill_file_id(slug, fid) for slug, fid in slug_map.items())
         print(f"Backfill complete: {total} chunk record(s) updated.")
         return
@@ -100,7 +100,7 @@ def main() -> None:
 
     print(f"Found {len(pages)} wiki page(s) in {wiki_dir}")
 
-    # Dry-run: just count chunks without touching Chroma or the API
+    # Dry-run: just count chunks without touching pgvector or the API
     if args.dry_run:
         total_chunks = 0
         for path in pages:
@@ -115,7 +115,7 @@ def main() -> None:
 
     # Real run
     llm = LLMClient()
-    store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+    store = ChunkStore(llm_client=llm)
 
     print("Clearing existing chunks collection…")
     store.clear()
@@ -136,7 +136,7 @@ def main() -> None:
             print(f"  Indexed {i}/{len(pages)} pages…")
 
     total_chunks = store.count()
-    print(f"\nDone. {indexed_pages} pages → {total_chunks} chunks in ChromaDB.")
+    print(f"\nDone. {indexed_pages} pages → {total_chunks} chunks in pgvector.")
     print(
         "Tip: check usage.log for embedding costs:\n"
         "  docker compose exec api tail -n 20 data/usage.log | jq 'select(.agent_type==\"embed\")'"

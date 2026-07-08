@@ -700,8 +700,8 @@ async def ask_question(
 
     llm = LLMClient()
     try:
-        embedding_store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
-        chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+        embedding_store = EmbeddingStore(llm_client=llm)
+        chunk_store = ChunkStore(llm_client=llm)
         agent = AnswerAgent(llm, embedding_store, chunk_store=chunk_store)
         result = await agent.answer(question=body.question, top_k=body.top_k)
     finally:
@@ -760,7 +760,7 @@ async def advisor_endpoint(
             if stream:
                 yield _sse_line({"status": "searching", "step": 1, "total": 2})
 
-            chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+            chunk_store = ChunkStore(llm_client=llm)
             agent = AdvisorAgent(llm, chunk_store)
             history = [
                 HistoryTurn(role=t.role, content=t.content) for t in body.history

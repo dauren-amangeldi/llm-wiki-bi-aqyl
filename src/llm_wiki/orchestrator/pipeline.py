@@ -113,10 +113,10 @@ async def process_file(file_id: str) -> None:
             # ----------------------------------------------------------------
             logger.info("pipeline_step_start", file_id=file_id, step="SEARCHED")
             embedding_store = EmbeddingStore(
-                chroma_path=settings.chroma_dir, llm_client=llm
+                llm_client=llm
             )
             chunk_store = ChunkStore(
-                chroma_path=settings.chroma_dir, llm_client=llm
+                llm_client=llm
             )
             index_storage = IndexStorage(
                 settings.index_path, embedding_store=embedding_store

@@ -3,10 +3,10 @@
 Uses filelock (cross-platform) to prevent concurrent writes from corrupting the file.
 All mutating operations follow: lock → read → modify → atomic_write → release.
 
-ChromaDB synchronisation (optional):
+pgvector synchronisation (optional):
     Pass an ``EmbeddingStore`` to ``IndexStorage.__init__`` to keep the vector
-    index in sync.  Failures in ChromaDB are logged and swallowed — index.md is
-    the authoritative source of truth; the Chroma collection is a derived cache.
+    index in sync.  Failures in pgvector are logged and swallowed — index.md is
+    the authoritative source of truth; the pgvector collection is a derived cache.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class IndexStorage:
     All mutating operations acquire an exclusive file lock before reading
     the current state, applying the change, and writing back atomically.
 
-    An optional ``EmbeddingStore`` keeps ChromaDB in sync with every
+    An optional ``EmbeddingStore`` keeps pgvector in sync with every
     add/move/remove operation.  If the store is absent (or raises), index.md
     is still updated correctly.
     """
@@ -60,9 +60,9 @@ class IndexStorage:
 
         Args:
             index_path: Absolute path to the index.md file.
-            embedding_store: Optional ChromaDB store for vector sync.  When
-                provided, every add/move/remove mirrors to Chroma.  Failures
-                in Chroma are logged and do not propagate.
+            embedding_store: Optional pgvector store for vector sync.  When
+                provided, every add/move/remove mirrors to pgvector.  Failures
+                in pgvector are logged and do not propagate.
         """
         self._path = index_path
         self._embedding_store: EmbeddingStore | None = embedding_store
@@ -98,21 +98,21 @@ class IndexStorage:
 
         Creates the section if it doesn't exist.  Idempotent: calling with
         the same *slug* twice does not add a duplicate entry.  On success,
-        upserts the heading into ChromaDB (if an ``EmbeddingStore`` is set).
+        upserts the heading into pgvector (if an ``EmbeddingStore`` is set).
 
         Args:
             slug: Page slug written as ``[[slug]]`` in the list entry.
             section: Section heading text (without ``##`` prefix).
             title: Human-readable title for the embedding.  Defaults to slug.
-            level: Markdown heading level for the Chroma metadata.
+            level: Markdown heading level for the pgvector metadata.
         """
         with self._lock:
             content = self._read()
             content = self._add_entry(content, slug, section)
             self._write(content)
 
-        # ChromaDB sync — happens AFTER the lock is released and index.md is
-        # safely written, so a Chroma failure can never corrupt the index.
+        # pgvector sync — happens AFTER the lock is released and index.md is
+        # safely written, so a pgvector failure can never corrupt the index.
         effective_title = title or slug
         if self._embedding_store is not None:
             try:
@@ -134,7 +134,7 @@ class IndexStorage:
 
         Removes the entry from its current location and re-inserts it under
         *new_section*.  If the slug does not exist in the file the call is a
-        no-op.  Updates only the *section* metadata in ChromaDB (embedding
+        no-op.  Updates only the *section* metadata in pgvector (embedding
         vector is not recomputed — the title has not changed).
 
         Args:
@@ -158,7 +158,7 @@ class IndexStorage:
                 )
 
     def remove_page(self, slug: str) -> None:
-        """Remove an existing page entry from index.md and ChromaDB.
+        """Remove an existing page entry from index.md and pgvector.
 
         No-op if *slug* is not present.
 

@@ -98,7 +98,7 @@ async def test_readyz_reports_all_dependencies(test_app: tuple) -> None:  # type
         resp = await client.get("/readyz")
 
     body = resp.json()
-    assert set(body["checks"]) == {"postgres", "redis", "chroma", "object_store"}
+    assert set(body["checks"]) == {"postgres", "redis", "object_store"}
     assert body["checks"]["object_store"] == "ok"
     ready = all(v == "ok" for v in body["checks"].values())
     assert body["status"] == ("ready" if ready else "not_ready")

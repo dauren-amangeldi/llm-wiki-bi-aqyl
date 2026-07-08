@@ -28,11 +28,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Configure structured JSON logging before anything else runs.
     configure_logging()
 
-    # Ensure local data directories exist (no-op effect for S3-backed raw/wiki;
-    # chroma is still local until phase 3).
-    ensure_dirs(settings.raw_dir, settings.wiki_dir, settings.chroma_dir)
+    # Ensure local data directories exist (no-op effect for S3-backed raw/wiki).
+    ensure_dirs(settings.raw_dir, settings.wiki_dir)
 
     async with _engine.begin() as conn:
+        # pgvector must exist before create_all builds the vector() columns.
+        # On a managed DB the role needs the privilege, or a DBA pre-creates it.
+        from sqlalchemy import text
+
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         # Create all tables for a fresh database
         await conn.run_sync(Base.metadata.create_all)
         await ensure_wiki_fts_table(conn)
@@ -112,19 +116,6 @@ async def _check_redis() -> None:
             pass
 
 
-async def _check_chroma() -> None:
-    from llm_wiki.llm.chroma_client import make_chroma_client
-
-    # Build the client AND heartbeat inside the worker thread — constructing an
-    # HttpClient does a synchronous network handshake, so doing it in the event
-    # loop would block every other concurrent check (e.g. starve the redis ping
-    # into a false timeout).
-    def _ping() -> None:
-        make_chroma_client(settings.chroma_dir).heartbeat()
-
-    await asyncio.to_thread(_ping)
-
-
 async def _check_object_store() -> None:
     from llm_wiki.storage.object_store import get_object_store
 
@@ -141,14 +132,14 @@ async def _check_object_store() -> None:
 async def readiness() -> JSONResponse:
     """Readiness probe — 200 only when all backing services are reachable.
 
-    Checks Postgres, Redis, Chroma and the object store concurrently and
-    returns 503 (with a per-dependency breakdown) if any is unavailable, so
-    the orchestrator can hold traffic until the pod is truly ready.
+    Checks Postgres, Redis and the object store concurrently and returns 503
+    (with a per-dependency breakdown) if any is unavailable, so the orchestrator
+    can hold traffic until the pod is truly ready. Vector search lives inside
+    Postgres (pgvector), so the postgres check covers it.
     """
     checks = {
         "postgres": _check_postgres,
         "redis": _check_redis,
-        "chroma": _check_chroma,
         "object_store": _check_object_store,
     }
     results: dict[str, str] = {}

@@ -1,4 +1,4 @@
-"""Rebuild the ChromaDB heading index from the current data/index.md.
+"""Rebuild the pgvector heading index from the current data/index.md.
 
 Run inside the container after restoring a backup or after switching models:
     docker compose exec api uv run python scripts/reindex.py
@@ -24,12 +24,12 @@ logger = structlog.get_logger(__name__)
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Rebuild ChromaDB heading index from index.md",
+        description="Rebuild pgvector heading index from index.md",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview headings without writing to ChromaDB.",
+        help="Preview headings without writing to pgvector.",
     )
     parser.add_argument(
         "--batch-size",
@@ -60,7 +60,7 @@ def _load_slug_file_map() -> dict[str, str]:
 
 
 def _backfill_file_ids_only() -> None:
-    """Backfill file_id on existing Chroma metadata without re-embedding."""
+    """Backfill file_id on existing pgvector metadata without re-embedding."""
     from llm_wiki.config import settings
     from llm_wiki.llm.chunk_store import ChunkStore
     from llm_wiki.llm.client import LLMClient
@@ -72,8 +72,8 @@ def _backfill_file_ids_only() -> None:
         return
 
     llm = LLMClient()
-    heading_store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
-    chunk_store = ChunkStore(chroma_path=settings.chroma_dir, llm_client=llm)
+    heading_store = EmbeddingStore(llm_client=llm)
+    chunk_store = ChunkStore(llm_client=llm)
 
     heading_updates = 0
     chunk_updates = 0
@@ -89,7 +89,7 @@ def _backfill_file_ids_only() -> None:
 
 
 def main() -> None:
-    """Scan index.md and re-embed all headings into ChromaDB."""
+    """Scan index.md and re-embed all headings into pgvector."""
     args = _parse_args()
 
     if args.backfill_file_ids:
@@ -149,7 +149,7 @@ def main() -> None:
         settings.__dict__["embedding_batch_size"] = args.batch_size  # runtime override
 
     llm = LLMClient()
-    store = EmbeddingStore(chroma_path=settings.chroma_dir, llm_client=llm)
+    store = EmbeddingStore(llm_client=llm)
 
     print(f"Clearing existing collection …")
     store.clear()

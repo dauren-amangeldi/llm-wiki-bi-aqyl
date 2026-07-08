@@ -7,9 +7,23 @@ Uses SQLAlchemy async ORM (psycopg driver). Tables are created on startup via
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy import JSON, DateTime, Integer, String, select, update as sa_update
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    select,
+    update as sa_update,
+)
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from llm_wiki.config import settings
 
 
 logger = structlog.get_logger(__name__)
@@ -21,6 +35,86 @@ _DEV_USER_ROLE = "admin"
 
 class Base(DeclarativeBase):
     """SQLAlchemy declarative base for all metadata models."""
+
+
+# ---------------------------------------------------------------------------
+# Vector search (pgvector) — replaces the former ChromaDB collections.
+# ---------------------------------------------------------------------------
+
+_EMBED_DIM = settings.embedding_dimensions
+
+
+class HeadingEmbedding(Base):
+    """One embedding per wiki page heading (title). Former ``headings`` collection."""
+
+    __tablename__ = "heading_embeddings"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False, default="")
+    section: Mapped[str] = mapped_column(String, nullable=False, default="")
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    file_id: Mapped[str] = mapped_column(String, nullable=False, default="", index=True)
+    last_indexed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    embedding: Mapped[list[float]] = mapped_column(Vector(_EMBED_DIM), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_heading_embeddings_vec",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+
+class ChunkEmbedding(Base):
+    """One embedding per ~500-token page-body chunk. Former ``chunks`` collection."""
+
+    __tablename__ = "chunk_embeddings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # f"{slug}#{idx:04d}"
+    slug: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String, nullable=False, default="")
+    section: Mapped[str] = mapped_column(String, nullable=False, default="")
+    chunk_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    file_id: Mapped[str] = mapped_column(String, nullable=False, default="", index=True)
+    document: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    embedding: Mapped[list[float]] = mapped_column(Vector(_EMBED_DIM), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_chunk_embeddings_vec",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+
+class EmbeddingMeta(Base):
+    """Records the model + dim each vector table was built with (mismatch guard)."""
+
+    __tablename__ = "embedding_meta"
+
+    scope: Mapped[str] = mapped_column(String, primary_key=True)  # "headings" | "chunks"
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    dim: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+# Synchronous engine for the (synchronous) vector stores. The app's main engine
+# is async; embedding upsert/query are sync (LLMClient.embed is sync), so they
+# share their own sync psycopg engine against the same DATABASE_URL.
+_sync_engine: Engine | None = None
+
+
+def get_sync_engine() -> Engine:
+    """Return a lazily-created synchronous engine to the configured database."""
+    global _sync_engine
+    if _sync_engine is None:
+        _sync_engine = create_engine(settings.database_url, pool_pre_ping=True)
+    return _sync_engine
 
 
 class User(Base):
