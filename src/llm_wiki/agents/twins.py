@@ -127,6 +127,88 @@ class CrossExamResult:
     cite: str
 
 
+_VERDICT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "persona_id": {"type": "string"},
+                },
+                "required": ["text", "persona_id"],
+                "additionalProperties": False,
+            },
+        },
+        "consensus": {"type": "string"},
+        "disagreement": {"type": "string"},
+        "next_step": {"type": "string"},
+        "domain_distribution": {
+            "type": "object",
+            "properties": {
+                "tech": {"type": "number"},
+                "real_estate": {"type": "number"},
+                "finance": {"type": "number"},
+            },
+            "required": ["tech", "real_estate", "finance"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["questions", "consensus", "disagreement", "next_step", "domain_distribution"],
+    "additionalProperties": False,
+}
+
+_VERDICT_SYSTEM_PROMPT = "Ты синтезируешь честный вердикт совета AI-персон, не сглаживая разногласия."
+
+
+def _compute_decisive_voice(
+    persona_ids: list[str],
+    domain_weights: dict[str, dict[str, float]],
+    domain_distribution: dict[str, float],
+) -> tuple[str, bool]:
+    """Return (decisive persona_id, is_close_split) from weights × domain shares.
+
+    ``is_close_split`` is True when the top two scores differ by less than
+    0.15 — surfaced to the caller as an honest split instead of a false tie-break.
+    """
+    scores = {
+        pid: sum(
+            domain_weights.get(pid, {}).get(domain, 0.0) * share
+            for domain, share in domain_distribution.items()
+        )
+        for pid in persona_ids
+    }
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    decisive_id, top_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    is_close_split = (top_score - second_score) < 0.15
+    return decisive_id, is_close_split
+
+
+def _build_transcript(positions: list[PositionResult], cross_exams: list[CrossExamResult]) -> str:
+    lines = ["# Round 1 — Позиции"]
+    for p in positions:
+        lines.append(f"## {p.persona_id}\nПереформулировка: {p.reframing}\nПозиция: {p.text}")
+    if cross_exams:
+        lines.append("\n# Round 2 — Перекрёстный допрос")
+        for c in cross_exams:
+            lines.append(f"## {c.persona_id}\nРасхождение: {c.disagreement}\nРеплика: {c.text}")
+    return "\n\n".join(lines)
+
+
+@dataclass(frozen=True)
+class VerdictResult:
+    questions: list[dict[str, str]]
+    consensus: str
+    disagreement: str
+    next_step: str
+    domain_distribution: dict[str, float]
+    decisive_voice: str
+    consensus_reached_early: bool
+
+
 class TwinsAgent(BaseAgent):
     """Orchestrates the Twins council: position, cross-exam, and verdict rounds."""
 
@@ -256,3 +338,49 @@ class TwinsAgent(BaseAgent):
                 continue
             results.append(result)
         return results
+
+    async def run_verdict_round(
+        self,
+        personas: list[TwinPersonaData],
+        case_context: str,
+        positions: list[PositionResult],
+        cross_exams: list[CrossExamResult],
+        language: str,
+        file_id: str = "twins",
+    ) -> VerdictResult:
+        """Synthesize the final verdict and compute the domain-weighted decisive voice.
+
+        ``decisive_voice`` is never invented by the LLM — it's derived
+        deterministically from ``domain_distribution`` (LLM output) crossed
+        with each persona's stored ``domain_weights``, so the result is
+        auditable instead of a black box.
+        """
+        transcript = _build_transcript(positions, cross_exams)
+        prompt = self._llm.load_prompt(
+            "twins_verdict", language=language, case_context=case_context, transcript=transcript
+        )
+        text, _usage = await self._llm.complete(
+            prompt=prompt,
+            system=_VERDICT_SYSTEM_PROMPT,
+            file_id=file_id,
+            agent_type="twins",
+            json_schema=_VERDICT_SCHEMA,
+            schema_name="twins_verdict",
+        )
+        data = json.loads(text)
+
+        domain_weights = {p.id: p.domain_weights for p in personas}
+        decisive_id, _is_close = _compute_decisive_voice(
+            [p.id for p in personas], domain_weights, data["domain_distribution"]
+        )
+        consensus_reached_early = bool(cross_exams) and all(c.disagreement_forced for c in cross_exams)
+
+        return VerdictResult(
+            questions=data["questions"],
+            consensus=data["consensus"],
+            disagreement=data["disagreement"],
+            next_step=data["next_step"],
+            domain_distribution=data["domain_distribution"],
+            decisive_voice=decisive_id,
+            consensus_reached_early=consensus_reached_early,
+        )
