@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncGenerator
 
+import structlog
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -23,6 +24,9 @@ from llm_wiki.storage.metadata import (
     list_twin_personas,
     list_twin_presets,
 )
+
+
+logger = structlog.get_logger(__name__)
 
 
 def _sse_line(payload: dict[str, object]) -> str:
@@ -142,6 +146,7 @@ async def twin_council_endpoint(
                 "domain_distribution": verdict.domain_distribution,
                 "decisive_voice": verdict.decisive_voice,
                 "consensus_reached_early": verdict.consensus_reached_early,
+                "is_close_split": verdict.is_close_split,
             }
             await append_twin_message(
                 db, session_id=session_row.id, round="verdict", persona_id=None, seq=seq, content=verdict_content,
@@ -150,8 +155,13 @@ async def twin_council_endpoint(
 
             yield _sse_line({"done": True, "session_id": session_row.id})
         except Exception as exc:  # noqa: BLE001
+            logger.exception("twins_council_stream_failed", error=str(exc))
             yield _sse_line({"error": str(exc)})
         finally:
             await llm.aclose()
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -91,6 +91,7 @@ async def test_twin_council_sse_stream_returns_done_event(client: AsyncClient) -
     body = resp.text
     assert '"round": "position"' in body
     assert '"round": "verdict"' in body
+    assert '"is_close_split": false' in body
     assert '"done": true' in body
     mock_agent.run_position_round.assert_awaited_once()
     mock_agent.run_verdict_round.assert_awaited_once()
