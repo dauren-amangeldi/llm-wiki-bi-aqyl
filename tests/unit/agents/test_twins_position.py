@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -55,3 +56,50 @@ async def test_run_position_round_returns_one_result_per_persona() -> None:
     by_id = {r.persona_id: r for r in results}
     assert by_id["musk"] == PositionResult(persona_id="musk", reframing="r1", text="t1", cite="c1")
     assert by_id["zell"] == PositionResult(persona_id="zell", reframing="r2", text="t2", cite="c2")
+
+
+@pytest.mark.asyncio
+async def test_run_position_round_executes_personas_concurrently() -> None:
+    in_flight = 0
+    max_in_flight = 0
+
+    async def _complete(**_kwargs: object) -> tuple[str, MagicMock]:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        usage = MagicMock()
+        usage.cost_usd = 0.001
+        return json.dumps({"reframing": "r", "text": "t", "cite": "c"}), usage
+
+    mock = MagicMock(spec=LLMClient)
+    mock.load_prompt.return_value = "prompt"
+    mock.complete = AsyncMock(side_effect=_complete)
+    agent = TwinsAgent(mock)
+
+    personas = [_persona("musk"), _persona("zell"), _persona("bren")]
+    await agent.run_position_round(personas, case_context="ctx", language="ru")
+
+    assert max_in_flight == 3
+
+
+@pytest.mark.asyncio
+async def test_run_position_round_skips_failed_persona_keeps_others() -> None:
+    async def _complete(*, system: str, **_kwargs: object) -> tuple[str, MagicMock]:
+        if "musk" in system:
+            raise RuntimeError("boom")
+        usage = MagicMock()
+        usage.cost_usd = 0.001
+        return json.dumps({"reframing": "r", "text": "t", "cite": "c"}), usage
+
+    mock = MagicMock(spec=LLMClient)
+    mock.load_prompt.return_value = "prompt"
+    mock.complete = AsyncMock(side_effect=_complete)
+    agent = TwinsAgent(mock)
+
+    results = await agent.run_position_round(
+        [_persona("musk"), _persona("zell")], case_context="ctx", language="ru"
+    )
+
+    assert [r.persona_id for r in results] == ["zell"]

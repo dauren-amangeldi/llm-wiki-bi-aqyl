@@ -130,4 +130,13 @@ class TwinsAgent(BaseAgent):
                 cite=data["cite"],
             )
 
-        return list(await asyncio.gather(*[_one(p) for p in personas]))
+        raw_results = await asyncio.gather(
+            *[_one(p) for p in personas], return_exceptions=True
+        )
+        results: list[PositionResult] = []
+        for persona, result in zip(personas, raw_results):
+            if isinstance(result, Exception):
+                logger.warning("twins_position_failed", persona_id=persona.id, error=str(result))
+                continue
+            results.append(result)
+        return results
