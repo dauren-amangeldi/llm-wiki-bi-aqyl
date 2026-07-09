@@ -206,9 +206,24 @@ class TwinsAgent(BaseAgent):
                 positions_block=positions_block,
             )
             own_text = own_text_by_id.get(persona.id, "")
-            data: dict[str, str] = {}
-            forced = False
-            for attempt in range(2):
+
+            text, _usage = await self._llm.complete(
+                prompt=prompt,
+                system=persona.system_prompt,
+                file_id=file_id,
+                agent_type="twins",
+                json_schema=_CROSS_EXAM_SCHEMA,
+                schema_name="twins_cross_exam",
+            )
+            data = json.loads(text)
+            if _is_novel_disagreement(data["disagreement"], [own_text]):
+                return CrossExamResult(
+                    persona_id=persona.id, disagreement=data["disagreement"],
+                    disagreement_forced=False, text=data["text"], cite=data["cite"],
+                )
+
+            first_attempt = data
+            try:
                 text, _usage = await self._llm.complete(
                     prompt=prompt,
                     system=persona.system_prompt,
@@ -218,16 +233,17 @@ class TwinsAgent(BaseAgent):
                     schema_name="twins_cross_exam",
                 )
                 data = json.loads(text)
-                if _is_novel_disagreement(data["disagreement"], [own_text]):
-                    forced = False
-                    break
-                forced = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("twins_cross_exam_retry_failed", persona_id=persona.id, error=str(exc))
+                return CrossExamResult(
+                    persona_id=persona.id, disagreement=first_attempt["disagreement"],
+                    disagreement_forced=True, text=first_attempt["text"], cite=first_attempt["cite"],
+                )
+
+            is_novel = _is_novel_disagreement(data["disagreement"], [own_text])
             return CrossExamResult(
-                persona_id=persona.id,
-                disagreement=data["disagreement"],
-                disagreement_forced=forced,
-                text=data["text"],
-                cite=data["cite"],
+                persona_id=persona.id, disagreement=data["disagreement"],
+                disagreement_forced=not is_novel, text=data["text"], cite=data["cite"],
             )
 
         raw_results = await asyncio.gather(

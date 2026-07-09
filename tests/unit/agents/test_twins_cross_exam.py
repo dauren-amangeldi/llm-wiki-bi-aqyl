@@ -152,3 +152,31 @@ async def test_cross_exam_skips_failed_persona_keeps_others() -> None:
     )
 
     assert [r.persona_id for r in results] == ["zell"]
+
+
+@pytest.mark.asyncio
+async def test_cross_exam_falls_back_to_first_attempt_when_retry_raises() -> None:
+    call_count = 0
+
+    async def _complete(**_kwargs: object) -> tuple[str, MagicMock]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            usage = MagicMock()
+            usage.cost_usd = 0.001
+            return json.dumps({"disagreement": "Позиция про себестоимость", "text": "reply1", "cite": "c1"}), usage
+        raise RuntimeError("network blip")
+
+    mock = MagicMock(spec=LLMClient)
+    mock.load_prompt.return_value = "prompt"
+    mock.complete = AsyncMock(side_effect=_complete)
+    agent = TwinsAgent(mock)
+    positions = [PositionResult(persona_id="musk", reframing="r", text="Позиция про себестоимость", cite="c")]
+
+    results = await agent.run_cross_exam_round(
+        [_persona("musk")], case_context="ctx", positions=positions, language="ru"
+    )
+
+    assert results == [
+        CrossExamResult(persona_id="musk", disagreement="Позиция про себестоимость", disagreement_forced=True, text="reply1", cite="c1")
+    ]
