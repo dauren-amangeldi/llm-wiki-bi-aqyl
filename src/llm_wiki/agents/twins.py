@@ -7,6 +7,7 @@ No FastAPI, Celery, or direct file I/O beyond reading already-written wiki pages
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -89,6 +90,43 @@ class PositionResult:
     cite: str
 
 
+_CROSS_EXAM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "disagreement": {"type": "string"},
+        "text": {"type": "string"},
+        "cite": {"type": "string"},
+    },
+    "required": ["disagreement", "text", "cite"],
+    "additionalProperties": False,
+}
+
+
+def _is_novel_disagreement(
+    candidate: str, prior_texts: list[str], threshold: float = 0.85
+) -> bool:
+    """True when *candidate* is not a near-duplicate of any text in *prior_texts*.
+
+    Used to enforce the disagreement quota: a persona's Round 2 disagreement
+    must not just restate its own Round 1 position.
+    """
+    candidate_norm = candidate.strip().lower()
+    for prior in prior_texts:
+        ratio = difflib.SequenceMatcher(None, candidate_norm, prior.strip().lower()).ratio()
+        if ratio >= threshold:
+            return False
+    return True
+
+
+@dataclass(frozen=True)
+class CrossExamResult:
+    persona_id: str
+    disagreement: str
+    disagreement_forced: bool
+    text: str
+    cite: str
+
+
 class TwinsAgent(BaseAgent):
     """Orchestrates the Twins council: position, cross-exam, and verdict rounds."""
 
@@ -137,6 +175,68 @@ class TwinsAgent(BaseAgent):
         for persona, result in zip(personas, raw_results):
             if isinstance(result, Exception):
                 logger.warning("twins_position_failed", persona_id=persona.id, error=str(result))
+                continue
+            results.append(result)
+        return results
+
+    async def run_cross_exam_round(
+        self,
+        personas: list[TwinPersonaData],
+        case_context: str,
+        positions: list[PositionResult],
+        language: str,
+        file_id: str = "twins",
+    ) -> list[CrossExamResult]:
+        """Run Round 2: each persona must surface a genuinely new disagreement.
+
+        One retry is allowed if the model just restates its own Round 1 text.
+        If the retry still fails the novelty check, the reply is kept but
+        flagged ``disagreement_forced=True`` — visible to the caller instead
+        of silently passing off manufactured conflict as organic.
+        """
+        positions_block = "\n\n".join(f"### {p.persona_id}\n{p.text}" for p in positions)
+        own_text_by_id = {p.persona_id: p.text for p in positions}
+
+        async def _one(persona: TwinPersonaData) -> CrossExamResult:
+            prompt = self._llm.load_prompt(
+                "twins_cross_exam",
+                language=language,
+                persona_lens=persona.lens,
+                case_context=case_context,
+                positions_block=positions_block,
+            )
+            own_text = own_text_by_id.get(persona.id, "")
+            data: dict[str, str] = {}
+            forced = False
+            for attempt in range(2):
+                text, _usage = await self._llm.complete(
+                    prompt=prompt,
+                    system=persona.system_prompt,
+                    file_id=file_id,
+                    agent_type="twins",
+                    json_schema=_CROSS_EXAM_SCHEMA,
+                    schema_name="twins_cross_exam",
+                )
+                data = json.loads(text)
+                if _is_novel_disagreement(data["disagreement"], [own_text]):
+                    forced = False
+                    break
+                forced = True
+            return CrossExamResult(
+                persona_id=persona.id,
+                disagreement=data["disagreement"],
+                disagreement_forced=forced,
+                text=data["text"],
+                cite=data["cite"],
+            )
+
+        raw_results = await asyncio.gather(
+            *[_one(p) for p in personas], return_exceptions=True
+        )
+        results: list[CrossExamResult] = []
+        for persona, result in zip(personas, raw_results):
+            if isinstance(result, Exception):
+                logger.warning("twins_cross_exam_failed", persona_id=persona.id, error=str(result))
                 continue
             results.append(result)
         return results
