@@ -125,6 +125,42 @@ class Skill(Base):
     )
 
 
+class TwinPersona(Base):
+    """A Twins council persona — tech-visionary or development track (BI-AQYL-TWINS).
+
+    Content (name/lens/system_prompt/domain_weights) is sourced from editable
+    .md files in ``src/llm_wiki/personas/twins/`` — see ``seed_twin_personas``.
+    """
+
+    __tablename__ = "twin_personas"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    inspiration: Mapped[str] = mapped_column(String, nullable=False)
+    track: Mapped[str] = mapped_column(String, nullable=False)  # "tech" | "dev"
+    pinned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lens: Mapped[str] = mapped_column(String, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(String, nullable=False)
+    domain_weights: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
+    avatar_init: Mapped[str] = mapped_column(String, nullable=False)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TwinPreset(Base):
+    """A ready-made triad preset for the Twins council (BI-AQYL-TWINS)."""
+
+    __tablename__ = "twin_presets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
 # Roles grouped for frontend slug mapping (modes/* vs positions/*)
 _MODE_ROLES: frozenset[str] = frozenset({"advisor", "expert", "library"})
 
@@ -223,6 +259,13 @@ _DEFAULT_SKILL_SEEDS: list[dict[str, str | int]] = [
 ]
 
 
+
+_DEFAULT_TWIN_PRESET_SEEDS: list[dict[str, object]] = [
+    {"id": "preset-tech-transform", "name": "Технотрансформация", "persona_ids": ["musk", "huang", "nadella"]},
+    {"id": "preset-should-build", "name": "Стоит ли строить", "persona_ids": ["zell", "bren", "musk"]},
+    {"id": "preset-how-to-build", "name": "Каким строить", "persona_ids": ["hines", "alabbar", "huang"]},
+    {"id": "preset-sell-adopt", "name": "Как продать / внедрить", "persona_ids": ["corcoran", "miller", "nadella"]},
+]
 # ---------------------------------------------------------------------------
 # CRUD helpers — thin async wrappers used by the orchestrator (LW-9)
 # ---------------------------------------------------------------------------
@@ -504,6 +547,89 @@ async def resolve_skill_system_prompt(session: AsyncSession, role: str) -> str |
 # Chat history CRUD
 # ---------------------------------------------------------------------------
 
+
+
+# Twin personas CRUD
+
+async def twin_personas_count(session: AsyncSession) -> int:
+    """Return the number of rows in the twin_personas table."""
+    result = await session.execute(select(TwinPersona))
+    return len(result.scalars().all())
+
+
+async def get_twin_persona(session: AsyncSession, persona_id: str) -> TwinPersona | None:
+    """Return a single persona by id, or None if missing."""
+    return await session.get(TwinPersona, persona_id)
+
+
+async def list_twin_personas(session: AsyncSession) -> list[TwinPersona]:
+    """Return all active personas."""
+    result = await session.execute(select(TwinPersona).where(TwinPersona.active == 1))
+    return list(result.scalars().all())
+
+
+async def list_twin_presets(session: AsyncSession) -> list[TwinPreset]:
+    """Return all preset triads."""
+    result = await session.execute(select(TwinPreset))
+    return list(result.scalars().all())
+
+
+async def seed_twin_personas(session: AsyncSession) -> int:
+    """Load personas from `.md` files and upsert them into `twin_personas`.
+
+    Upsert (not insert-only) so editing a persona's file and restarting the
+    service applies the change without a manual migration. Presets are
+    seeded alongside, insert-if-absent (they're structural id-lists, not
+    editorial content, so they don't need the upsert treatment).
+
+    Returns the number of persona rows newly inserted (updates aren't counted).
+    """
+    from llm_wiki.storage.persona_files import load_persona_files
+
+    inserted = 0
+    for row in load_persona_files():
+        persona_id = str(row["id"])
+        pinned_int = int(bool(row["pinned"]))
+        existing = await get_twin_persona(session, persona_id)
+        if existing is None:
+            session.add(
+                TwinPersona(
+                    id=persona_id,
+                    name=str(row["name"]),
+                    inspiration=str(row["inspiration"]),
+                    track=str(row["track"]),
+                    pinned=pinned_int,
+                    lens=str(row["lens"]),
+                    system_prompt=str(row["system_prompt"]),
+                    domain_weights=row["domain_weights"],  # type: ignore[arg-type]
+                    avatar_init=str(row["avatar_init"]),
+                )
+            )
+            inserted += 1
+        else:
+            existing.name = str(row["name"])
+            existing.inspiration = str(row["inspiration"])
+            existing.track = str(row["track"])
+            existing.pinned = pinned_int
+            existing.lens = str(row["lens"])
+            existing.system_prompt = str(row["system_prompt"])
+            existing.domain_weights = row["domain_weights"]  # type: ignore[assignment]
+            existing.avatar_init = str(row["avatar_init"])
+
+    for preset_row in _DEFAULT_TWIN_PRESET_SEEDS:
+        preset_id = str(preset_row["id"])
+        if await session.get(TwinPreset, preset_id) is not None:
+            continue
+        session.add(
+            TwinPreset(
+                id=preset_id,
+                name=str(preset_row["name"]),
+                persona_ids=preset_row["persona_ids"],  # type: ignore[arg-type]
+            )
+        )
+
+    await session.commit()
+    return inserted
 
 async def append_chat_message(
     session: AsyncSession,
