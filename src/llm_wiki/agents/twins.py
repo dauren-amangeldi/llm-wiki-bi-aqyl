@@ -8,8 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
+
 if TYPE_CHECKING:
     from llm_wiki.storage.metadata import FileRecord
+
+logger = structlog.get_logger(__name__)
 
 
 def load_case_context(documents: "list[FileRecord]") -> str:
@@ -35,7 +39,8 @@ def load_case_context(documents: "list[FileRecord]") -> str:
     for slug in slugs:
         try:
             body = store.get_text(wiki_key(slug)) or ""
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("twins_load_page_failed", slug=slug, error=str(exc))
             body = ""
         if not body:
             continue
