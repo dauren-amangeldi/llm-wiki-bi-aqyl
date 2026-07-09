@@ -25,11 +25,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 def get_user_key(request: Request) -> str:
-    """Stable per-user key for chat history, taken from frontend headers.
+    """Stable per-user key for chat history.
 
-    The frontend sends ``X-User-Email``; fall back to ``X-User-Id`` and finally
-    a shared ``anon`` bucket so history still works without auth.
+    With ``AUTH_ENABLED`` it is the email from the verified Keycloak token
+    (raises 401 if the bearer token is missing/invalid). Otherwise (dev/demo)
+    it falls back to the ``X-User-Email`` / ``X-User-Id`` header.
     """
+    if settings.auth_enabled:
+        from llm_wiki.api.auth import require_email
+
+        return require_email(request)
     return (
         request.headers.get("X-User-Email")
         or request.headers.get("X-User-Id")
@@ -47,6 +52,26 @@ async def get_current_user(
     ``dev-user``.  Creates the user row on first sight so ``user.id`` is
     always persisted for dev-user identity.
     """
+    if settings.auth_enabled:
+        from llm_wiki.api.auth import bearer_token, claims_email, verify_access_token
+        from llm_wiki.storage.metadata import access_for_email
+
+        token = bearer_token(request)
+        if not token:
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        claims = verify_access_token(token)
+        user_id = claims_email(claims)
+        # Whitelist + role come from the DB (allowed_users), not Keycloak roles.
+        decision = await access_for_email(session, user_id)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=403, detail="Access is not allowed for this account"
+            )
+        name = claims.get("name") or claims.get("preferred_username") or user_id
+        role = "admin" if decision.is_admin else "employee"
+        user = await get_or_create_user(session, user_id, name, role)
+        return CurrentUser(id=user.id, name=user.name, role=user.role)
+
     user_id = request.headers.get("X-User-Id", "dev-user")
     name = request.headers.get("X-User-Name", "Dev User")
     role = request.headers.get("X-User-Role", "admin")

@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://llmwiki:llmwiki@postgres:5432/llmwiki"
     )
+    # Managed-DB parts (the platform injects these). When POSTGRES_HOST is set,
+    # DATABASE_URL is assembled from them (see the validator below).
+    postgres_host: str = ""
+    postgres_port: int = 5432
+    postgres_user: str = "llmwiki"
+    postgres_password: str = Field(default="", repr=False)
+    postgres_db: str = "llmwiki"
     data_dir: Path = Path("/app/data")
 
     # --- Vector store ---
@@ -52,6 +59,35 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 50
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     allowed_extensions: frozenset[str] = frozenset({".pdf", ".md"})
+
+    # --- Auth (Keycloak / OIDC) ---
+    # When False (default) the app trusts the X-User-Email header (dev/demo) —
+    # tests and the current demo rely on this. When True, API requests must
+    # carry a valid Keycloak access-token (bearer JWT, verified via JWKS).
+    auth_enabled: bool = False
+    keycloak_url: str = "https://sso.test.bi.group"
+    keycloak_realm: str = "bi-group"
+    # Full realm issuer (e.g. https://sso.test.bi.group/realms/bi-group). When
+    # set (KEYCLOAK_ISSUER) it overrides KEYCLOAK_URL + KEYCLOAK_REALM.
+    keycloak_issuer: str = ""
+    keycloak_client_id: str = "ai-office-bi-aqyl"
+    keycloak_client_secret: str = Field(default="", repr=False)
+    # Public browser-facing origin of this app, used for the OIDC redirect_uri
+    # and the post-login redirect (e.g. https://ai-office.bi.group). Empty →
+    # derived from the incoming request. Also accepts FRONTEND_URL.
+    public_base_url: str = Field(
+        default="", validation_alias=AliasChoices("PUBLIC_BASE_URL", "FRONTEND_URL")
+    )
+
+    @model_validator(mode="after")
+    def _assemble_database_url(self) -> "Settings":
+        """Build DATABASE_URL from POSTGRES_* parts when POSTGRES_HOST is given."""
+        if self.postgres_host:
+            self.database_url = (
+                f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            )
+        return self
 
     # --- Wiki output language ---
     wiki_language: str = "ru"
@@ -117,6 +153,31 @@ class Settings(BaseSettings):
     def issues_path(self) -> Path:
         """Path to the Lint Agent issues report."""
         return self.data_dir / "issues.md"
+
+    # --- Keycloak / OIDC derived URLs ---
+    @property
+    def keycloak_realm_url(self) -> str:
+        """Realm base URL / expected ``iss`` — the KEYCLOAK_ISSUER override, or
+        assembled from KEYCLOAK_URL + KEYCLOAK_REALM."""
+        return (
+            self.keycloak_issuer.rstrip("/")
+            or f"{self.keycloak_url.rstrip('/')}/realms/{self.keycloak_realm}"
+        )
+
+    @property
+    def keycloak_jwks_url(self) -> str:
+        """JWKS endpoint used to verify token signatures."""
+        return f"{self.keycloak_realm_url}/protocol/openid-connect/certs"
+
+    @property
+    def keycloak_auth_url(self) -> str:
+        """Authorization endpoint (login redirect)."""
+        return f"{self.keycloak_realm_url}/protocol/openid-connect/auth"
+
+    @property
+    def keycloak_token_url(self) -> str:
+        """Token endpoint (code → token exchange)."""
+        return f"{self.keycloak_realm_url}/protocol/openid-connect/token"
 
     @property
     def usage_log_path(self) -> Path:

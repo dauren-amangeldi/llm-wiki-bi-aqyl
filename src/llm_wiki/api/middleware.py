@@ -16,11 +16,20 @@ from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
 import structlog
+from fastapi import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 _logger = structlog.get_logger(__name__)
+
+# Paths reachable without a token even when auth is enabled: liveness/readiness
+# probes, API docs, and the OIDC login handshake itself (which is how a caller
+# obtains a token in the first place).
+_OPEN_EXACT = frozenset(
+    {"/", "/health", "/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
+)
+_OPEN_PREFIXES = ("/api/v1/auth/",)
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
@@ -65,3 +74,65 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             request_id=request_id,
         )
         return response
+
+
+class AuthGateMiddleware(BaseHTTPMiddleware):
+    """Enforce Keycloak auth + the access whitelist on every protected route.
+
+    When ``settings.auth_enabled`` is off (dev/demo, the default) this is a
+    no-op. When on, each request outside the open-list must carry a valid
+    Keycloak access token (``isBIGroupPerson``) whose email is whitelisted and
+    not blocked (``allowed_users``); otherwise the request is rejected with 401
+    (missing/invalid token) or 403 (not allowed). This is the single, uniform
+    gate — individual routes need not re-check — so upload/wiki/case endpoints
+    are protected too, not just ask/chat.
+
+    On success the verified identity is stashed on ``request.state``
+    (``user_email``, ``user_is_admin``, ``user_claims``) for downstream deps.
+    """
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        from llm_wiki.config import settings
+
+        if not settings.auth_enabled:
+            return await call_next(request)
+
+        path = request.url.path
+        if (
+            request.method == "OPTIONS"  # CORS preflight
+            or path in _OPEN_EXACT
+            or path.startswith(_OPEN_PREFIXES)
+        ):
+            return await call_next(request)
+
+        from llm_wiki.api.auth import bearer_token, claims_email, verify_access_token
+
+        token = bearer_token(request)
+        if not token:
+            return JSONResponse({"detail": "Missing bearer token"}, status_code=401)
+        try:
+            claims = verify_access_token(token)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+        email = claims_email(claims)
+
+        from llm_wiki.api.deps import _SessionLocal
+        from llm_wiki.storage.metadata import access_for_email
+
+        async with _SessionLocal() as session:
+            decision = await access_for_email(session, email)
+        if not decision.allowed:
+            _logger.info("access_denied", email=email, reason=decision.reason)
+            return JSONResponse(
+                {"detail": "Access is not allowed for this account"}, status_code=403
+            )
+
+        request.state.user_email = email
+        request.state.user_is_admin = decision.is_admin
+        request.state.user_claims = claims
+        return await call_next(request)

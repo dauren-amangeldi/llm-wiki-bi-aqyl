@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from llm_wiki.api.deps import _engine
-from llm_wiki.api.middleware import RequestIDMiddleware
+from llm_wiki.api.middleware import AuthGateMiddleware, RequestIDMiddleware
 from llm_wiki.api.routes import router
 from llm_wiki.api.v1 import router as v1_router
 from llm_wiki.config import settings
@@ -46,12 +46,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from llm_wiki.api.deps import _SessionLocal
 
     async with _SessionLocal() as session:
-        from llm_wiki.storage.metadata import seed_skills, skills_count
+        from llm_wiki.storage.metadata import (
+            allowed_users_count,
+            seed_allowed_users,
+            seed_skills,
+            skills_count,
+        )
 
         if await skills_count(session) == 0:
             inserted = await seed_skills(session)
             if inserted:
                 logger.info("skills_startup_seed", inserted=inserted)
+
+        # Seed the access whitelist (demo account) on an empty DB. Enforcement
+        # only kicks in when AUTH_ENABLED; seeding is harmless either way.
+        if await allowed_users_count(session) == 0:
+            seeded = await seed_allowed_users(session)
+            if seeded:
+                logger.info("allowed_users_startup_seed", inserted=seeded)
 
     logger.info("startup_complete", service=settings.service_name)
     yield
@@ -67,6 +79,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Starlette runs middleware outermost-first in reverse registration order, so
+# register inner→outer: AuthGate (its 401/403 must still receive CORS headers)
+# → RequestID (logs the outcome) → CORS (outermost, sets headers on every
+# response). AuthGate is a no-op unless AUTH_ENABLED.
+app.add_middleware(AuthGateMiddleware)
+app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -74,7 +92,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(RequestIDMiddleware)
 app.include_router(router, prefix="/api/v1")
 app.include_router(v1_router, prefix="/api/v1")
 

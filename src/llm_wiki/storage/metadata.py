@@ -4,12 +4,14 @@ Uses SQLAlchemy async ORM (psycopg driver). Tables are created on startup via
 ``Base.metadata.create_all``; schema changes should move to Alembic when needed.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import structlog
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Index,
     Integer,
@@ -155,6 +157,42 @@ class User(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+class AllowedUser(Base):
+    """Access-control list for Keycloak-authenticated callers (LW-auth).
+
+    When ``AUTH_ENABLED`` is on, a verified Keycloak identity (``isBIGroupPerson``)
+    must additionally have a matching, non-``blocked`` row here to use the API —
+    a strict whitelist. ``is_admin`` grants the admin role (source of truth for
+    roles, independent of Keycloak realm roles).
+
+    The gate works in both directions: presence (with ``blocked=False``) allows;
+    ``blocked=True`` denies even a whitelisted account. Blocking is a rare, one-off
+    action — flip ``blocked`` (via the ``manage_access`` script or a data
+    migration) and keep the row for an audit trail rather than deleting it.
+    Emails are stored lower-cased.
+    """
+
+    __tablename__ = "allowed_users"
+
+    email: Mapped[str] = mapped_column(String, primary_key=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    note: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+@dataclass(frozen=True)
+class AccessDecision:
+    """Outcome of the whitelist check for a verified identity."""
+
+    allowed: bool
+    is_admin: bool
+    reason: str  # "ok" | "not_whitelisted" | "blocked"
 
 
 class FileRecord(Base):
@@ -515,6 +553,70 @@ async def ensure_dev_user(session: AsyncSession) -> User:
     return await get_or_create_user(
         session, _DEV_USER_ID, _DEV_USER_NAME, _DEV_USER_ROLE
     )
+
+
+# ---------------------------------------------------------------------------
+# Access control — Keycloak whitelist + admin roles (LW-auth)
+# ---------------------------------------------------------------------------
+
+# Seed for a fresh database. The demo account is whitelisted + admin so the app
+# is usable out of the box; its Keycloak password is set in Keycloak, not here.
+_DEFAULT_ALLOWED_SEEDS: list[dict[str, object]] = [
+    {"email": "demo@bi.group", "is_admin": True, "note": "seeded demo account"},
+]
+
+
+def _norm_email(email: str) -> str:
+    """Normalise an email for stable lookups (trim + lowercase)."""
+    return email.strip().lower()
+
+
+async def get_allowed_user(session: AsyncSession, email: str) -> AllowedUser | None:
+    """Return the access-list row for *email* (case-insensitive), or None."""
+    result = await session.execute(
+        select(AllowedUser).where(AllowedUser.email == _norm_email(email))
+    )
+    return result.scalar_one_or_none()
+
+
+async def access_for_email(session: AsyncSession, email: str) -> AccessDecision:
+    """Decide whether *email* may use the API and whether it is an admin.
+
+    Strict whitelist: unknown email → denied; ``blocked`` row → denied;
+    otherwise allowed with ``is_admin`` taken from the row.
+    """
+    row = await get_allowed_user(session, email)
+    if row is None:
+        return AccessDecision(False, False, "not_whitelisted")
+    if row.blocked:
+        return AccessDecision(False, False, "blocked")
+    return AccessDecision(True, bool(row.is_admin), "ok")
+
+
+async def allowed_users_count(session: AsyncSession) -> int:
+    """Return the number of rows in the access-list table."""
+    result = await session.execute(select(AllowedUser))
+    return len(result.scalars().all())
+
+
+async def seed_allowed_users(session: AsyncSession) -> int:
+    """Insert the default access-list rows when absent (idempotent).
+
+    Returns the number of rows inserted.
+    """
+    inserted = 0
+    for row in _DEFAULT_ALLOWED_SEEDS:
+        email = _norm_email(str(row["email"]))
+        if await get_allowed_user(session, email) is not None:
+            continue
+        note = str(row.get("note") or "") or None
+        session.add(
+            AllowedUser(email=email, is_admin=bool(row.get("is_admin", False)), note=note)
+        )
+        inserted += 1
+    if inserted:
+        await session.commit()
+    return inserted
 
 
 # ---------------------------------------------------------------------------
