@@ -160,6 +160,40 @@ class TwinPreset(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
 
+class TwinSession(Base):
+    """A single Twins council run — which case, which personas (BI-AQYL-TWINS)."""
+
+    __tablename__ = "twin_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    case_id: Mapped[str] = mapped_column(String, nullable=False)
+    persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TwinMessage(Base):
+    """A single message in a Twins council transcript (BI-AQYL-TWINS)."""
+
+    __tablename__ = "twin_messages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    round: Mapped[str] = mapped_column(String, nullable=False)  # position | cross_exam | verdict
+    persona_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+
+
 
 # Roles grouped for frontend slug mapping (modes/* vs positions/*)
 _MODE_ROLES: frozenset[str] = frozenset({"advisor", "expert", "library"})
@@ -630,6 +664,60 @@ async def seed_twin_personas(session: AsyncSession) -> int:
 
     await session.commit()
     return inserted
+
+# Twin sessions/messages CRUD
+
+async def create_twin_session(
+    session: AsyncSession, *, case_id: str, persona_ids: list[str], created_by: str
+) -> TwinSession:
+    """Create and persist a new Twins council session."""
+    now = datetime.now(timezone.utc)
+    row = TwinSession(
+        id=f"twin-session-{int(now.timestamp() * 1000):x}",
+        case_id=case_id,
+        persona_ids=persona_ids,
+        created_by=created_by,
+        created_at=now,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def append_twin_message(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    round: str,
+    persona_id: str | None,
+    seq: int,
+    content: dict[str, object],
+) -> TwinMessage:
+    """Persist one message immediately, so a dropped stream keeps partial history."""
+    now = datetime.now(timezone.utc)
+    row = TwinMessage(
+        id=f"twin-msg-{session_id}-{seq}",
+        session_id=session_id,
+        round=round,
+        persona_id=persona_id,
+        seq=seq,
+        content=content,
+        created_at=now,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def get_twin_session_messages(session: AsyncSession, session_id: str) -> list[TwinMessage]:
+    """Return all messages for a session, ordered by seq."""
+    result = await session.execute(
+        select(TwinMessage).where(TwinMessage.session_id == session_id).order_by(TwinMessage.seq)
+    )
+    return list(result.scalars().all())
+
+
+
 
 async def append_chat_message(
     session: AsyncSession,
