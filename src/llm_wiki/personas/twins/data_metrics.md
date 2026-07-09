@@ -1,7 +1,7 @@
 +++
 id = "data_metrics"
 name = "Данные и измеримость"
-inspiration = "data-driven CTO"
+inspiration = "архетип дата-ориентированного техдиректора"
 track = "tech"
 pinned = true
 lens = "Метрики, отказ от нарратива без цифр"

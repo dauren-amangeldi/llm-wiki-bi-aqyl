@@ -29,4 +29,10 @@ def parse_persona_file(text: str) -> dict[str, Any]:
 def load_persona_files(directory: Path = PERSONAS_DIR) -> list[dict[str, Any]]:
     """Load and parse every `.md` persona file in *directory*, sorted by filename."""
     files = sorted(directory.glob("*.md"))
-    return [parse_persona_file(f.read_text(encoding="utf-8")) for f in files]
+    results = []
+    for f in files:
+        try:
+            results.append(parse_persona_file(f.read_text(encoding="utf-8")))
+        except Exception as exc:
+            raise ValueError(f"failed to parse persona file {f.name}: {exc}") from exc
+    return results

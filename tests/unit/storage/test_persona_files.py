@@ -51,3 +51,17 @@ def test_real_personas_directory_has_eleven_files_with_unique_ids() -> None:
     assert len(set(ids)) == 11
     assert "musk" in ids
     assert "data_metrics" in ids
+
+
+def test_load_persona_files_wraps_parse_errors_with_filename(tmp_path: Path) -> None:
+    # Malformed file: missing closing +++
+    bad_file = tmp_path / "malformed.md"
+    bad_file.write_text("+++\nid = 'test'\n", encoding="utf-8")
+
+    try:
+        load_persona_files(tmp_path)
+        assert False, "Expected ValueError to be raised"
+    except ValueError as exc:
+        error_msg = str(exc)
+        assert "malformed.md" in error_msg, f"Filename not in error: {error_msg}"
+        assert "failed to parse" in error_msg.lower()
