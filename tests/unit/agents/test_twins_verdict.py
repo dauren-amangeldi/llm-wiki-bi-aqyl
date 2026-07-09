@@ -29,15 +29,26 @@ def test_compute_decisive_voice_picks_highest_weighted_score() -> None:
     assert is_close is False
 
 
-def test_compute_decisive_voice_flags_close_split() -> None:
+def test_compute_decisive_voice_flags_close_split_under_threshold() -> None:
     weights = {
-        "musk": {"tech": 0.5, "real_estate": 0.5, "finance": 0.5},
-        "zell": {"tech": 0.5, "real_estate": 0.5, "finance": 0.5},
+        "musk": {"tech": 0.6, "real_estate": 0.5, "finance": 0.5},
+        "zell": {"tech": 0.5, "real_estate": 0.5, "finance": 0.55},
     }
     _decisive_id, is_close = _compute_decisive_voice(
         ["musk", "zell"], weights, {"tech": 0.34, "real_estate": 0.33, "finance": 0.33}
     )
     assert is_close is True
+
+
+def test_compute_decisive_voice_not_close_split_over_threshold() -> None:
+    weights = {
+        "musk": {"tech": 1.0, "real_estate": 0.0, "finance": 0.0},
+        "zell": {"tech": 0.0, "real_estate": 1.0, "finance": 1.0},
+    }
+    _decisive_id, is_close = _compute_decisive_voice(
+        ["musk", "zell"], weights, {"tech": 0.34, "real_estate": 0.33, "finance": 0.33}
+    )
+    assert is_close is False
 
 
 def _persona(persona_id: str) -> TwinPersonaData:

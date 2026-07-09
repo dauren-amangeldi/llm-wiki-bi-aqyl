@@ -207,6 +207,7 @@ class VerdictResult:
     domain_distribution: dict[str, float]
     decisive_voice: str
     consensus_reached_early: bool
+    is_close_split: bool
 
 
 class TwinsAgent(BaseAgent):
@@ -370,7 +371,7 @@ class TwinsAgent(BaseAgent):
         data = json.loads(text)
 
         domain_weights = {p.id: p.domain_weights for p in personas}
-        decisive_id, _is_close = _compute_decisive_voice(
+        decisive_id, is_close_split = _compute_decisive_voice(
             [p.id for p in personas], domain_weights, data["domain_distribution"]
         )
         consensus_reached_early = bool(cross_exams) and all(c.disagreement_forced for c in cross_exams)
@@ -383,4 +384,5 @@ class TwinsAgent(BaseAgent):
             domain_distribution=data["domain_distribution"],
             decisive_voice=decisive_id,
             consensus_reached_early=consensus_reached_early,
+            is_close_split=is_close_split,
         )
