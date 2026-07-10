@@ -111,3 +111,37 @@ async def test_twin_suggest_returns_null_without_similar_cases(client: AsyncClie
 
     assert resp.status_code == 200
     assert resp.json() == {"suggestion": None}
+
+
+async def test_twin_sessions_outcome_roundtrip(client: AsyncClient, db_engine) -> None:
+    from llm_wiki.storage.metadata import create_twin_session
+
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        bind=db_engine, expire_on_commit=False, autoflush=False
+    )
+    async with session_factory() as s:
+        ts = await create_twin_session(
+            s, case_id="case-1", persona_ids=["musk"], created_by="u1"
+        )
+
+    listed = await client.get("/api/v1/twin/sessions", params={"case_id": "case-1"})
+    assert listed.status_code == 200
+    assert listed.json()[0]["id"] == ts.id
+    assert listed.json()[0]["outcome"] == ""
+
+    resp = await client.patch(
+        f"/api/v1/twin/sessions/{ts.id}/outcome",
+        json={"outcome": "confirmed", "note": "риск реализовался, как и предупреждали"},
+    )
+    assert resp.status_code == 200
+
+    listed = await client.get("/api/v1/twin/sessions", params={"case_id": "case-1"})
+    assert listed.json()[0]["outcome"] == "confirmed"
+    assert "риск" in listed.json()[0]["outcome_note"]
+
+
+async def test_twin_session_outcome_404_for_unknown_session(client: AsyncClient) -> None:
+    resp = await client.patch(
+        "/api/v1/twin/sessions/nope/outcome", json={"outcome": "refuted"}
+    )
+    assert resp.status_code == 404

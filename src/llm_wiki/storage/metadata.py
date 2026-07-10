@@ -411,6 +411,11 @@ class TwinSession(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
     )
+    # Outcome journal (R2-5): did the council's verdict hold up in reality?
+    # "" = not reviewed yet; the calibration data no competitor can copy.
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="")  # "" | confirmed | refuted
+    outcome_note: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    outcome_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TwinMessage(Base):
@@ -1157,6 +1162,30 @@ async def find_similar_cases(
     )
     rows = (await session.execute(stmt)).all()
     return [(r.id, r.title, round((1 - r.distance) * 100, 1)) for r in rows]
+
+
+async def list_twin_sessions(session: AsyncSession, case_id: str) -> list[TwinSession]:
+    """Past councils for a case, newest first (outcome journal view)."""
+    stmt = (
+        select(TwinSession)
+        .where(TwinSession.case_id == case_id)
+        .order_by(TwinSession.created_at.desc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def set_twin_session_outcome(
+    session: AsyncSession, session_id: str, outcome: str, note: str = ""
+) -> bool:
+    """Record whether a council's verdict held up. False if the session is unknown."""
+    row = await session.get(TwinSession, session_id)
+    if not row:
+        return False
+    row.outcome = outcome
+    row.outcome_note = note
+    row.outcome_at = datetime.now(UTC)
+    await session.commit()
+    return True
 
 
 async def suggest_twin_personas(

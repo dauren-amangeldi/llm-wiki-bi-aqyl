@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
+from typing import Literal
 
 import structlog
 from fastapi import Depends, HTTPException, Query
@@ -23,6 +24,8 @@ from llm_wiki.storage.metadata import (
     get_twin_persona,
     list_twin_personas,
     list_twin_presets,
+    list_twin_sessions,
+    set_twin_session_outcome,
     suggest_twin_personas,
 )
 
@@ -76,6 +79,38 @@ async def suggest_council(
     back to the regular picker (same silent-empty convention as /similar).
     """
     return {"suggestion": await suggest_twin_personas(db, case_id)}
+
+
+class OutcomeRequest(BaseModel):
+    outcome: Literal["confirmed", "refuted"]
+    note: str = Field(default="", max_length=1000)
+
+
+@router.get("/twin/sessions")
+async def get_twin_sessions(
+    case_id: str = Query(...), db: AsyncSession = Depends(get_db)
+) -> list[dict[str, object]]:
+    """Past councils of a case with their outcome-journal state, newest first."""
+    return [
+        {
+            "id": s.id,
+            "persona_ids": s.persona_ids,
+            "created_at": s.created_at.isoformat(),
+            "outcome": s.outcome,
+            "outcome_note": s.outcome_note,
+        }
+        for s in await list_twin_sessions(db, case_id)
+    ]
+
+
+@router.patch("/twin/sessions/{session_id}/outcome")
+async def patch_twin_session_outcome(
+    session_id: str, body: OutcomeRequest, db: AsyncSession = Depends(get_db)
+) -> dict[str, bool]:
+    """Record whether the council's verdict held up in reality."""
+    if not await set_twin_session_outcome(db, session_id, body.outcome, body.note):
+        raise HTTPException(status_code=404, detail="twin session not found")
+    return {"ok": True}
 
 
 @router.post(
