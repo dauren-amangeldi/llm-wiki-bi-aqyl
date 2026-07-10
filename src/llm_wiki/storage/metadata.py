@@ -132,6 +132,33 @@ class IssuesReport(Base):
     )
 
 
+class LLMCallLog(Base):
+    """Outcome of every LLM call — success, final failure, or budget block.
+
+    Complements usage.log (successes only): this is where error rate and
+    latency percentiles come from. Written synchronously from LLMClient via
+    get_sync_engine(); a failed write must never break the LLM call itself.
+    """
+
+    __tablename__ = "llm_call_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    file_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    agent_type: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)  # ok | error | blocked
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    error_type: Mapped[str] = mapped_column(String, nullable=False, default="")
+    error_message: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+
+
 # Synchronous engine for the (synchronous) vector stores. The app's main engine
 # is async; embedding upsert/query are sync (LLMClient.embed is sync), so they
 # share their own sync psycopg engine against the same DATABASE_URL.
@@ -1109,5 +1136,48 @@ async def find_similar_cases(
     )
     rows = (await session.execute(stmt)).all()
     return [(r.id, r.title, round((1 - r.distance) * 100, 1)) for r in rows]
+
+
+def log_llm_call(
+    *,
+    file_id: str,
+    agent_type: str,
+    model: str,
+    status: str,
+    duration_ms: int,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cost_usd: float = 0.0,
+    attempts: int = 1,
+    error: Exception | None = None,
+) -> None:
+    """Record an LLM call outcome in llm_call_log. Never raises.
+
+    Sync on purpose: called from both async complete() and sync embed() in
+    LLMClient without event-loop acrobatics. The insert takes ~1 ms against
+    a local Postgres — negligible next to a multi-second LLM call.
+    """
+    from sqlalchemy.orm import Session as SyncSession
+
+    try:
+        with SyncSession(get_sync_engine()) as s:
+            s.add(
+                LLMCallLog(
+                    file_id=file_id,
+                    agent_type=agent_type,
+                    model=model,
+                    status=status,
+                    duration_ms=duration_ms,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                    attempts=attempts,
+                    error_type=type(error).__name__ if error else "",
+                    error_message=str(error)[:500] if error else "",
+                )
+            )
+            s.commit()
+    except Exception as exc:  # noqa: BLE001 — telemetry must not break the call
+        logger.warning("llm_call_log_write_failed", error=str(exc))
 
 

@@ -208,6 +208,8 @@ class LLMClient:
         model = settings.embedding_model
         batch_size = settings.embedding_batch_size
 
+        from llm_wiki.storage.metadata import log_llm_call
+
         all_vectors: list[list[float]] = []
         # Process in batches to stay within OpenAI's input limit
         for batch_start in range(0, len(texts), batch_size):
@@ -246,6 +248,16 @@ class LLMClient:
                         duration_ms=duration_ms,
                     )
                     self._write_usage(usage)
+                    log_llm_call(
+                        file_id=file_id,
+                        agent_type="embed",
+                        model=model,
+                        status="ok",
+                        duration_ms=duration_ms,
+                        input_tokens=input_tokens,
+                        cost_usd=cost,
+                        attempts=attempt + 1,
+                    )
                     all_vectors.extend(item.embedding for item in response.data)
                     logger.info(
                         "embed_batch_done",
@@ -256,6 +268,15 @@ class LLMClient:
                     break  # success — move to next batch
                 except Exception as exc:  # noqa: BLE001
                     if isinstance(exc, self._non_retryable):
+                        log_llm_call(
+                            file_id=file_id,
+                            agent_type="embed",
+                            model=model,
+                            status="error",
+                            duration_ms=int((time.monotonic() - start) * 1000),
+                            attempts=attempt + 1,
+                            error=exc,
+                        )
                         raise
                     last_exc = exc
                     if attempt < self._MAX_RETRIES - 1:
@@ -270,6 +291,15 @@ class LLMClient:
                         )
                         time.sleep(backoff)
             else:
+                log_llm_call(
+                    file_id=file_id,
+                    agent_type="embed",
+                    model=model,
+                    status="error",
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    attempts=self._MAX_RETRIES,
+                    error=last_exc,
+                )
                 raise last_exc or RuntimeError("embed() failed after retries")
 
         return all_vectors
@@ -328,12 +358,21 @@ class LLMClient:
         """
         # Budget check — runs before any API call to avoid wasting tokens.
         from llm_wiki.quality.budget import BudgetExceeded
+        from llm_wiki.storage.metadata import log_llm_call
 
         try:
             self._budget.check()
         except BudgetExceeded as exc:
             logger.error(
                 "llm_call_blocked_by_budget", agent_type=agent_type, error=str(exc)
+            )
+            log_llm_call(
+                file_id=file_id,
+                agent_type=agent_type,
+                model=self._model,
+                status="blocked",
+                duration_ms=0,
+                error=exc,
             )
             raise
 
@@ -359,6 +398,17 @@ class LLMClient:
                     duration_ms=duration_ms,
                 )
                 self._write_usage(usage)
+                log_llm_call(
+                    file_id=file_id,
+                    agent_type=agent_type,
+                    model=self._model,
+                    status="ok",
+                    duration_ms=duration_ms,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost,
+                    attempts=attempt + 1,
+                )
                 logger.info(
                     "llm_call",
                     file_id=file_id,
@@ -371,6 +421,15 @@ class LLMClient:
 
             except Exception as exc:  # noqa: BLE001
                 if isinstance(exc, self._non_retryable):
+                    log_llm_call(
+                        file_id=file_id,
+                        agent_type=agent_type,
+                        model=self._model,
+                        status="error",
+                        duration_ms=int((time.monotonic() - start) * 1000),
+                        attempts=attempt + 1,
+                        error=exc,
+                    )
                     raise
                 last_exc = exc
                 if attempt < self._MAX_RETRIES - 1:
@@ -384,6 +443,15 @@ class LLMClient:
                     )
                     await asyncio.sleep(backoff)
 
+        log_llm_call(
+            file_id=file_id,
+            agent_type=agent_type,
+            model=self._model,
+            status="error",
+            duration_ms=int((time.monotonic() - start) * 1000),
+            attempts=self._MAX_RETRIES,
+            error=last_exc,
+        )
         raise last_exc or RuntimeError("LLM call failed after retries with no recorded exception")
 
     # ------------------------------------------------------------------
