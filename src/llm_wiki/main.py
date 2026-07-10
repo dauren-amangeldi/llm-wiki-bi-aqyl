@@ -65,6 +65,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if seeded:
                 logger.info("allowed_users_startup_seed", inserted=seeded)
 
+        from llm_wiki.storage.metadata import seed_twin_personas, twin_personas_count
+
+        if await twin_personas_count(session) == 0:
+            inserted = await seed_twin_personas(session)
+            if inserted:
+                logger.info("twin_personas_startup_seed", inserted=inserted)
+
     logger.info("startup_complete", service=settings.service_name)
     yield
     logger.info("shutdown", service=settings.service_name)
