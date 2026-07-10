@@ -79,6 +79,12 @@ class Settings(BaseSettings):
         default="", validation_alias=AliasChoices("PUBLIC_BASE_URL", "FRONTEND_URL")
     )
 
+    # --- Hidden ops dashboard ---
+    # Separate from Keycloak/X-User-* auth on purpose: a small internal tool
+    # known only to whoever holds this token. Empty (default) disables the
+    # route entirely — every request 404s, as if it didn't exist.
+    ops_dashboard_token: str = Field(default="", repr=False)
+
     @model_validator(mode="after")
     def _assemble_database_url(self) -> "Settings":
         """Build DATABASE_URL from POSTGRES_* parts when POSTGRES_HOST is given."""
