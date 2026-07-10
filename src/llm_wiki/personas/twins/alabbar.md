@@ -2,6 +2,7 @@
 id = "alabbar"
 name = "Видение"
 inspiration = "вдохновлён Mohamed Alabbar"
+real_name = "Mohamed Alabbar"
 track = "dev"
 pinned = false
 lens = "Лендмарк, бренд, эмерджинг-рынок"

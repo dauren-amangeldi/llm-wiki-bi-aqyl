@@ -2,6 +2,7 @@
 id = "hines"
 name = "Качество"
 inspiration = "вдохновлён Gerald Hines"
+real_name = "Gerald Hines"
 track = "dev"
 pinned = false
 lens = "Продукт на десятилетия"

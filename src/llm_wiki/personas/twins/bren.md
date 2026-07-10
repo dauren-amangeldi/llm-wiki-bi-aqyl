@@ -2,6 +2,7 @@
 id = "bren"
 name = "Земля"
 inspiration = "вдохновлён Donald Bren"
+real_name = "Donald Bren"
 track = "dev"
 pinned = false
 lens = "Терпеливая стоимость, master-plan"

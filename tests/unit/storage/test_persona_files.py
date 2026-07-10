@@ -10,6 +10,7 @@ _SAMPLE = """+++
 id = "test_persona"
 name = "Тест"
 inspiration = "test fixture"
+real_name = "Test Person"
 track = "tech"
 pinned = true
 lens = "test lens"
@@ -65,3 +66,12 @@ def test_load_persona_files_wraps_parse_errors_with_filename(tmp_path: Path) -> 
         error_msg = str(exc)
         assert "malformed.md" in error_msg, f"Filename not in error: {error_msg}"
         assert "failed to parse" in error_msg.lower()
+
+
+def test_real_personas_all_have_a_real_name() -> None:
+    rows = load_persona_files(PERSONAS_DIR)
+    for row in rows:
+        assert row["real_name"], f"{row['id']} is missing real_name"
+    ids_to_names = {r["id"]: r["real_name"] for r in rows}
+    assert ids_to_names["musk"] == "Elon Musk"
+    assert ids_to_names["data_metrics"] == "DJ Patil"

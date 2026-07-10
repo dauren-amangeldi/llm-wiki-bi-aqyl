@@ -2,6 +2,7 @@
 id = "huang"
 name = "Цифровой двойник"
 inspiration = "вдохновлён Jensen Huang"
+real_name = "Jensen Huang"
 track = "tech"
 pinned = true
 lens = "Симуляция, BIM, digital twin"

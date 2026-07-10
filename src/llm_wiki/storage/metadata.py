@@ -375,6 +375,7 @@ class TwinPersona(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     inspiration: Mapped[str] = mapped_column(String, nullable=False)
+    real_name: Mapped[str] = mapped_column(String, nullable=False, default="")
     track: Mapped[str] = mapped_column(String, nullable=False)  # "tech" | "dev"
     pinned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lens: Mapped[str] = mapped_column(String, nullable=False)
@@ -940,6 +941,7 @@ async def seed_twin_personas(session: AsyncSession) -> int:
                     id=persona_id,
                     name=str(row["name"]),
                     inspiration=str(row["inspiration"]),
+                    real_name=str(row["real_name"]),
                     track=str(row["track"]),
                     pinned=pinned_int,
                     lens=str(row["lens"]),
@@ -952,6 +954,7 @@ async def seed_twin_personas(session: AsyncSession) -> int:
         else:
             existing.name = str(row["name"])
             existing.inspiration = str(row["inspiration"])
+            existing.real_name = str(row["real_name"])
             existing.track = str(row["track"])
             existing.pinned = pinned_int
             existing.lens = str(row["lens"])

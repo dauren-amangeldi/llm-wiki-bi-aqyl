@@ -60,7 +60,8 @@ async def get_twin_roster(db: AsyncSession = Depends(get_db)) -> dict[str, objec
     return {
         "personas": [
             {
-                "id": p.id, "name": p.name, "inspiration": p.inspiration, "track": p.track,
+                "id": p.id, "name": p.name, "inspiration": p.inspiration,
+                "real_name": p.real_name, "track": p.track,
                 "pinned": bool(p.pinned), "lens": p.lens, "avatar_init": p.avatar_init,
             }
             for p in personas

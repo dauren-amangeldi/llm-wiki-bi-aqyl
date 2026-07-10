@@ -2,6 +2,7 @@
 id = "musk"
 name = "Первопринципы"
 inspiration = "вдохновлён Elon Musk"
+real_name = "Elon Musk"
 track = "tech"
 pinned = true
 lens = "Радикальная себестоимость, автоматизация"

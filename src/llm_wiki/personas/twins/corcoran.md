@@ -2,6 +2,7 @@
 id = "corcoran"
 name = "Продажи"
 inspiration = "вдохновлён Barbara Corcoran"
+real_name = "Barbara Corcoran"
 track = "dev"
 pinned = false
 lens = "Спрос, позиционирование"

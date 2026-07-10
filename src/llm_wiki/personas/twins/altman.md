@@ -2,6 +2,7 @@
 id = "altman"
 name = "AI-масштабирование"
 inspiration = "вдохновлён Sam Altman"
+real_name = "Sam Altman"
 track = "tech"
 pinned = true
 lens = "Что изменит AI за 1-2 года"

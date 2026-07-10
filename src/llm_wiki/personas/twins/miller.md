@@ -2,6 +2,7 @@
 id = "miller"
 name = "Себестоимость"
 inspiration = "вдохновлён Stuart Miller"
+real_name = "Stuart Miller"
 track = "dev"
 pinned = false
 lens = "Поток, юнит-экономика, скорость"

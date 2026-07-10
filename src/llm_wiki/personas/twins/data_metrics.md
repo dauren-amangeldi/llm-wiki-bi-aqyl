@@ -1,7 +1,8 @@
 +++
 id = "data_metrics"
 name = "Данные и измеримость"
-inspiration = "архетип дата-ориентированного техдиректора"
+inspiration = "вдохновлён DJ Patil"
+real_name = "DJ Patil"
 track = "tech"
 pinned = true
 lens = "Метрики, отказ от нарратива без цифр"

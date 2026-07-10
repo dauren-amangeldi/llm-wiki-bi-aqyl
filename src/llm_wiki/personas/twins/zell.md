@@ -2,6 +2,7 @@
 id = "zell"
 name = "Риск и цикл"
 inspiration = "вдохновлён Sam Zell"
+real_name = "Sam Zell"
 track = "dev"
 pinned = false
 lens = "Тайминг, ликвидность, «стоит ли»"

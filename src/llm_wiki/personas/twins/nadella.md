@@ -2,6 +2,7 @@
 id = "nadella"
 name = "Внедрение"
 inspiration = "вдохновлён Satya Nadella"
+real_name = "Satya Nadella"
 track = "tech"
 pinned = true
 lens = "Adoption, культура, платформа"
