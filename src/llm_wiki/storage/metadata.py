@@ -5,7 +5,7 @@ Uses SQLAlchemy async ORM (psycopg driver). Tables are created on startup via
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 from pgvector.sqlalchemy import Vector
@@ -19,6 +19,8 @@ from sqlalchemy import (
     Text,
     create_engine,
     select,
+)
+from sqlalchemy import (
     update as sa_update,
 )
 from sqlalchemy.engine import Engine
@@ -26,7 +28,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from llm_wiki.config import settings
-
 
 logger = structlog.get_logger(__name__)
 
@@ -57,7 +58,7 @@ class HeadingEmbedding(Base):
     level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     file_id: Mapped[str] = mapped_column(String, nullable=False, default="", index=True)
     last_indexed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     embedding: Mapped[list[float]] = mapped_column(Vector(_EMBED_DIM), nullable=False)
 
@@ -115,7 +116,7 @@ class WikiIndexEntry(Base):
     section: Mapped[str] = mapped_column(String, nullable=False, default="General")
     level: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
 
@@ -127,7 +128,7 @@ class IssuesReport(Base):
     section: Mapped[str] = mapped_column(String, primary_key=True)  # auto-detected | llm-flagged
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
 
@@ -155,7 +156,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String, nullable=False, default="employee")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -182,7 +183,7 @@ class AllowedUser(Base):
     note: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -217,12 +218,12 @@ class FileRecord(Base):
     cost_usd: Mapped[float | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -236,12 +237,40 @@ class CaseRecord(Base):
     doc_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class CaseEmbedding(Base):
+    """Mean-pooled embedding over a case's document chunks.
+
+    Recomputed whenever a case's doc_ids change (see refresh_case_embedding).
+    Powers "cases similar to this one" search the same way heading/chunk
+    embeddings power wiki search — cosine distance over an HNSW index.
+    """
+
+    __tablename__ = "case_embeddings"
+
+    case_id: Mapped[str] = mapped_column(String, primary_key=True)
+    embedding: Mapped[list[float]] = mapped_column(Vector(_EMBED_DIM), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_case_embeddings_vec",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
 
@@ -264,7 +293,7 @@ class ChatRecord(Base):
     model_name: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         index=True,
     )
 
@@ -281,8 +310,8 @@ class Skill(Base):
     active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -564,7 +593,7 @@ async def update_file_status(
     await session.execute(
         sa_update(FileRecord)
         .where(FileRecord.file_id == file_id)
-        .values(status=new_status, updated_at=datetime.now(timezone.utc))
+        .values(status=new_status, updated_at=datetime.now(UTC))
     )
     await session.commit()
 
@@ -588,11 +617,11 @@ async def append_state_history(
     if record is None:
         return
     history = list(record.state_history or [])
-    history.append({"state": state, "at": datetime.now(timezone.utc).isoformat()})
+    history.append({"state": state, "at": datetime.now(UTC).isoformat()})
     await session.execute(
         sa_update(FileRecord)
         .where(FileRecord.file_id == file_id)
-        .values(state_history=history, updated_at=datetime.now(timezone.utc))
+        .values(state_history=history, updated_at=datetime.now(UTC))
     )
     await session.commit()
 
@@ -756,7 +785,7 @@ async def update_skill(
     skill = await get_skill(session, role)
     if skill is None:
         return None
-    values: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
+    values: dict[str, object] = {"updated_at": datetime.now(UTC)}
     if system_prompt is not None:
         values["system_prompt"] = system_prompt
     if active is not None:
@@ -1009,5 +1038,76 @@ async def clear_chat_messages(
         await session.delete(row)
     await session.commit()
     return len(rows)
+
+
+async def refresh_case_embedding(session: AsyncSession, case_id: str) -> bool:
+    """Recompute and upsert a case's mean-pooled embedding from its documents' chunks.
+
+    Call this whenever a case's doc_ids change. A case created with documents
+    that are still mid-ingestion (no chunk embeddings yet) simply gets no
+    embedding until the next refresh — known limitation, not handled by a
+    pipeline hook yet.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        case_id: The case to refresh.
+
+    Returns:
+        True if an embedding was computed and stored, False if the case has
+        no documents yet, or none of them have chunk embeddings yet.
+    """
+    case = await session.get(CaseRecord, case_id)
+    if not case or not case.doc_ids:
+        return False
+
+    rows = (
+        await session.execute(
+            select(ChunkEmbedding.embedding).where(ChunkEmbedding.file_id.in_(case.doc_ids))
+        )
+    ).scalars().all()
+    if not rows:
+        return False
+
+    dim = len(rows[0])
+    mean = [sum(v[i] for v in rows) / len(rows) for i in range(dim)]
+
+    existing = await session.get(CaseEmbedding, case_id)
+    if existing:
+        existing.embedding = mean
+    else:
+        session.add(CaseEmbedding(case_id=case_id, embedding=mean))
+    await session.commit()
+    return True
+
+
+async def find_similar_cases(
+    session: AsyncSession, case_id: str, limit: int = 5
+) -> list[tuple[str, str, float]]:
+    """Find cases most similar to *case_id* by cosine distance over case embeddings.
+
+    Args:
+        session: Active async SQLAlchemy session.
+        case_id: The case to compare against.
+        limit: Max number of matches to return.
+
+    Returns:
+        List of (case_id, title, similarity_pct) tuples, most similar first.
+        Empty if *case_id* has no embedding yet (no docs, or docs still
+        processing).
+    """
+    target = await session.get(CaseEmbedding, case_id)
+    if not target:
+        return []
+
+    distance = CaseEmbedding.embedding.cosine_distance(target.embedding)
+    stmt = (
+        select(CaseRecord.id, CaseRecord.title, distance.label("distance"))
+        .join(CaseEmbedding, CaseEmbedding.case_id == CaseRecord.id)
+        .where(CaseEmbedding.case_id != case_id)
+        .order_by(distance)
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [(r.id, r.title, round((1 - r.distance) * 100, 1)) for r in rows]
 
 
