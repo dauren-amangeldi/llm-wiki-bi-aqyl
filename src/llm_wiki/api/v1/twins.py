@@ -1,4 +1,4 @@
-"""Twins council endpoints — persona roster and SSE deliberation (BI-AQYL-TWINS)."""
+"""Twins endpoints — persona roster and free-form multi-persona chat (BI-AQYL-TWINS)."""
 
 from __future__ import annotations
 
@@ -152,6 +152,8 @@ async def twin_chat_endpoint(
         session_row = await db.get(TwinSession, body.session_id)
         if session_row is None:
             raise HTTPException(404, "Unknown session_id")
+        if body.case_id != session_row.case_id:
+            raise HTTPException(400, "case_id does not match the session's case")
     else:
         session_row = await create_twin_session(
             db, case_id=body.case_id, persona_ids=body.persona_ids, created_by=user_key
@@ -216,9 +218,15 @@ async def twin_chat_endpoint(
     )
 
 
+class SummarizeRequest(BaseModel):
+    language: str = "ru"
+
+
 @router.post("/twin/sessions/{session_id}/summarize")
 async def summarize_twin_session(
-    session_id: str, db: AsyncSession = Depends(get_db)
+    session_id: str,
+    body: SummarizeRequest = SummarizeRequest(),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """Generate an on-demand verdict ("Подвести итог") from the chat so far."""
     session_row = await db.get(TwinSession, session_id)
@@ -252,7 +260,7 @@ async def summarize_twin_session(
     llm = LLMClient()
     try:
         agent = TwinsAgent(llm)
-        verdict = await agent.run_chat_verdict(personas, case_context, transcript, "ru")
+        verdict = await agent.run_chat_verdict(personas, case_context, transcript, body.language)
     finally:
         await llm.aclose()
 

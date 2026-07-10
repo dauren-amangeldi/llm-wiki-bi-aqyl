@@ -163,6 +163,108 @@ async def test_twin_chat_continues_an_existing_session(client: AsyncClient) -> N
     assert mock_agent.route_message.await_count == 2
 
 
+async def test_twin_chat_second_responder_sees_first_responders_reply(
+    client: AsyncClient,
+) -> None:
+    """The whole point of sequential-with-visibility: persona 2 must see persona 1's
+    reply in its `chat_transcript` argument, not just the pre-turn transcript."""
+    from llm_wiki.agents.twins import ChatReplyResult
+
+    agent = MagicMock()
+    agent.route_message = AsyncMock(return_value=["musk", "zell"])
+
+    async def _respond_as_persona(persona, case_context, chat_transcript, language):
+        if persona.id == "musk":
+            return ChatReplyResult(persona_id="musk", text="Первый ответ Маска.", cite="")
+        return ChatReplyResult(persona_id="zell", text="Ответ Зелла.", cite="")
+
+    agent.respond_as_persona = AsyncMock(side_effect=_respond_as_persona)
+
+    with patch("llm_wiki.api.v1.twins.TwinsAgent", return_value=agent), patch(
+        "llm_wiki.api.v1.twins.load_case_context", return_value="ctx"
+    ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
+        mock_llm = MagicMock()
+        mock_llm.aclose = AsyncMock()
+        mock_llm_cls.return_value = mock_llm
+
+        resp = await client.post(
+            "/api/v1/twin/chat",
+            json={
+                "case_id": "case-1", "persona_ids": ["musk", "zell"],
+                "message": "Привет", "language": "ru",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert agent.respond_as_persona.await_count == 2
+    second_call_kwargs = agent.respond_as_persona.call_args_list[1]
+    second_transcript = second_call_kwargs.args[2] if len(second_call_kwargs.args) > 2 else second_call_kwargs.kwargs["chat_transcript"]
+    assert "Первый ответ Маска." in second_transcript
+
+
+async def test_twin_chat_transcript_accumulates_across_turns(client: AsyncClient) -> None:
+    """A second turn on the same session must see the first turn's user message
+    and persona reply in its transcript — this is what makes conversations
+    coherent across multiple `/twin/chat` calls."""
+    from llm_wiki.agents.twins import ChatReplyResult
+
+    agent = MagicMock()
+    agent.route_message = AsyncMock(return_value=["musk"])
+    agent.respond_as_persona = AsyncMock(
+        return_value=ChatReplyResult(persona_id="musk", text="Ответ из первого хода.", cite="")
+    )
+
+    with patch("llm_wiki.api.v1.twins.TwinsAgent", return_value=agent), patch(
+        "llm_wiki.api.v1.twins.load_case_context", return_value="ctx"
+    ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
+        mock_llm = MagicMock()
+        mock_llm.aclose = AsyncMock()
+        mock_llm_cls.return_value = mock_llm
+
+        first = await client.post(
+            "/api/v1/twin/chat",
+            json={
+                "case_id": "case-1", "persona_ids": ["musk"],
+                "message": "Первое сообщение пользователя", "language": "ru",
+            },
+        )
+        session_id = json.loads(first.text.strip().splitlines()[-1].removeprefix("data: "))["session_id"]
+
+        second = await client.post(
+            "/api/v1/twin/chat",
+            json={
+                "session_id": session_id, "case_id": "case-1", "persona_ids": ["musk"],
+                "message": "Второе сообщение", "language": "ru",
+            },
+        )
+
+    assert second.status_code == 200
+    second_turn_transcript = agent.route_message.call_args_list[1].args[1]
+    assert "Первое сообщение пользователя" in second_turn_transcript
+    assert "Ответ из первого хода." in second_turn_transcript
+
+
+async def test_twin_chat_rejects_case_id_mismatch_with_existing_session(
+    client: AsyncClient, db_engine
+) -> None:
+    from llm_wiki.storage.metadata import create_twin_session
+
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        bind=db_engine, expire_on_commit=False, autoflush=False
+    )
+    async with session_factory() as s:
+        ts = await create_twin_session(s, case_id="case-1", persona_ids=["musk"], created_by="u1")
+
+    resp = await client.post(
+        "/api/v1/twin/chat",
+        json={
+            "session_id": ts.id, "case_id": "case-2", "persona_ids": ["musk"],
+            "message": "Привет", "language": "ru",
+        },
+    )
+    assert resp.status_code == 400
+
+
 async def test_twin_chat_rejects_more_than_three_personas(client: AsyncClient) -> None:
     resp = await client.post(
         "/api/v1/twin/chat",

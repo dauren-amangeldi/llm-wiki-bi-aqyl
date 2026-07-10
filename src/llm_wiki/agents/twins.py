@@ -1,4 +1,4 @@
-"""TwinsAgent — multi-persona council deliberation (BI-AQYL-TWINS).
+"""TwinsAgent — free-form multi-persona chat (BI-AQYL-TWINS).
 
 Pure business logic: receives personas/case context, returns dataclasses.
 No FastAPI, Celery, or direct file I/O beyond reading already-written wiki pages.
@@ -193,7 +193,8 @@ class ChatReplyResult:
 
 
 class TwinsAgent(BaseAgent):
-    """Orchestrates the Twins council: position, cross-exam, and verdict rounds."""
+    """Routes chat turns to personas, generates each persona's reply in sequence,
+    and produces an on-demand verdict summarizing the chat so far."""
 
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
