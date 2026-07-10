@@ -125,3 +125,30 @@ async def test_run_verdict_round_flags_early_consensus_when_all_disagreements_fo
     )
 
     assert verdict.consensus_reached_early is True
+
+
+@pytest.mark.asyncio
+async def test_run_chat_verdict_summarizes_free_form_transcript() -> None:
+    mock = MagicMock(spec=LLMClient)
+    mock.load_prompt.return_value = "prompt"
+    usage = MagicMock()
+    mock.complete = AsyncMock(
+        return_value=(
+            json.dumps({
+                "questions": [{"text": "q1", "persona_id": "musk"}],
+                "consensus": "agree", "disagreement": "timing", "next_step": "stress-test",
+                "domain_distribution": {"tech": 0.1, "real_estate": 0.1, "finance": 0.8},
+            }),
+            usage,
+        )
+    )
+    agent = TwinsAgent(mock)
+
+    verdict = await agent.run_chat_verdict(
+        [_persona("musk"), _persona("zell")], case_context="ctx",
+        chat_transcript="Пользователь: вопрос\nElon Musk: ответ", language="ru",
+    )
+
+    assert verdict.decisive_voice == "zell"  # finance-weighted domain won
+    assert verdict.consensus_reached_early is False
+    assert verdict.domain_distribution == {"tech": 0.1, "real_estate": 0.1, "finance": 0.8}

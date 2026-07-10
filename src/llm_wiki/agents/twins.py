@@ -321,6 +321,51 @@ class TwinsAgent(BaseAgent):
         data = json.loads(text)
         return ChatReplyResult(persona_id=persona.id, text=data["text"], cite=data["cite"])
 
+    async def run_chat_verdict(
+        self,
+        personas: list[TwinPersonaData],
+        case_context: str,
+        chat_transcript: str,
+        language: str,
+        file_id: str = "twins",
+    ) -> VerdictResult:
+        """Summarize a free-form chat on demand ("Подвести итог").
+
+        Reuses the same schema/prompt as the old scripted verdict round —
+        it only ever needed `case_context` + a transcript string, so a
+        chat-formatted transcript works unchanged. `consensus_reached_early`
+        doesn't map onto free-form chat (that flag came from the old
+        cross-exam forced-disagreement heuristic) — always False here.
+        """
+        prompt = self._llm.load_prompt(
+            "twins_verdict", language=language, case_context=case_context,
+            transcript=chat_transcript,
+        )
+        text, _usage = await self._llm.complete(
+            prompt=prompt,
+            system=_VERDICT_SYSTEM_PROMPT,
+            file_id=file_id,
+            agent_type="twins",
+            json_schema=_VERDICT_SCHEMA,
+            schema_name="twins_verdict",
+        )
+        data = json.loads(text)
+
+        domain_weights = {p.id: p.domain_weights for p in personas}
+        decisive_id, is_close_split = _compute_decisive_voice(
+            [p.id for p in personas], domain_weights, data["domain_distribution"]
+        )
+        return VerdictResult(
+            questions=data["questions"],
+            consensus=data["consensus"],
+            disagreement=data["disagreement"],
+            next_step=data["next_step"],
+            domain_distribution=data["domain_distribution"],
+            decisive_voice=decisive_id,
+            consensus_reached_early=False,
+            is_close_split=is_close_split,
+        )
+
     async def run_position_round(
         self,
         personas: list[TwinPersonaData],
