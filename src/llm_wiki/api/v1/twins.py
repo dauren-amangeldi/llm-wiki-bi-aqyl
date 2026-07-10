@@ -222,6 +222,61 @@ async def twin_chat_endpoint(
     )
 
 
+@router.post("/twin/sessions/{session_id}/summarize")
+async def summarize_twin_session(
+    session_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
+    """Generate an on-demand verdict ("Подвести итог") from the chat so far."""
+    session_row = await db.get(TwinSession, session_id)
+    if session_row is None:
+        raise HTTPException(404, "Unknown session_id")
+
+    messages = await get_twin_session_messages(db, session_id)
+    if not messages:
+        raise HTTPException(400, "Chat has no messages yet")
+
+    personas_rows: list[TwinPersona] = []
+    for pid in session_row.persona_ids:
+        persona = await get_twin_persona(db, pid)
+        if persona is not None:
+            personas_rows.append(persona)
+    personas = [_to_persona_data(p) for p in personas_rows]
+    real_name_by_id = {p.id: p.real_name for p in personas_rows}
+    transcript = build_chat_transcript(messages, real_name_by_id)
+
+    case = await db.get(CaseRecord, session_row.case_id)
+    documents: list[FileRecord] = []
+    if case is not None:
+        for doc_id in case.doc_ids or []:
+            fr = await db.get(FileRecord, doc_id)
+            if fr is not None:
+                documents.append(fr)
+    case_context = load_case_context(documents)
+
+    from llm_wiki.llm.client import LLMClient
+
+    llm = LLMClient()
+    try:
+        agent = TwinsAgent(llm)
+        verdict = await agent.run_chat_verdict(personas, case_context, transcript, "ru")
+    finally:
+        await llm.aclose()
+
+    verdict_content = {
+        "questions": verdict.questions, "consensus": verdict.consensus,
+        "disagreement": verdict.disagreement, "next_step": verdict.next_step,
+        "domain_distribution": verdict.domain_distribution,
+        "decisive_voice": verdict.decisive_voice,
+        "consensus_reached_early": verdict.consensus_reached_early,
+        "is_close_split": verdict.is_close_split,
+    }
+    await append_twin_message(
+        db, session_id=session_id, role="verdict", persona_id=None,
+        seq=messages[-1].seq + 1, content=verdict_content,
+    )
+    return verdict_content
+
+
 @router.post(
     "/twin/council",
     summary="Twins council — multi-persona case deliberation with SSE streaming",

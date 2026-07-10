@@ -221,3 +221,64 @@ async def test_twin_chat_rejects_more_than_three_personas(client: AsyncClient) -
         json={"case_id": "case-1", "persona_ids": ["musk", "zell", "bren", "hines"], "message": "hi"},
     )
     assert resp.status_code == 422
+
+
+async def test_summarize_session_returns_verdict_and_persists_it(
+    client: AsyncClient, db_engine
+) -> None:
+    from llm_wiki.agents.twins import VerdictResult
+    from llm_wiki.storage.metadata import append_twin_message, create_twin_session, get_twin_session_messages
+
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        bind=db_engine, expire_on_commit=False, autoflush=False
+    )
+    async with session_factory() as s:
+        ts = await create_twin_session(s, case_id="case-1", persona_ids=["musk"], created_by="u1")
+        await append_twin_message(
+            s, session_id=ts.id, role="user", persona_id=None, seq=0, content={"text": "Вопрос"}
+        )
+
+    mock_agent = MagicMock()
+    mock_agent.run_chat_verdict = AsyncMock(
+        return_value=VerdictResult(
+            questions=[], consensus="ok", disagreement="none", next_step="ship it",
+            domain_distribution={"tech": 1.0, "real_estate": 0.0, "finance": 0.0},
+            decisive_voice="musk", consensus_reached_early=False, is_close_split=False,
+        )
+    )
+
+    with patch("llm_wiki.api.v1.twins.TwinsAgent", return_value=mock_agent), patch(
+        "llm_wiki.api.v1.twins.load_case_context", return_value="ctx"
+    ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
+        mock_llm = MagicMock()
+        mock_llm.aclose = AsyncMock()
+        mock_llm_cls.return_value = mock_llm
+
+        resp = await client.post(f"/api/v1/twin/sessions/{ts.id}/summarize")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["consensus"] == "ok"
+    assert body["decisive_voice"] == "musk"
+
+    async with session_factory() as s:
+        messages = await get_twin_session_messages(s, ts.id)
+    assert any(m.role == "verdict" for m in messages)
+
+
+async def test_summarize_session_404_for_unknown_session(client: AsyncClient) -> None:
+    resp = await client.post("/api/v1/twin/sessions/nope/summarize")
+    assert resp.status_code == 404
+
+
+async def test_summarize_session_400_when_chat_is_empty(client: AsyncClient, db_engine) -> None:
+    from llm_wiki.storage.metadata import create_twin_session
+
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        bind=db_engine, expire_on_commit=False, autoflush=False
+    )
+    async with session_factory() as s:
+        ts = await create_twin_session(s, case_id="case-1", persona_ids=["musk"], created_by="u1")
+
+    resp = await client.post(f"/api/v1/twin/sessions/{ts.id}/summarize")
+    assert resp.status_code == 400
