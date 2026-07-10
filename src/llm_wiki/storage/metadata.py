@@ -1138,6 +1138,33 @@ async def find_similar_cases(
     return [(r.id, r.title, round((1 - r.distance) * 100, 1)) for r in rows]
 
 
+async def suggest_twin_personas(
+    session: AsyncSession, case_id: str, scan_limit: int = 5
+) -> dict[str, object] | None:
+    """Suggest a Twins persona line-up based on the most similar past case.
+
+    Walks similar cases (most similar first) and returns the persona set of
+    the latest council held on the first one that has any. None when nothing
+    similar has ever been deliberated — the UI just shows the normal picker.
+    """
+    for sim_id, title, pct in await find_similar_cases(session, case_id, limit=scan_limit):
+        stmt = (
+            select(TwinSession)
+            .where(TwinSession.case_id == sim_id)
+            .order_by(TwinSession.created_at.desc())
+            .limit(1)
+        )
+        twin_session = (await session.execute(stmt)).scalars().first()
+        if twin_session and twin_session.persona_ids:
+            return {
+                "case_id": sim_id,
+                "case_title": title,
+                "similarity_pct": pct,
+                "persona_ids": twin_session.persona_ids,
+            }
+    return None
+
+
 def log_llm_call(
     *,
     file_id: str,

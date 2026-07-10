@@ -23,6 +23,7 @@ from llm_wiki.storage.metadata import (
     get_twin_persona,
     list_twin_personas,
     list_twin_presets,
+    suggest_twin_personas,
 )
 
 
@@ -63,6 +64,18 @@ async def get_twin_roster(db: AsyncSession = Depends(get_db)) -> dict[str, objec
         ],
         "presets": [{"id": p.id, "name": p.name, "persona_ids": p.persona_ids} for p in presets],
     }
+
+
+@router.get("/twin/suggest")
+async def suggest_council(
+    case_id: str = Query(...), db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
+    """Suggest personas from the latest council of the most similar case.
+
+    ``{"suggestion": null}`` when there is nothing to suggest — the UI falls
+    back to the regular picker (same silent-empty convention as /similar).
+    """
+    return {"suggestion": await suggest_twin_personas(db, case_id)}
 
 
 @router.post(

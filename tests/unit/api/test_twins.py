@@ -104,3 +104,10 @@ async def test_twin_council_rejects_more_than_three_personas(client: AsyncClient
     )
 
     assert resp.status_code == 422
+
+
+async def test_twin_suggest_returns_null_without_similar_cases(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/twin/suggest", params={"case_id": "case-unknown"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"suggestion": None}
