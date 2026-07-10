@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -145,3 +146,78 @@ async def test_twin_session_outcome_404_for_unknown_session(client: AsyncClient)
         "/api/v1/twin/sessions/nope/outcome", json={"outcome": "refuted"}
     )
     assert resp.status_code == 404
+
+
+def _mock_chat_agent() -> MagicMock:
+    from llm_wiki.agents.twins import ChatReplyResult
+
+    agent = MagicMock()
+    agent.route_message = AsyncMock(return_value=["musk"])
+    agent.respond_as_persona = AsyncMock(
+        return_value=ChatReplyResult(persona_id="musk", text="Ответ.", cite="Смета")
+    )
+    return agent
+
+
+async def test_twin_chat_streams_typing_message_and_done(client: AsyncClient) -> None:
+    mock_agent = _mock_chat_agent()
+
+    with patch("llm_wiki.api.v1.twins.TwinsAgent", return_value=mock_agent), patch(
+        "llm_wiki.api.v1.twins.load_case_context", return_value="ctx"
+    ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
+        mock_llm = MagicMock()
+        mock_llm.aclose = AsyncMock()
+        mock_llm_cls.return_value = mock_llm
+
+        resp = await client.post(
+            "/api/v1/twin/chat",
+            json={"case_id": "case-1", "persona_ids": ["musk"], "message": "Привет", "language": "ru"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"event": "typing"' in body
+    assert '"persona_id": "musk"' in body
+    assert '"text": "\\u041e\\u0442\\u0432\\u0435\\u0442."' in body or "Ответ." in body
+    assert '"done": true' in body
+    mock_agent.route_message.assert_awaited_once()
+    mock_agent.respond_as_persona.assert_awaited_once()
+
+
+async def test_twin_chat_continues_an_existing_session(client: AsyncClient) -> None:
+    mock_agent = _mock_chat_agent()
+
+    with patch("llm_wiki.api.v1.twins.TwinsAgent", return_value=mock_agent), patch(
+        "llm_wiki.api.v1.twins.load_case_context", return_value="ctx"
+    ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
+        mock_llm = MagicMock()
+        mock_llm.aclose = AsyncMock()
+        mock_llm_cls.return_value = mock_llm
+
+        # First message creates a session.
+        first = await client.post(
+            "/api/v1/twin/chat",
+            json={"case_id": "case-1", "persona_ids": ["musk"], "message": "Привет", "language": "ru"},
+        )
+        session_id = json.loads(first.text.strip().splitlines()[-1].removeprefix("data: "))["session_id"]
+
+        # Second message reuses it — route_message/respond_as_persona called again.
+        second = await client.post(
+            "/api/v1/twin/chat",
+            json={
+                "session_id": session_id, "case_id": "case-1", "persona_ids": ["musk"],
+                "message": "А если иначе?", "language": "ru",
+            },
+        )
+
+    assert second.status_code == 200
+    assert '"done": true' in second.text
+    assert mock_agent.route_message.await_count == 2
+
+
+async def test_twin_chat_rejects_more_than_three_personas(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/api/v1/twin/chat",
+        json={"case_id": "case-1", "persona_ids": ["musk", "zell", "bren", "hines"], "message": "hi"},
+    )
+    assert resp.status_code == 422

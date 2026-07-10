@@ -12,16 +12,18 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.agents.twins import TwinPersonaData, TwinsAgent, load_case_context
+from llm_wiki.agents.twins import TwinPersonaData, TwinsAgent, build_chat_transcript, load_case_context
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import (
     CaseRecord,
     FileRecord,
     TwinPersona,
+    TwinSession,
     append_twin_message,
     create_twin_session,
     get_twin_persona,
+    get_twin_session_messages,
     list_twin_personas,
     list_twin_presets,
     list_twin_sessions,
@@ -112,6 +114,112 @@ async def patch_twin_session_outcome(
     if not await set_twin_session_outcome(db, session_id, body.outcome, body.note):
         raise HTTPException(status_code=404, detail="twin session not found")
     return {"ok": True}
+
+
+class TwinChatRequest(BaseModel):
+    session_id: str | None = None
+    case_id: str
+    persona_ids: list[str] = Field(min_length=1, max_length=3)
+    message: str = Field(min_length=1, max_length=4000)
+    language: str = "ru"
+
+
+@router.post(
+    "/twin/chat",
+    summary="Twins chat — free-form multi-persona conversation with SSE streaming",
+    tags=["twins"],
+    response_class=StreamingResponse,
+)
+async def twin_chat_endpoint(
+    body: TwinChatRequest,
+    db: AsyncSession = Depends(get_db),
+    user_key: str = Depends(get_user_key),
+) -> StreamingResponse:
+    """One chat turn: persist the user's message, route it to 0-3 personas,
+    generate each persona's reply in sequence (each sees the ones just
+    generated this turn), stream them, persist them.
+    """
+    personas_rows: list[TwinPersona] = []
+    for persona_id in body.persona_ids:
+        persona = await get_twin_persona(db, persona_id)
+        if persona is None:
+            raise HTTPException(404, f"Unknown persona: {persona_id}")
+        personas_rows.append(persona)
+
+    case = await db.get(CaseRecord, body.case_id)
+    documents: list[FileRecord] = []
+    if case is not None:
+        for doc_id in case.doc_ids or []:
+            fr = await db.get(FileRecord, doc_id)
+            if fr is not None:
+                documents.append(fr)
+
+    if body.session_id:
+        session_row = await db.get(TwinSession, body.session_id)
+        if session_row is None:
+            raise HTTPException(404, "Unknown session_id")
+    else:
+        session_row = await create_twin_session(
+            db, case_id=body.case_id, persona_ids=body.persona_ids, created_by=user_key
+        )
+
+    personas = [_to_persona_data(p) for p in personas_rows]
+    real_name_by_id = {p.id: p.real_name for p in personas_rows}
+    case_context = load_case_context(documents)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        from llm_wiki.llm.client import LLMClient
+
+        llm = LLMClient()
+        try:
+            agent = TwinsAgent(llm)
+            existing = await get_twin_session_messages(db, session_row.id)
+            seq = (existing[-1].seq + 1) if existing else 0
+
+            user_row = await append_twin_message(
+                db, session_id=session_row.id, role="user", persona_id=None,
+                seq=seq, content={"text": body.message},
+            )
+            seq += 1
+            transcript = build_chat_transcript(existing + [user_row], real_name_by_id)
+
+            try:
+                responder_ids = await agent.route_message(personas, transcript, body.language)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("twins_route_failed_fallback_first_persona", error=str(exc))
+                responder_ids = [personas[0].id]
+
+            personas_by_id = {p.id: p for p in personas}
+            for pid in responder_ids:
+                persona = personas_by_id.get(pid)
+                if persona is None:
+                    continue
+                yield _sse_line({"event": "typing", "persona_id": pid})
+                try:
+                    reply = await agent.respond_as_persona(persona, case_context, transcript, body.language)
+                    content = {"text": reply.text, "cite": reply.cite}
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("twins_persona_reply_failed", persona_id=pid, error=str(exc))
+                    content = {"text": "Не удалось получить ответ.", "cite": ""}
+                await append_twin_message(
+                    db, session_id=session_row.id, role="persona", persona_id=pid, seq=seq, content=content,
+                )
+                yield _sse_line({"event": "message", "persona_id": pid, "seq": seq, "content": content})
+                transcript += f"\n{real_name_by_id.get(pid, pid)}: {content['text']}"
+                seq += 1
+
+            yield _sse_line({"done": True, "session_id": session_row.id})
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("twins_chat_stream_failed", error=str(exc))
+            yield _sse_line({"error": str(exc)})
+        finally:
+            await llm.aclose()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(
