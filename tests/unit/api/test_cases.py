@@ -113,3 +113,21 @@ async def test_update_nonexistent_case_returns_404(client: AsyncClient) -> None:
         json={"title": "Ghost", "doc_ids": []},
     )
     assert resp.status_code == 404
+
+
+async def test_similar_cases_empty_when_no_documents(client: AsyncClient) -> None:
+    create_resp = await client.post(
+        "/api/v1/cases",
+        json={"id": "case-sim-1", "title": "No docs yet", "doc_ids": []},
+    )
+    assert create_resp.status_code == 201
+
+    resp = await client.get("/api/v1/cases/case-sim-1/similar")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_similar_cases_empty_for_unknown_case(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/cases/does-not-exist/similar")
+    assert resp.status_code == 200
+    assert resp.json() == []
