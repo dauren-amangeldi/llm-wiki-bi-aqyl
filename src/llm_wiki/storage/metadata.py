@@ -419,13 +419,13 @@ class TwinSession(Base):
 
 
 class TwinMessage(Base):
-    """A single message in a Twins council transcript (BI-AQYL-TWINS)."""
+    """A single message in a Twins chat transcript (BI-AQYL-TWINS)."""
 
     __tablename__ = "twin_messages"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    round: Mapped[str] = mapped_column(String, nullable=False)  # position | cross_exam | verdict
+    role: Mapped[str] = mapped_column(String, nullable=False)  # user | persona | verdict
     persona_id: Mapped[str | None] = mapped_column(String, nullable=True)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
@@ -997,7 +997,7 @@ async def append_twin_message(
     session: AsyncSession,
     *,
     session_id: str,
-    round: str,
+    role: str,
     persona_id: str | None,
     seq: int,
     content: dict[str, object],
@@ -1007,7 +1007,7 @@ async def append_twin_message(
     row = TwinMessage(
         id=f"twin-msg-{session_id}-{seq}",
         session_id=session_id,
-        round=round,
+        role=role,
         persona_id=persona_id,
         seq=seq,
         content=content,

@@ -30,7 +30,7 @@ async def test_append_twin_message_survives_partial_session(db_session: AsyncSes
     await append_twin_message(
         db_session,
         session_id=session_row.id,
-        round="position",
+        role="user",
         persona_id="musk",
         seq=0,
         content={"reframing": "r", "text": "t", "cite": "c"},
@@ -38,7 +38,7 @@ async def test_append_twin_message_survives_partial_session(db_session: AsyncSes
 
     messages = await get_twin_session_messages(db_session, session_row.id)
     assert len(messages) == 1
-    assert messages[0].round == "position"
+    assert messages[0].role == "user"
     assert messages[0].content["text"] == "t"
 
 
@@ -48,11 +48,11 @@ async def test_get_twin_session_messages_orders_by_seq(db_session: AsyncSession)
         db_session, case_id="case-001", persona_ids=["musk", "zell"], created_by="dev-user"
     )
     await append_twin_message(
-        db_session, session_id=session_row.id, round="position", persona_id="zell", seq=1,
+        db_session, session_id=session_row.id, role="persona", persona_id="zell", seq=1,
         content={"text": "second"},
     )
     await append_twin_message(
-        db_session, session_id=session_row.id, round="position", persona_id="musk", seq=0,
+        db_session, session_id=session_row.id, role="persona", persona_id="musk", seq=0,
         content={"text": "first"},
     )
 
