@@ -101,6 +101,18 @@ async def gate_client(db_engine, monkeypatch):  # type: ignore[no-untyped-def]
 
     monkeypatch.setattr(auth_mod, "verify_access_token", lambda t: {"email": t})
 
+    # The middleware opens sessions via deps._SessionLocal (application DB by
+    # default) — rebind it to the per-test engine so whitelist rows added
+    # through db_session are actually visible to the gate.
+    import llm_wiki.api.deps as deps
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    monkeypatch.setattr(
+        deps,
+        "_SessionLocal",
+        async_sessionmaker(bind=db_engine, expire_on_commit=False, autoflush=False),
+    )
+
     app = _build_app()
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"

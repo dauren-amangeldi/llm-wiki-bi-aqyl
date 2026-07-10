@@ -50,6 +50,27 @@ def vector_engine(db_engine: AsyncEngine):  # type: ignore[no-untyped-def]
     engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+def _sync_engine_on_test_db():  # type: ignore[no-untyped-def]
+    """Point the app's lazy module-level sync engine at the test database.
+
+    get_sync_engine() otherwise dials settings.database_url — the LIVE
+    application DB — from index/log stores, llm_call_log and friends, while
+    async fixtures talk to TEST_DATABASE_URL. With the two split (they used
+    to be the same DB), every sync-path test would read/write production.
+    """
+    from sqlalchemy import create_engine
+
+    import llm_wiki.storage.metadata as metadata_module
+
+    engine = create_engine(TEST_DATABASE_URL)
+    old = metadata_module._sync_engine
+    metadata_module._sync_engine = engine
+    yield
+    metadata_module._sync_engine = old
+    engine.dispose()
+
+
 @pytest_asyncio.fixture
 async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     """An ``AsyncSession`` bound to the per-test Postgres engine."""

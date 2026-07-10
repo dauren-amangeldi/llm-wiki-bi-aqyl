@@ -1,31 +1,16 @@
-"""Tests for the llm_call_log table and its write helper."""
+"""Tests for the llm_call_log table and its write helper.
 
-from collections.abc import Iterator
+The shared conftest autouse fixture pins get_sync_engine() to the per-test
+database, so log_llm_call can't leak into the application DB here.
+"""
+
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import llm_wiki.storage.metadata as metadata_module
 from llm_wiki.storage.metadata import LLMCallLog, log_llm_call
-from tests.conftest import TEST_DATABASE_URL
-
-
-@pytest.fixture(autouse=True)
-def _sync_engine_on_test_db(db_engine) -> Iterator[None]:
-    """Point log_llm_call's lazy sync engine at the per-test database.
-
-    Without this it would write into settings.database_url — the LIVE
-    database — which is exactly the kind of accident these tests guard
-    against.
-    """
-    engine = create_engine(TEST_DATABASE_URL)
-    old = metadata_module._sync_engine
-    metadata_module._sync_engine = engine
-    yield
-    metadata_module._sync_engine = old
-    engine.dispose()
 
 
 @pytest.mark.asyncio
