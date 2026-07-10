@@ -132,6 +132,27 @@ class IssuesReport(Base):
     )
 
 
+class Feedback(Base):
+    """A 👍/👎 vote on any AI-produced artefact (similar-case chip, verdict…).
+
+    entity_type + entity_id identify the thing being rated without FKs, so new
+    surfaces can start collecting feedback without schema changes. This is the
+    cheap signal source the Twins outcome journal builds on.
+    """
+
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    entity_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    vote: Mapped[int] = mapped_column(Integer, nullable=False)  # +1 | -1
+    comment: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    created_by: Mapped[str] = mapped_column(String, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
 class LLMCallLog(Base):
     """Outcome of every LLM call — success, final failure, or budget block.
 
