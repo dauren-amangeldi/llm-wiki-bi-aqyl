@@ -9,11 +9,13 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-# Tests require a PostgreSQL instance (no SQLite). Defaults to the storage
-# sandbox; override with TEST_DATABASE_URL. The test DB is wiped per test.
+# Tests require a PostgreSQL instance (no SQLite). Override with
+# TEST_DATABASE_URL. The test DB is DROPPED AND RECREATED per test — never
+# point it at the application database (create llmwiki_test next to it:
+# `docker compose exec postgres psql -U llmwiki -d llmwiki -c "CREATE DATABASE llmwiki_test"`).
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql+psycopg://llmwiki:devpassword@postgres:5432/llmwiki",
+    "postgresql+psycopg://llmwiki:devpassword@postgres:5432/llmwiki_test",
 )
 
 

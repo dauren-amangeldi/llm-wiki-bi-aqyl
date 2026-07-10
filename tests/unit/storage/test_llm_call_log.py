@@ -1,21 +1,31 @@
 """Tests for the llm_call_log table and its write helper."""
 
+from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import llm_wiki.storage.metadata as metadata_module
 from llm_wiki.storage.metadata import LLMCallLog, log_llm_call
+from tests.conftest import TEST_DATABASE_URL
 
 
-def _fetch_all_sync() -> list[LLMCallLog]:
-    from sqlalchemy.orm import Session as SyncSession
+@pytest.fixture(autouse=True)
+def _sync_engine_on_test_db(db_engine) -> Iterator[None]:
+    """Point log_llm_call's lazy sync engine at the per-test database.
 
-    from llm_wiki.storage.metadata import get_sync_engine
-
-    with SyncSession(get_sync_engine()) as s:
-        return list(s.execute(select(LLMCallLog)).scalars().all())
+    Without this it would write into settings.database_url — the LIVE
+    database — which is exactly the kind of accident these tests guard
+    against.
+    """
+    engine = create_engine(TEST_DATABASE_URL)
+    old = metadata_module._sync_engine
+    metadata_module._sync_engine = engine
+    yield
+    metadata_module._sync_engine = old
+    engine.dispose()
 
 
 @pytest.mark.asyncio
