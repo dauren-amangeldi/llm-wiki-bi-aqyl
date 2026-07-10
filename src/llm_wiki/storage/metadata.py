@@ -336,8 +336,8 @@ class TwinPersona(Base):
     active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -361,7 +361,7 @@ class TwinSession(Base):
     created_by: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -378,7 +378,7 @@ class TwinMessage(Base):
     content: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -927,7 +927,7 @@ async def create_twin_session(
     session: AsyncSession, *, case_id: str, persona_ids: list[str], created_by: str
 ) -> TwinSession:
     """Create and persist a new Twins council session."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = TwinSession(
         id=f"twin-session-{int(now.timestamp() * 1000):x}",
         case_id=case_id,
@@ -950,7 +950,7 @@ async def append_twin_message(
     content: dict[str, object],
 ) -> TwinMessage:
     """Persist one message immediately, so a dropped stream keeps partial history."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = TwinMessage(
         id=f"twin-msg-{session_id}-{seq}",
         session_id=session_id,
