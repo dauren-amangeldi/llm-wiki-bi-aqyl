@@ -18,7 +18,7 @@ from llm_wiki.agents.base import BaseAgent
 from llm_wiki.llm.client import LLMClient
 
 if TYPE_CHECKING:
-    from llm_wiki.storage.metadata import FileRecord
+    from llm_wiki.storage.metadata import FileRecord, TwinMessage
 
 logger = structlog.get_logger(__name__)
 
@@ -58,6 +58,23 @@ def load_case_context(documents: "list[FileRecord]") -> str:
         total += len(truncated)
 
     return "\n\n".join(blocks)
+
+
+def build_chat_transcript(
+    messages: "list[TwinMessage]", real_name_by_id: dict[str, str]
+) -> str:
+    """Render persisted TwinMessage rows as a plain-text transcript for prompts."""
+    lines: list[str] = []
+    for m in messages:
+        if m.role == "user":
+            speaker = "Пользователь"
+        elif m.role == "verdict":
+            speaker = "Итог"
+        else:
+            speaker = real_name_by_id.get(m.persona_id or "", m.persona_id or "?")
+        text = m.content.get("text", "") if isinstance(m.content, dict) else ""
+        lines.append(f"{speaker}: {text}")
+    return "\n".join(lines)
 
 
 _POSITION_SCHEMA: dict[str, Any] = {
@@ -210,6 +227,41 @@ class VerdictResult:
     is_close_split: bool
 
 
+_CHAT_REPLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "cite": {"type": "string"},
+    },
+    "required": ["text", "cite"],
+    "additionalProperties": False,
+}
+
+_ROUTER_SYSTEM_PROMPT = "Ты нейтральный маршрутизатор AI-совета Twins. Не отвечай от лица персон."
+
+
+def _route_schema(persona_ids: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "responders": {
+                "type": "array",
+                "items": {"type": "string", "enum": persona_ids},
+                "maxItems": 3,
+            },
+        },
+        "required": ["responders"],
+        "additionalProperties": False,
+    }
+
+
+@dataclass(frozen=True)
+class ChatReplyResult:
+    persona_id: str
+    text: str
+    cite: str
+
+
 class TwinsAgent(BaseAgent):
     """Orchestrates the Twins council: position, cross-exam, and verdict rounds."""
 
@@ -218,6 +270,56 @@ class TwinsAgent(BaseAgent):
 
     async def run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("call run_position_round / run_cross_exam_round / run_verdict_round")
+
+    async def route_message(
+        self,
+        personas: list[TwinPersonaData],
+        chat_transcript: str,
+        language: str,
+        file_id: str = "twins",
+    ) -> list[str]:
+        """Decide which 0-3 personas should respond to the latest message, in order."""
+        persona_ids = [p.id for p in personas]
+        personas_block = "\n".join(f"- {p.id}: {p.lens}" for p in personas)
+        prompt = self._llm.load_prompt(
+            "twins_route", language=language, personas_block=personas_block,
+            chat_transcript=chat_transcript,
+        )
+        text, _usage = await self._llm.complete(
+            prompt=prompt,
+            system=_ROUTER_SYSTEM_PROMPT,
+            file_id=file_id,
+            agent_type="twins",
+            json_schema=_route_schema(persona_ids),
+            schema_name="twins_route",
+        )
+        data = json.loads(text)
+        known = set(persona_ids)
+        return [pid for pid in data["responders"] if pid in known]
+
+    async def respond_as_persona(
+        self,
+        persona: TwinPersonaData,
+        case_context: str,
+        chat_transcript: str,
+        language: str,
+        file_id: str = "twins",
+    ) -> ChatReplyResult:
+        """Generate one persona's reply, seeing any replies already added this turn."""
+        prompt = self._llm.load_prompt(
+            "twins_chat_reply", language=language, persona_lens=persona.lens,
+            case_context=case_context, chat_transcript=chat_transcript,
+        )
+        text, _usage = await self._llm.complete(
+            prompt=prompt,
+            system=persona.system_prompt,
+            file_id=file_id,
+            agent_type="twins",
+            json_schema=_CHAT_REPLY_SCHEMA,
+            schema_name="twins_chat_reply",
+        )
+        data = json.loads(text)
+        return ChatReplyResult(persona_id=persona.id, text=data["text"], cite=data["cite"])
 
     async def run_position_round(
         self,
