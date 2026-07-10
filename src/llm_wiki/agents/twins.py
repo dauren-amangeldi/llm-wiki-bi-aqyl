@@ -6,8 +6,6 @@ No FastAPI, Celery, or direct file I/O beyond reading already-written wiki pages
 
 from __future__ import annotations
 
-import asyncio
-import difflib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -77,18 +75,6 @@ def build_chat_transcript(
     return "\n".join(lines)
 
 
-_POSITION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "reframing": {"type": "string"},
-        "text": {"type": "string"},
-        "cite": {"type": "string"},
-    },
-    "required": ["reframing", "text", "cite"],
-    "additionalProperties": False,
-}
-
-
 @dataclass(frozen=True)
 class TwinPersonaData:
     """Plain persona data passed into TwinsAgent (decoupled from the ORM row)."""
@@ -97,51 +83,6 @@ class TwinPersonaData:
     lens: str
     system_prompt: str
     domain_weights: dict[str, float]
-
-
-@dataclass(frozen=True)
-class PositionResult:
-    persona_id: str
-    reframing: str
-    text: str
-    cite: str
-
-
-_CROSS_EXAM_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "disagreement": {"type": "string"},
-        "text": {"type": "string"},
-        "cite": {"type": "string"},
-    },
-    "required": ["disagreement", "text", "cite"],
-    "additionalProperties": False,
-}
-
-
-def _is_novel_disagreement(
-    candidate: str, prior_texts: list[str], threshold: float = 0.85
-) -> bool:
-    """True when *candidate* is not a near-duplicate of any text in *prior_texts*.
-
-    Used to enforce the disagreement quota: a persona's Round 2 disagreement
-    must not just restate its own Round 1 position.
-    """
-    candidate_norm = candidate.strip().lower()
-    for prior in prior_texts:
-        ratio = difflib.SequenceMatcher(None, candidate_norm, prior.strip().lower()).ratio()
-        if ratio >= threshold:
-            return False
-    return True
-
-
-@dataclass(frozen=True)
-class CrossExamResult:
-    persona_id: str
-    disagreement: str
-    disagreement_forced: bool
-    text: str
-    cite: str
 
 
 _VERDICT_SCHEMA: dict[str, Any] = {
@@ -204,17 +145,6 @@ def _compute_decisive_voice(
     return decisive_id, is_close_split
 
 
-def _build_transcript(positions: list[PositionResult], cross_exams: list[CrossExamResult]) -> str:
-    lines = ["# Round 1 — Позиции"]
-    for p in positions:
-        lines.append(f"## {p.persona_id}\nПереформулировка: {p.reframing}\nПозиция: {p.text}")
-    if cross_exams:
-        lines.append("\n# Round 2 — Перекрёстный допрос")
-        for c in cross_exams:
-            lines.append(f"## {c.persona_id}\nРасхождение: {c.disagreement}\nРеплика: {c.text}")
-    return "\n\n".join(lines)
-
-
 @dataclass(frozen=True)
 class VerdictResult:
     questions: list[dict[str, str]]
@@ -269,7 +199,7 @@ class TwinsAgent(BaseAgent):
         self._llm = llm
 
     async def run(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("call run_position_round / run_cross_exam_round / run_verdict_round")
+        raise NotImplementedError("call route_message / respond_as_persona / run_chat_verdict")
 
     async def route_message(
         self,
@@ -366,170 +296,3 @@ class TwinsAgent(BaseAgent):
             is_close_split=is_close_split,
         )
 
-    async def run_position_round(
-        self,
-        personas: list[TwinPersonaData],
-        case_context: str,
-        language: str,
-        file_id: str = "twins",
-    ) -> list[PositionResult]:
-        """Run Round 1 for every persona in parallel: reframing + position in one call."""
-
-        async def _one(persona: TwinPersonaData) -> PositionResult:
-            prompt = self._llm.load_prompt(
-                "twins_position",
-                language=language,
-                persona_lens=persona.lens,
-                case_context=case_context,
-            )
-            text, _usage = await self._llm.complete(
-                prompt=prompt,
-                system=persona.system_prompt,
-                file_id=file_id,
-                agent_type="twins",
-                json_schema=_POSITION_SCHEMA,
-                schema_name="twins_position",
-            )
-            data = json.loads(text)
-            return PositionResult(
-                persona_id=persona.id,
-                reframing=data["reframing"],
-                text=data["text"],
-                cite=data["cite"],
-            )
-
-        raw_results = await asyncio.gather(
-            *[_one(p) for p in personas], return_exceptions=True
-        )
-        results: list[PositionResult] = []
-        for persona, result in zip(personas, raw_results):
-            if isinstance(result, Exception):
-                logger.warning("twins_position_failed", persona_id=persona.id, error=str(result))
-                continue
-            results.append(result)
-        return results
-
-    async def run_cross_exam_round(
-        self,
-        personas: list[TwinPersonaData],
-        case_context: str,
-        positions: list[PositionResult],
-        language: str,
-        file_id: str = "twins",
-    ) -> list[CrossExamResult]:
-        """Run Round 2: each persona must surface a genuinely new disagreement.
-
-        One retry is allowed if the model just restates its own Round 1 text.
-        If the retry still fails the novelty check, the reply is kept but
-        flagged ``disagreement_forced=True`` — visible to the caller instead
-        of silently passing off manufactured conflict as organic.
-        """
-        positions_block = "\n\n".join(f"### {p.persona_id}\n{p.text}" for p in positions)
-        own_text_by_id = {p.persona_id: p.text for p in positions}
-
-        async def _one(persona: TwinPersonaData) -> CrossExamResult:
-            prompt = self._llm.load_prompt(
-                "twins_cross_exam",
-                language=language,
-                persona_lens=persona.lens,
-                case_context=case_context,
-                positions_block=positions_block,
-            )
-            own_text = own_text_by_id.get(persona.id, "")
-
-            text, _usage = await self._llm.complete(
-                prompt=prompt,
-                system=persona.system_prompt,
-                file_id=file_id,
-                agent_type="twins",
-                json_schema=_CROSS_EXAM_SCHEMA,
-                schema_name="twins_cross_exam",
-            )
-            data = json.loads(text)
-            if _is_novel_disagreement(data["disagreement"], [own_text]):
-                return CrossExamResult(
-                    persona_id=persona.id, disagreement=data["disagreement"],
-                    disagreement_forced=False, text=data["text"], cite=data["cite"],
-                )
-
-            first_attempt = data
-            try:
-                text, _usage = await self._llm.complete(
-                    prompt=prompt,
-                    system=persona.system_prompt,
-                    file_id=file_id,
-                    agent_type="twins",
-                    json_schema=_CROSS_EXAM_SCHEMA,
-                    schema_name="twins_cross_exam",
-                )
-                data = json.loads(text)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("twins_cross_exam_retry_failed", persona_id=persona.id, error=str(exc))
-                return CrossExamResult(
-                    persona_id=persona.id, disagreement=first_attempt["disagreement"],
-                    disagreement_forced=True, text=first_attempt["text"], cite=first_attempt["cite"],
-                )
-
-            is_novel = _is_novel_disagreement(data["disagreement"], [own_text])
-            return CrossExamResult(
-                persona_id=persona.id, disagreement=data["disagreement"],
-                disagreement_forced=not is_novel, text=data["text"], cite=data["cite"],
-            )
-
-        raw_results = await asyncio.gather(
-            *[_one(p) for p in personas], return_exceptions=True
-        )
-        results: list[CrossExamResult] = []
-        for persona, result in zip(personas, raw_results):
-            if isinstance(result, Exception):
-                logger.warning("twins_cross_exam_failed", persona_id=persona.id, error=str(result))
-                continue
-            results.append(result)
-        return results
-
-    async def run_verdict_round(
-        self,
-        personas: list[TwinPersonaData],
-        case_context: str,
-        positions: list[PositionResult],
-        cross_exams: list[CrossExamResult],
-        language: str,
-        file_id: str = "twins",
-    ) -> VerdictResult:
-        """Synthesize the final verdict and compute the domain-weighted decisive voice.
-
-        ``decisive_voice`` is never invented by the LLM — it's derived
-        deterministically from ``domain_distribution`` (LLM output) crossed
-        with each persona's stored ``domain_weights``, so the result is
-        auditable instead of a black box.
-        """
-        transcript = _build_transcript(positions, cross_exams)
-        prompt = self._llm.load_prompt(
-            "twins_verdict", language=language, case_context=case_context, transcript=transcript
-        )
-        text, _usage = await self._llm.complete(
-            prompt=prompt,
-            system=_VERDICT_SYSTEM_PROMPT,
-            file_id=file_id,
-            agent_type="twins",
-            json_schema=_VERDICT_SCHEMA,
-            schema_name="twins_verdict",
-        )
-        data = json.loads(text)
-
-        domain_weights = {p.id: p.domain_weights for p in personas}
-        decisive_id, is_close_split = _compute_decisive_voice(
-            [p.id for p in personas], domain_weights, data["domain_distribution"]
-        )
-        consensus_reached_early = bool(cross_exams) and all(c.disagreement_forced for c in cross_exams)
-
-        return VerdictResult(
-            questions=data["questions"],
-            consensus=data["consensus"],
-            disagreement=data["disagreement"],
-            next_step=data["next_step"],
-            domain_distribution=data["domain_distribution"],
-            decisive_voice=decisive_id,
-            consensus_reached_early=consensus_reached_early,
-            is_close_split=is_close_split,
-        )
