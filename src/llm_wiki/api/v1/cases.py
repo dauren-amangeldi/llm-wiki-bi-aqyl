@@ -1,6 +1,7 @@
 """Cases (topic containers) CRUD endpoints."""
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel
@@ -12,6 +13,8 @@ from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import CaseRecord, find_similar_cases, refresh_case_embedding
 
+CaseSource = Literal["internal", "external"]
+
 
 class CaseBody(BaseModel):
     """Request/response body for case CRUD."""
@@ -20,6 +23,7 @@ class CaseBody(BaseModel):
     title: str
     doc_ids: list[str] = []
     sensitive: bool = True
+    source: CaseSource = "internal"
 
 
 @router.get("/cases")
@@ -27,7 +31,13 @@ async def list_cases(db: AsyncSession = Depends(get_db)) -> list[dict[str, objec
     """Return all cases ordered by creation time."""
     rows = (await db.scalars(select(CaseRecord).order_by(CaseRecord.created_at))).all()
     return [
-        {"id": r.id, "title": r.title, "doc_ids": r.doc_ids or [], "sensitive": r.sensitive}
+        {
+            "id": r.id,
+            "title": r.title,
+            "doc_ids": r.doc_ids or [],
+            "sensitive": r.sensitive,
+            "source": r.source,
+        }
         for r in rows
     ]
 
@@ -41,20 +51,27 @@ async def create_case(body: CaseBody, db: AsyncSession = Depends(get_db)) -> dic
         title=body.title.strip() or "Без названия",
         doc_ids=body.doc_ids,
         sensitive=body.sensitive,
+        source=body.source,
         created_at=now,
         updated_at=now,
     )
     db.add(case)
     await db.commit()
     await refresh_case_embedding(db, case.id)
-    return {"id": case.id, "title": case.title, "doc_ids": case.doc_ids, "sensitive": case.sensitive}
+    return {
+        "id": case.id,
+        "title": case.title,
+        "doc_ids": case.doc_ids,
+        "sensitive": case.sensitive,
+        "source": case.source,
+    }
 
 
 @router.put("/cases/{case_id}")
 async def update_case(
     case_id: str, body: CaseBody, db: AsyncSession = Depends(get_db)
 ) -> dict[str, bool]:
-    """Update case title, document membership, and privacy."""
+    """Update case title, document membership, privacy, and source."""
     row = await db.get(CaseRecord, case_id)
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -65,6 +82,7 @@ async def update_case(
             title=body.title.strip() or row.title,
             doc_ids=body.doc_ids,
             sensitive=body.sensitive,
+            source=body.source,
             updated_at=datetime.now(UTC),
         )
     )

@@ -289,6 +289,10 @@ class CaseRecord(Base):
     # sensitive=true so the ingestion pipeline skips inference/indexing into
     # the shared knowledge base (frontend: stores/cases.ts).
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Content source, independent of privacy: "internal" (BI Group data) or
+    # "external" (world/university/books/public sources). Chosen once by the
+    # user when the case is created — not auto-detected.
+    source: Mapped[str] = mapped_column(String, nullable=False, default="internal")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -305,12 +309,15 @@ async def ensure_case_columns(conn: AsyncConnection) -> None:
 
     create_all() only creates missing tables, not missing columns on
     existing ones — needed once for any dev/prod DB created before the
-    `sensitive` column existed.
+    `sensitive`/`source` columns existed.
     """
     from sqlalchemy import text
 
     await conn.execute(
         text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT true")
+    )
+    await conn.execute(
+        text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS source varchar NOT NULL DEFAULT 'internal'")
     )
 
 

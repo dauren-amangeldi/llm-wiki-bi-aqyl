@@ -69,6 +69,27 @@ async def test_create_case_defaults_to_sensitive(client: AsyncClient) -> None:
     assert resp.json()["sensitive"] is True
 
 
+async def test_create_case_defaults_to_internal_source(client: AsyncClient) -> None:
+    resp = await client.post("/api/v1/cases", json={"title": "Internal by default"})
+    assert resp.status_code == 201
+    assert resp.json()["source"] == "internal"
+
+
+async def test_create_case_with_explicit_external_source(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/api/v1/cases", json={"title": "From a textbook", "source": "external"}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["source"] == "external"
+
+
+async def test_create_case_rejects_invalid_source(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/api/v1/cases", json={"title": "Bad source", "source": "sideways"}
+    )
+    assert resp.status_code == 422
+
+
 async def test_case_sensitive_flag_persists_across_reload(client: AsyncClient) -> None:
     create_resp = await client.post(
         "/api/v1/cases",
