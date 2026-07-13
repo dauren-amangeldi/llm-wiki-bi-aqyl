@@ -11,6 +11,7 @@ from llm_wiki.api.schemas import (
     ClarificationQuestion,
     ClarificationRequiredResponse,
     ConsultationRespondRequest,
+    ConsultationSnapshotUpdate,
     ConsultationStartRequest,
     UnderstandingSnapshot,
     UnderstandingSnapshotResponse,
@@ -37,6 +38,20 @@ def _blank_snapshot(query: str) -> UnderstandingSnapshot:
         success_criteria=[],
         assumptions=[],
     )
+
+
+def _latest_snapshot(history) -> UnderstandingSnapshot | None:
+    """Найти последний snapshot в истории сообщений."""
+    for m in reversed(history):
+        if m.role != "assistant":
+            continue
+        try:
+            payload = json.loads(m.text)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if payload.get("kind") == "understanding_snapshot":
+            return UnderstandingSnapshot(**payload["snapshot"])
+    return None
 
 
 @router.post("/advisor/consultations")
@@ -127,3 +142,28 @@ async def respond_to_questions(
         role="assistant", text_body=json.dumps({"kind": "understanding_snapshot", "snapshot": snapshot.model_dump()}),
     )
     return UnderstandingSnapshotResponse(session_id=session_id, snapshot=snapshot)
+
+
+@router.put("/advisor/consultations/{session_id}/snapshot")
+async def update_snapshot(
+    session_id: str,
+    body: ConsultationSnapshotUpdate,
+    db: AsyncSession = Depends(get_db),
+    user_key: str = Depends(get_user_key),
+):
+    """Ручная правка снимка понимания перед подтверждением — частичный апдейт."""
+    session = await get_advisor_session(db, session_id)
+    if session is None or session.user_key != user_key:
+        raise HTTPException(status_code=404, detail="Advisor session not found")
+
+    history = await list_chat_messages(db, user_key=user_key, scope_type="advisor", scope_id=session_id)
+    current = _latest_snapshot(history)
+    if current is None:
+        raise HTTPException(status_code=409, detail="No snapshot to update yet")
+
+    updated = current.model_copy(update={k: v for k, v in body.model_dump().items() if v is not None})
+    await append_chat_message(
+        db, user_key=user_key, scope_type="advisor", scope_id=session_id,
+        role="assistant", text_body=json.dumps({"kind": "understanding_snapshot", "snapshot": updated.model_dump()}),
+    )
+    return UnderstandingSnapshotResponse(session_id=session_id, snapshot=updated)
