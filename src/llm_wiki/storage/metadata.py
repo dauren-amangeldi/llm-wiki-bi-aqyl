@@ -463,6 +463,28 @@ class TwinMessage(Base):
     )
 
 
+class AdvisorSession(Base):
+    """A single AI-advisor conversation — groups turns for list/resume.
+
+    Messages themselves are NOT stored here — they reuse the existing
+    ChatRecord mechanism (scope_type="advisor", scope_id=this row's id),
+    same table that already powers document/case chat history.
+    """
+
+    __tablename__ = "advisor_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_key: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 
@@ -1121,6 +1143,46 @@ async def clear_chat_messages(
         await session.delete(row)
     await session.commit()
     return len(rows)
+
+
+async def create_advisor_session(
+    session: AsyncSession, *, user_key: str, title: str
+) -> AdvisorSession:
+    """Create and persist a new advisor conversation."""
+    now = datetime.now(UTC)
+    row = AdvisorSession(
+        id=f"advisor-session-{int(now.timestamp() * 1000):x}",
+        user_key=user_key,
+        title=title[:200],
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def list_advisor_sessions(session: AsyncSession, *, user_key: str) -> list[AdvisorSession]:
+    """A user's past conversations, most recently active first."""
+    stmt = (
+        select(AdvisorSession)
+        .where(AdvisorSession.user_key == user_key)
+        .order_by(AdvisorSession.updated_at.desc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_advisor_session(session: AsyncSession, session_id: str) -> AdvisorSession | None:
+    """Fetch one advisor session by id, or None if it doesn't exist."""
+    return await session.get(AdvisorSession, session_id)
+
+
+async def touch_advisor_session(session: AsyncSession, session_id: str) -> None:
+    """Bump updated_at so the session reads as 'most recently active'."""
+    row = await session.get(AdvisorSession, session_id)
+    if row:
+        row.updated_at = datetime.now(UTC)
+        await session.commit()
 
 
 async def refresh_case_embedding(session: AsyncSession, case_id: str) -> bool:
