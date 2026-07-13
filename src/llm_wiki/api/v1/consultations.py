@@ -12,6 +12,7 @@ from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.schemas import (
     ClarificationQuestion,
     ClarificationRequiredResponse,
+    ConsultationOutcomeRequest,
     ConsultationRespondRequest,
     ConsultationSnapshotUpdate,
     ConsultationStartRequest,
@@ -23,8 +24,9 @@ from llm_wiki.storage.metadata import (
     append_chat_message,
     create_advisor_session,
     get_advisor_session,
+    list_advisor_sessions,
     list_chat_messages,
-    set_advisor_session_outcome,  # noqa: F401  (используется в Task 9)
+    set_advisor_session_outcome,
     set_advisor_session_state,
 )
 
@@ -217,3 +219,73 @@ async def confirm_snapshot(
     return StreamingResponse(
         event_generator(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
+
+
+@router.post("/advisor/consultations/{session_id}/outcome")
+async def set_outcome(
+    session_id: str,
+    body: ConsultationOutcomeRequest,
+    db: AsyncSession = Depends(get_db),
+    user_key: str = Depends(get_user_key),
+):
+    """Лёгкая фиксация результата консультации — без контроля исполнения."""
+    session = await get_advisor_session(db, session_id)
+    if session is None or session.user_key != user_key:
+        raise HTTPException(status_code=404, detail="Advisor session not found")
+    await set_advisor_session_outcome(db, session_id, body.outcome)
+    return {"session_id": session_id, "outcome": body.outcome}
+
+
+@router.get("/advisor/consultations")
+async def list_consultations(
+    db: AsyncSession = Depends(get_db),
+    user_key: str = Depends(get_user_key),
+) -> list[dict[str, object]]:
+    """Список консультаций текущего пользователя для блока «Мои консультации»."""
+    rows = await list_advisor_sessions(db, user_key=user_key)
+    return [
+        {
+            "id": r.id,
+            "title": r.title,
+            "state": r.state,
+            "outcome": r.outcome,
+            "updated_at": r.updated_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
+def _latest_by_kind(history, kind: str) -> dict | None:
+    """Найти последнее сообщение-ассистента заданного вида (обобщение _latest_snapshot)."""
+    for m in reversed(history):
+        if m.role != "assistant":
+            continue
+        try:
+            payload = json.loads(m.text)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if payload.get("kind") == kind:
+            return payload
+    return None
+
+
+@router.get("/advisor/consultations/{session_id}")
+async def get_consultation(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    user_key: str = Depends(get_user_key),
+) -> dict[str, object]:
+    """Полное состояние консультации для резюме прерванной сессии на фронте."""
+    session = await get_advisor_session(db, session_id)
+    if session is None or session.user_key != user_key:
+        raise HTTPException(status_code=404, detail="Advisor session not found")
+
+    history = await list_chat_messages(db, user_key=user_key, scope_type="advisor", scope_id=session_id)
+    return {
+        "session_id": session_id,
+        "state": session.state,
+        "outcome": session.outcome,
+        "questions": _latest_by_kind(history, "clarification_required"),
+        "snapshot": (_latest_by_kind(history, "understanding_snapshot") or {}).get("snapshot"),
+        "brief": (_latest_by_kind(history, "decision_brief") or {}).get("brief"),
+    }
