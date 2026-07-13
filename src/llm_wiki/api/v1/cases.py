@@ -19,13 +19,17 @@ class CaseBody(BaseModel):
     id: str | None = None
     title: str
     doc_ids: list[str] = []
+    sensitive: bool = True
 
 
 @router.get("/cases")
 async def list_cases(db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
     """Return all cases ordered by creation time."""
     rows = (await db.scalars(select(CaseRecord).order_by(CaseRecord.created_at))).all()
-    return [{"id": r.id, "title": r.title, "doc_ids": r.doc_ids or []} for r in rows]
+    return [
+        {"id": r.id, "title": r.title, "doc_ids": r.doc_ids or [], "sensitive": r.sensitive}
+        for r in rows
+    ]
 
 
 @router.post("/cases", status_code=201)
@@ -36,20 +40,21 @@ async def create_case(body: CaseBody, db: AsyncSession = Depends(get_db)) -> dic
         id=body.id or f"case-{int(now.timestamp() * 1000):x}-1",
         title=body.title.strip() or "Без названия",
         doc_ids=body.doc_ids,
+        sensitive=body.sensitive,
         created_at=now,
         updated_at=now,
     )
     db.add(case)
     await db.commit()
     await refresh_case_embedding(db, case.id)
-    return {"id": case.id, "title": case.title, "doc_ids": case.doc_ids}
+    return {"id": case.id, "title": case.title, "doc_ids": case.doc_ids, "sensitive": case.sensitive}
 
 
 @router.put("/cases/{case_id}")
 async def update_case(
     case_id: str, body: CaseBody, db: AsyncSession = Depends(get_db)
 ) -> dict[str, bool]:
-    """Update case title and document membership."""
+    """Update case title, document membership, and privacy."""
     row = await db.get(CaseRecord, case_id)
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -59,6 +64,7 @@ async def update_case(
         .values(
             title=body.title.strip() or row.title,
             doc_ids=body.doc_ids,
+            sensitive=body.sensitive,
             updated_at=datetime.now(UTC),
         )
     )

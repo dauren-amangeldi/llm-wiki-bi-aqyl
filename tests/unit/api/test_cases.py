@@ -63,6 +63,31 @@ async def test_list_cases_after_create(client: AsyncClient) -> None:
     assert titles == {"Alpha", "Beta"}
 
 
+async def test_create_case_defaults_to_sensitive(client: AsyncClient) -> None:
+    resp = await client.post("/api/v1/cases", json={"title": "Private by default"})
+    assert resp.status_code == 201
+    assert resp.json()["sensitive"] is True
+
+
+async def test_case_sensitive_flag_persists_across_reload(client: AsyncClient) -> None:
+    create_resp = await client.post(
+        "/api/v1/cases",
+        json={"id": "case-priv-1", "title": "Graduating", "doc_ids": []},
+    )
+    case_id = create_resp.json()["id"]
+
+    put_resp = await client.put(
+        f"/api/v1/cases/{case_id}",
+        json={"title": "Graduating", "doc_ids": [], "sensitive": False},
+    )
+    assert put_resp.status_code == 200
+
+    # Simulate a page reload: fetch the list fresh, as the frontend does on load().
+    list_resp = await client.get("/api/v1/cases")
+    updated = next(c for c in list_resp.json() if c["id"] == case_id)
+    assert updated["sensitive"] is False
+
+
 async def test_update_case(client: AsyncClient) -> None:
     create_resp = await client.post(
         "/api/v1/cases",

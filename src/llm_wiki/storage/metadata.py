@@ -24,7 +24,7 @@ from sqlalchemy import (
     update as sa_update,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from llm_wiki.config import settings
@@ -283,6 +283,12 @@ class CaseRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     doc_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Case-level privacy: new cases start private (sensitive=true) — an
+    # employee builds up their own case before explicitly making it public.
+    # Files uploaded to a private case are sent to /uploads with
+    # sensitive=true so the ingestion pipeline skips inference/indexing into
+    # the shared knowledge base (frontend: stores/cases.ts).
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -291,6 +297,20 @@ class CaseRecord(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
+    )
+
+
+async def ensure_case_columns(conn: AsyncConnection) -> None:
+    """Backfill columns added to CaseRecord after the table already existed.
+
+    create_all() only creates missing tables, not missing columns on
+    existing ones — needed once for any dev/prod DB created before the
+    `sensitive` column existed.
+    """
+    from sqlalchemy import text
+
+    await conn.execute(
+        text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT true")
     )
 
 
