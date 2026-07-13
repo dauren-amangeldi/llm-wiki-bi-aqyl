@@ -12,8 +12,9 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db
+from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db, get_user_key
 from llm_wiki.api.schemas import (
+    AdvisorHistoryTurn,
     AdvisorPointResponse,
     AdvisorRequest,
     AskRequest,
@@ -756,20 +757,61 @@ async def advisor_endpoint(
     body: AdvisorRequest,
     stream: bool = Query(False, description="When true, stream SSE progress events"),
     session: AsyncSession = Depends(get_db),
+    user_key: str = Depends(get_user_key),
     _rate_check: None = Depends(check_ask_rate_limit),
 ) -> StreamingResponse:
     """Run the Advisor Agent and return structured insights via SSE.
 
     The frontend hook ``useSSEStream`` appends ``?stream=true`` automatically.
-    Progress events use ``status``; the final event has ``done: true`` plus either
-    the full ``AdvisorResponse`` fields or a ``refusal`` payload.
+    Progress events use ``status``; the final event has ``done: true`` plus
+    either the full ``AdvisorResponse`` fields or a ``refusal`` payload, plus
+    ``session_id`` so the client can list/resume this conversation later.
     """
     from llm_wiki.agents.advisor import AdvisorAgent, HistoryTurn
     from llm_wiki.llm.chunk_store import ChunkStore
     from llm_wiki.llm.client import LLMClient
-    from llm_wiki.storage.metadata import resolve_skill_system_prompt
+    from llm_wiki.storage.metadata import (
+        append_chat_message,
+        create_advisor_session,
+        get_advisor_session,
+        list_chat_messages,
+        resolve_skill_system_prompt,
+        touch_advisor_session,
+    )
 
     role_prompt = await resolve_skill_system_prompt(session, body.role)
+
+    # Resolve the session: reuse an existing one, or start a new one titled
+    # after the first question (truncated — just for the session-list label).
+    if body.session_id:
+        advisor_session = await get_advisor_session(session, body.session_id)
+        if advisor_session is None:
+            raise HTTPException(status_code=404, detail="Advisor session not found")
+    else:
+        advisor_session = await create_advisor_session(session, user_key=user_key, title=body.query)
+
+    # Resuming a session with no client-supplied history: reconstruct it from
+    # what's already persisted, so the frontend doesn't need to keep it around
+    # across a page reload.
+    history = list(body.history)
+    if not history and body.session_id:
+        past = await list_chat_messages(
+            session, user_key=user_key, scope_type="advisor", scope_id=advisor_session.id
+        )
+        history = [
+            AdvisorHistoryTurn(role=m.role, content=m.text)  # type: ignore[arg-type]
+            for m in past
+            if m.role in ("user", "assistant")
+        ]
+
+    await append_chat_message(
+        session,
+        user_key=user_key,
+        scope_type="advisor",
+        scope_id=advisor_session.id,
+        role="user",
+        text_body=body.query,
+    )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         llm = LLMClient()
@@ -779,14 +821,12 @@ async def advisor_endpoint(
 
             chunk_store = ChunkStore(llm_client=llm)
             agent = AdvisorAgent(llm, chunk_store)
-            history = [
-                HistoryTurn(role=t.role, content=t.content) for t in body.history
-            ]
+            history_turns = [HistoryTurn(role=t.role, content=t.content) for t in history]
             result = await agent.advise(
                 query=body.query,
                 role=body.role,
                 language=body.language,
-                history=history or None,
+                history=history_turns or None,
                 system_prompt=role_prompt,
             )
 
@@ -794,14 +834,33 @@ async def advisor_endpoint(
                 yield _sse_line({"status": "synthesizing", "step": 2, "total": 2})
 
             if result.refusal:
+                await append_chat_message(
+                    session,
+                    user_key=user_key,
+                    scope_type="advisor",
+                    scope_id=advisor_session.id,
+                    role="assistant",
+                    text_body=result.refusal_message,
+                )
+                await touch_advisor_session(session, advisor_session.id)
                 yield _sse_line(
                     {
                         "done": True,
                         "refusal": True,
                         "refusal_message": result.refusal_message,
+                        "session_id": advisor_session.id,
                     }
                 )
             else:
+                await append_chat_message(
+                    session,
+                    user_key=user_key,
+                    scope_type="advisor",
+                    scope_id=advisor_session.id,
+                    role="assistant",
+                    text_body=result.summary,
+                )
+                await touch_advisor_session(session, advisor_session.id)
                 yield _sse_line(
                     {
                         "done": True,
@@ -820,6 +879,7 @@ async def advisor_endpoint(
                         "source": result.source,
                         "caseCount": result.caseCount,
                         "cost_usd": round(result.cost_usd, 6),
+                        "session_id": advisor_session.id,
                     }
                 )
         except Exception as exc:  # noqa: BLE001

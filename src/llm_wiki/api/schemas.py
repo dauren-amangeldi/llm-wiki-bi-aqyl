@@ -200,6 +200,7 @@ class AdvisorRequest(BaseModel):
     language: str = Field(default="ru", pattern="^(ru|en|kk)$")
     scope: str = Field(default="all", max_length=32)
     history: list[AdvisorHistoryTurn] = Field(default_factory=list)
+    session_id: str | None = None
 
 
 class AdvisorPointResponse(BaseModel):
