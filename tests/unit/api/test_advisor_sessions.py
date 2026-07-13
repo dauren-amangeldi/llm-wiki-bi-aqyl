@@ -87,3 +87,59 @@ async def test_advisor_with_session_id_reuses_it_and_persists_turns(client: Asyn
         break
     assert [m.role for m in msgs] == ["user", "assistant"]
     assert msgs[0].text == "А если конкретно про Алматы?"
+
+
+async def test_list_advisor_sessions_returns_only_the_caller_s_sessions(client: AsyncClient) -> None:
+    from llm_wiki.storage.metadata import create_advisor_session
+
+    session_factory = app.dependency_overrides[get_db]
+    async for db in session_factory():
+        await create_advisor_session(db, user_key="alice@bi.group", title="Mine")
+        await create_advisor_session(db, user_key="bob@bi.group", title="Not mine")
+        break
+
+    resp = await client.get("/api/v1/advisor/sessions", headers={"X-User-Email": "alice@bi.group"})
+    assert resp.status_code == 200
+    titles = [s["title"] for s in resp.json()]
+    assert titles == ["Mine"]
+
+
+async def test_get_session_messages_returns_404_for_someone_elses_session(client: AsyncClient) -> None:
+    from llm_wiki.storage.metadata import create_advisor_session
+
+    session_factory = app.dependency_overrides[get_db]
+    async for db in session_factory():
+        created = await create_advisor_session(db, user_key="bob@bi.group", title="Bob's")
+        break
+
+    resp = await client.get(
+        f"/api/v1/advisor/sessions/{created.id}/messages",
+        headers={"X-User-Email": "alice@bi.group"},
+    )
+    assert resp.status_code == 404
+
+
+async def test_get_session_messages_returns_persisted_turns(client: AsyncClient) -> None:
+    from llm_wiki.storage.metadata import append_chat_message, create_advisor_session
+
+    session_factory = app.dependency_overrides[get_db]
+    async for db in session_factory():
+        created = await create_advisor_session(db, user_key="alice@bi.group", title="Mine")
+        await append_chat_message(
+            db, user_key="alice@bi.group", scope_type="advisor", scope_id=created.id,
+            role="user", text_body="Вопрос",
+        )
+        await append_chat_message(
+            db, user_key="alice@bi.group", scope_type="advisor", scope_id=created.id,
+            role="assistant", text_body="Ответ",
+        )
+        break
+
+    resp = await client.get(
+        f"/api/v1/advisor/sessions/{created.id}/messages",
+        headers={"X-User-Email": "alice@bi.group"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [m["role"] for m in body] == ["user", "assistant"]
+    assert body[0]["text"] == "Вопрос"
