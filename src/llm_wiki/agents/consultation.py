@@ -15,7 +15,7 @@ from typing import Any
 import structlog
 from pydantic import ValidationError
 
-from llm_wiki.api.schemas import ClarificationQuestion
+from llm_wiki.api.schemas import ClarificationQuestion, QuestionAnswer, UnderstandingSnapshot
 from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
 from llm_wiki.llm.client import LLMClient
 
@@ -24,6 +24,16 @@ logger = structlog.get_logger(__name__)
 MAX_QUESTIONS = 5
 DISCOVERY_TOP_K = 5
 DISCOVERY_FILE_ID = "advisor-discovery"
+SNAPSHOT_FILE_ID = "advisor-snapshot"
+
+SNAPSHOT_SYSTEM_PROMPT = """\
+Ты собираешь снимок понимания управленческого решения из исходного запроса
+и ответов на уточняющие вопросы (пропущенные вопросы — это отсутствие
+данных, а не отказ от решения). Верни строго JSON с полями: decision,
+desired_outcome, horizon, constraints (list[str]), stakeholders (list[str]),
+success_criteria (list[str]), assumptions (list[str]). Не выдумывай факты —
+если данных нет, оставляй список пустым или допущение явным.
+"""
 
 DISCOVERY_SYSTEM_PROMPT = """\
 Ты — модуль постановки задачи AI-советника BI Group. По запросу руководителя:
@@ -54,13 +64,13 @@ def _format_light_matches(hits: list[ChunkHit]) -> str:
     return "\n".join(f"- {hit.title or hit.slug}" for hit in hits)
 
 
-def _parse_discovery_response(raw: str) -> dict[str, Any] | None:
-    """Parse the LLM's discovery reply, returning ``None`` on any malformed input.
+def _parse_json_object(raw: str, *, log_event: str) -> dict[str, Any] | None:
+    """Parse an LLM JSON reply, returning ``None`` on any malformed input.
 
     Mirrors the graceful-degradation pattern used by
     ``AdvisorAgent._parse_response`` (advisor.py:194-206): callers get a
     sentinel instead of a propagated exception, and log the raw text for
-    debugging.
+    debugging. Shared by the discovery and understanding-snapshot steps.
     """
     text = raw.strip()
     if text.startswith("```"):
@@ -69,10 +79,10 @@ def _parse_discovery_response(raw: str) -> dict[str, Any] | None:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        logger.warning("discovery_response_unparseable", raw=raw[:200])
+        logger.warning(f"{log_event}_unparseable", raw=raw[:200])
         return None
     if not isinstance(data, dict):
-        logger.warning("discovery_response_not_object", raw=raw[:200])
+        logger.warning(f"{log_event}_not_object", raw=raw[:200])
         return None
     return data
 
@@ -100,7 +110,7 @@ async def run_discovery(
         agent_type="advisor",
         response_format="json",
     )
-    raw = _parse_discovery_response(text)
+    raw = _parse_json_object(text, log_event="discovery_response")
     if raw is None or "decision_type" not in raw:
         logger.warning("discovery_response_invalid", raw=text[:200])
         return DiscoveryResult(decision_type="unknown", sufficient_context=False, questions=[])
@@ -122,3 +132,58 @@ async def run_discovery(
         sufficient_context=bool(raw.get("sufficient_context", False)),
         questions=questions,
     )
+
+
+def _fallback_snapshot(query: str) -> UnderstandingSnapshot:
+    """Degrade gracefully when the LLM reply is missing or malformed: keep the
+    original query as the decision and leave the rest for a human to fill in."""
+    return UnderstandingSnapshot(
+        decision=query,
+        desired_outcome="",
+        horizon="",
+        constraints=[],
+        stakeholders=[],
+        success_criteria=[],
+        assumptions=[],
+    )
+
+
+def _format_qa(questions: list[ClarificationQuestion], answers: list[QuestionAnswer]) -> str:
+    if not answers:
+        return "(вопросы не задавались или все пропущены)"
+    qa_by_id = {q.id: q for q in questions}
+    lines = []
+    for a in answers:
+        q = qa_by_id.get(a.question_id)
+        q_text = q.text if q else a.question_id
+        lines.append(f"- {q_text} → {'(пропущено)' if a.skipped else a.answer}")
+    return "\n".join(lines)
+
+
+async def build_snapshot(
+    llm: LLMClient, *, query: str, questions: list[ClarificationQuestion], answers: list[QuestionAnswer]
+) -> UnderstandingSnapshot:
+    """Собрать снимок понимания из исходного запроса и ответов пользователя.
+
+    Graceful degradation mirrors ``run_discovery``: any malformed or
+    unparseable LLM reply falls back to a blank snapshot instead of raising.
+    """
+    qa_block = _format_qa(questions, answers)
+
+    text, _usage = await llm.complete(
+        prompt=f"Исходный запрос: {query}\n\nОтветы:\n{qa_block}",
+        system=SNAPSHOT_SYSTEM_PROMPT,
+        file_id=SNAPSHOT_FILE_ID,
+        agent_type="advisor",
+        response_format="json",
+    )
+    raw = _parse_json_object(text, log_event="snapshot_response")
+    if raw is None:
+        logger.warning("snapshot_response_invalid", raw=text[:200])
+        return _fallback_snapshot(query)
+
+    try:
+        return UnderstandingSnapshot(**raw)
+    except ValidationError as exc:
+        logger.warning("snapshot_response_validation_failed", error=str(exc), raw=text[:200])
+        return _fallback_snapshot(query)
