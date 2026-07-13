@@ -16,7 +16,7 @@ from llm_wiki.api.v1 import router as v1_router
 from llm_wiki.config import settings
 from llm_wiki.logging_config import configure_logging
 from llm_wiki.storage.filesystem import ensure_dirs
-from llm_wiki.storage.metadata import Base, ensure_case_columns
+from llm_wiki.storage.metadata import Base, ensure_advisor_session_columns, ensure_case_columns
 from llm_wiki.storage.wiki_fts import ensure_wiki_fts_table
 
 logger = structlog.get_logger(__name__)
@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_wiki_fts_table(conn)
         await ensure_case_columns(conn)
+        await ensure_advisor_session_columns(conn)
 
     # Seed default skills on an empty database. (Wiki pages live in wiki_fts,
     # which is the source of truth — no S3 backfill needed.)

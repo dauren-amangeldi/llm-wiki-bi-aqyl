@@ -485,6 +485,8 @@ class AdvisorSession(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+    state: Mapped[str] = mapped_column(String, nullable=False, default="discovery")
+    outcome: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
 
 
 
@@ -1182,6 +1184,35 @@ async def touch_advisor_session(session: AsyncSession, session_id: str) -> None:
     row = await session.get(AdvisorSession, session_id)
     if row:
         row.updated_at = datetime.now(UTC)
+        await session.commit()
+
+
+async def ensure_advisor_session_columns(conn: AsyncConnection) -> None:
+    """Idempotent backfill for AdvisorSession.state/outcome on pre-existing rows."""
+    from sqlalchemy import text
+
+    await conn.execute(
+        text("ALTER TABLE advisor_sessions ADD COLUMN IF NOT EXISTS state varchar NOT NULL DEFAULT 'discovery'")
+    )
+    await conn.execute(
+        text("ALTER TABLE advisor_sessions ADD COLUMN IF NOT EXISTS outcome varchar")
+    )
+
+
+async def set_advisor_session_state(session: AsyncSession, session_id: str, state: str) -> None:
+    """Move a consultation to a new pipeline state (discovery/context_review/synthesizing/completed/...)."""
+    row = await session.get(AdvisorSession, session_id)
+    if row:
+        row.state = state
+        row.updated_at = datetime.now(UTC)
+        await session.commit()
+
+
+async def set_advisor_session_outcome(session: AsyncSession, session_id: str, outcome: str) -> None:
+    """Record the lightweight outcome fixation (decided/need_info/postponed/rejected)."""
+    row = await session.get(AdvisorSession, session_id)
+    if row:
+        row.outcome = outcome
         await session.commit()
 
 
