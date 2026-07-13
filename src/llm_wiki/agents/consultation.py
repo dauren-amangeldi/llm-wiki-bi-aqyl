@@ -105,15 +105,20 @@ async def run_discovery(
         logger.warning("discovery_response_invalid", raw=text[:200])
         return DiscoveryResult(decision_type="unknown", sufficient_context=False, questions=[])
 
+    raw_questions = raw.get("questions", [])
+    if not isinstance(raw_questions, list):
+        logger.warning("discovery_questions_not_list", questions=raw_questions)
+        raw_questions = []
+
     questions: list[ClarificationQuestion] = []
-    for item in raw.get("questions", [])[:MAX_QUESTIONS]:
+    for item in raw_questions[:MAX_QUESTIONS]:
         try:
             questions.append(ClarificationQuestion(**item))
         except (TypeError, ValidationError) as exc:
             logger.warning("discovery_question_invalid", error=str(exc), item=item)
 
     return DiscoveryResult(
-        decision_type=raw["decision_type"],
+        decision_type=str(raw["decision_type"]),
         sufficient_context=bool(raw.get("sufficient_context", False)),
         questions=questions,
     )

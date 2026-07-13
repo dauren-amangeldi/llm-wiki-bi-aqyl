@@ -106,3 +106,25 @@ async def test_run_discovery_degrades_gracefully_on_malformed_llm_json() -> None
     assert result.decision_type == "unknown"
     assert result.sufficient_context is False
     assert result.questions == []
+
+
+async def test_run_discovery_degrades_gracefully_on_non_list_questions() -> None:
+    """LLM returning a non-list ``questions`` field must not crash with a TypeError."""
+    llm = _llm_returning(
+        {
+            "decision_type": "cost_optimization",
+            "sufficient_context": False,
+            "questions": 42,
+        }
+    )
+    chunk_store = MagicMock()
+    chunk_store.query = MagicMock(return_value=[])
+
+    result = await run_discovery(
+        llm, chunk_store, query="Как сократить затраты?", role="employee", language="ru"
+    )
+
+    assert isinstance(result, DiscoveryResult)
+    assert result.decision_type == "cost_optimization"
+    assert result.sufficient_context is False
+    assert result.questions == []
