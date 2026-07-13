@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from pydantic import ValidationError
 
 from llm_wiki.api.schemas import ClarificationQuestion
 from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
@@ -53,14 +54,26 @@ def _format_light_matches(hits: list[ChunkHit]) -> str:
     return "\n".join(f"- {hit.title or hit.slug}" for hit in hits)
 
 
-def _parse_discovery_response(raw: str) -> dict[str, Any]:
+def _parse_discovery_response(raw: str) -> dict[str, Any] | None:
+    """Parse the LLM's discovery reply, returning ``None`` on any malformed input.
+
+    Mirrors the graceful-degradation pattern used by
+    ``AdvisorAgent._parse_response`` (advisor.py:194-206): callers get a
+    sentinel instead of a propagated exception, and log the raw text for
+    debugging.
+    """
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning("discovery_response_unparseable", raw=raw[:200])
+        return None
     if not isinstance(data, dict):
-        raise ValueError("discovery response is not a JSON object")
+        logger.warning("discovery_response_not_object", raw=raw[:200])
+        return None
     return data
 
 
@@ -88,8 +101,17 @@ async def run_discovery(
         response_format="json",
     )
     raw = _parse_discovery_response(text)
+    if raw is None or "decision_type" not in raw:
+        logger.warning("discovery_response_invalid", raw=text[:200])
+        return DiscoveryResult(decision_type="unknown", sufficient_context=False, questions=[])
 
-    questions = [ClarificationQuestion(**q) for q in raw.get("questions", [])][:MAX_QUESTIONS]
+    questions: list[ClarificationQuestion] = []
+    for item in raw.get("questions", [])[:MAX_QUESTIONS]:
+        try:
+            questions.append(ClarificationQuestion(**item))
+        except (TypeError, ValidationError) as exc:
+            logger.warning("discovery_question_invalid", error=str(exc), item=item)
+
     return DiscoveryResult(
         decision_type=raw["decision_type"],
         sufficient_context=bool(raw.get("sufficient_context", False)),

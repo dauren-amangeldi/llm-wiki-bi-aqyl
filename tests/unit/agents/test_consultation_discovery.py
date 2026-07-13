@@ -86,3 +86,23 @@ async def test_run_discovery_returns_no_questions_when_context_sufficient() -> N
 
     assert result.sufficient_context is True
     assert result.questions == []
+
+
+async def test_run_discovery_degrades_gracefully_on_malformed_llm_json() -> None:
+    """LLM returning prose instead of JSON must not crash run_discovery."""
+    llm = AsyncMock()
+    usage = MagicMock(cost_usd=0.0)
+    llm.complete = AsyncMock(
+        return_value=("Извините, не могу сформировать структурированный ответ.", usage)
+    )
+    chunk_store = MagicMock()
+    chunk_store.query = MagicMock(return_value=[])
+
+    result = await run_discovery(
+        llm, chunk_store, query="Стоит ли масштабировать пилот?", role="employee", language="ru"
+    )
+
+    assert isinstance(result, DiscoveryResult)
+    assert result.decision_type == "unknown"
+    assert result.sufficient_context is False
+    assert result.questions == []
