@@ -1,11 +1,13 @@
 """AI-советник — стратегическая консультация: старт и переходы состояния."""
 
 import json
+from collections.abc import AsyncGenerator as AsyncGeneratorType
 
 from fastapi import Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import StreamingResponse
 
-from llm_wiki.agents.consultation import build_snapshot, run_discovery
+from llm_wiki.agents.consultation import build_snapshot, run_discovery, run_synthesis
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.schemas import (
     ClarificationQuestion,
@@ -22,8 +24,13 @@ from llm_wiki.storage.metadata import (
     create_advisor_session,
     get_advisor_session,
     list_chat_messages,
+    set_advisor_session_outcome,  # noqa: F401  (используется в Task 9)
     set_advisor_session_state,
 )
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 def _blank_snapshot(query: str) -> UnderstandingSnapshot:
@@ -167,3 +174,46 @@ async def update_snapshot(
         role="assistant", text_body=json.dumps({"kind": "understanding_snapshot", "snapshot": updated.model_dump()}),
     )
     return UnderstandingSnapshotResponse(session_id=session_id, snapshot=updated)
+
+
+@router.post("/advisor/consultations/{session_id}/confirm")
+async def confirm_snapshot(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    user_key: str = Depends(get_user_key),
+) -> StreamingResponse:
+    """Подтвердить снимок понимания и получить decision brief (SSE-прогресс)."""
+    session = await get_advisor_session(db, session_id)
+    if session is None or session.user_key != user_key:
+        raise HTTPException(status_code=404, detail="Advisor session not found")
+
+    history = await list_chat_messages(db, user_key=user_key, scope_type="advisor", scope_id=session_id)
+    snapshot = _latest_snapshot(history)
+    if snapshot is None:
+        raise HTTPException(status_code=409, detail="No confirmed snapshot yet")
+    original_query = next((m.text for m in history if m.role == "user"), snapshot.decision)
+
+    async def event_generator() -> AsyncGeneratorType[str, None]:
+        from llm_wiki.llm.chunk_store import ChunkStore
+        from llm_wiki.llm.client import LLMClient
+
+        llm = LLMClient()
+        try:
+            yield _sse({"status": "searching"})
+            chunk_store = ChunkStore(llm_client=llm)
+            yield _sse({"status": "synthesizing"})
+            brief = await run_synthesis(llm, chunk_store, query=original_query, snapshot=snapshot, language="ru")
+            yield _sse({"status": "reviewing"})
+        finally:
+            await llm.aclose()
+
+        await set_advisor_session_state(db, session_id, "completed")
+        await append_chat_message(
+            db, user_key=user_key, scope_type="advisor", scope_id=session_id,
+            role="assistant", text_body=json.dumps({"kind": "decision_brief", "brief": brief.model_dump()}),
+        )
+        yield _sse({"mode": "decision_brief", "session_id": session_id, "brief": brief.model_dump()})
+
+    return StreamingResponse(
+        event_generator(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
