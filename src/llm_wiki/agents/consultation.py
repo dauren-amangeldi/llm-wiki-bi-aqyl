@@ -15,7 +15,7 @@ from typing import Any
 import structlog
 from pydantic import ValidationError
 
-from llm_wiki.api.schemas import ClarificationQuestion, QuestionAnswer, UnderstandingSnapshot
+from llm_wiki.api.schemas import ClarificationQuestion, DecisionBrief, QuestionAnswer, UnderstandingSnapshot
 from llm_wiki.llm.chunk_store import ChunkHit, ChunkStore
 from llm_wiki.llm.client import LLMClient
 
@@ -23,8 +23,30 @@ logger = structlog.get_logger(__name__)
 
 MAX_QUESTIONS = 5
 DISCOVERY_TOP_K = 5
+SYNTHESIS_TOP_K = 10
 DISCOVERY_FILE_ID = "advisor-discovery"
 SNAPSHOT_FILE_ID = "advisor-snapshot"
+SYNTHESIS_FILE_ID = "advisor-synthesis"
+CRITIQUE_FILE_ID = "advisor-critique"
+
+SYNTHESIS_SYSTEM_PROMPT = """\
+Ты формируешь decision brief для руководителя BI Group на основе снимка
+понимания и найденных внутренних кейсов. Раздели факты, вводные
+пользователя, свои выводы и допущения. Рекомендация — первой. Верни строго
+JSON с полями: recommendation, why_now, problem_frame, key_assumption,
+rationale, alternatives (list[str]), risks (list[str]), first_step,
+reconsider_if (list[str]), evidence_strength ("high"/"medium"/"low"),
+assumptions (list[str]), sources (list[str]).
+"""
+
+CRITIQUE_SYSTEM_PROMPT = """\
+Ты — внутренний критик уже сформированного decision brief. Проверь: слабое
+допущение, альтернативное объяснение, опровергающие кейсы, последствия
+второго порядка, соответствие источникам. Верни JSON только с полями,
+которые нужно скорректировать по итогам критики: risks (list[str]),
+evidence_strength ("high"/"medium"/"low"), reconsider_if (list[str]).
+Не смягчай тон искусственно — только по существу.
+"""
 
 SNAPSHOT_SYSTEM_PROMPT = """\
 Ты собираешь снимок понимания управленческого решения из исходного запроса
@@ -187,3 +209,82 @@ async def build_snapshot(
     except ValidationError as exc:
         logger.warning("snapshot_response_validation_failed", error=str(exc), raw=text[:200])
         return _fallback_snapshot(query)
+
+
+def _format_deep_matches(hits: list[ChunkHit]) -> str:
+    if not hits:
+        return "(релевантных кейсов не найдено)"
+    return "\n".join(f"- {hit.title or hit.slug}: {hit.text}" for hit in hits)
+
+
+def _fallback_brief(query: str) -> DecisionBrief:
+    """Degrade gracefully when the draft LLM reply is missing or malformed: keep
+    the brief minimally honest instead of raising out of a pure function."""
+    return DecisionBrief(
+        recommendation=f"Недостаточно данных для рекомендации по запросу: {query}",
+        why_now="",
+        problem_frame=query,
+        key_assumption="",
+        rationale="Черновик decision brief не удалось сформировать из ответа модели.",
+        alternatives=[],
+        risks=[],
+        first_step="Уточнить запрос и повторить синтез вручную.",
+        reconsider_if=[],
+        evidence_strength="low",
+        assumptions=[],
+        sources=[],
+    )
+
+
+async def run_synthesis(
+    llm: LLMClient, chunk_store: ChunkStore, *, query: str, snapshot: UnderstandingSnapshot, language: str
+) -> DecisionBrief:
+    """Глубокий поиск → синтез рекомендации → внутренний критический проход.
+
+    Graceful degradation mirrors ``run_discovery``/``build_snapshot``: a
+    malformed draft reply falls back to a minimal low-confidence brief; a
+    malformed critique reply simply keeps the draft brief unchanged instead
+    of failing the whole synthesis.
+    """
+    try:
+        deep_matches = chunk_store.query(f"{query}\n{snapshot.decision}", top_k=SYNTHESIS_TOP_K)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("synthesis_chunk_query_failed", error=str(exc))
+        deep_matches = []
+
+    context_block = _format_deep_matches(deep_matches)
+
+    draft_text, _usage = await llm.complete(
+        prompt=(
+            f"Язык ответа: {language}.\nСнимок понимания: {snapshot.model_dump_json()}\n\n"
+            f"Найденные материалы:\n{context_block}"
+        ),
+        system=SYNTHESIS_SYSTEM_PROMPT,
+        file_id=SYNTHESIS_FILE_ID,
+        agent_type="advisor",
+        response_format="json",
+    )
+    draft_raw = _parse_json_object(draft_text, log_event="synthesis_draft_response")
+    if draft_raw is None:
+        logger.warning("synthesis_draft_response_invalid", raw=draft_text[:200])
+        return _fallback_brief(query)
+
+    try:
+        draft = DecisionBrief(**draft_raw)
+    except (TypeError, ValidationError) as exc:
+        logger.warning("synthesis_draft_response_validation_failed", error=str(exc), raw=draft_text[:200])
+        return _fallback_brief(query)
+
+    critique_text, _usage = await llm.complete(
+        prompt=f"Черновик brief: {draft.model_dump_json()}\n\nНайденные материалы:\n{context_block}",
+        system=CRITIQUE_SYSTEM_PROMPT,
+        file_id=CRITIQUE_FILE_ID,
+        agent_type="advisor",
+        response_format="json",
+    )
+    critique_raw = _parse_json_object(critique_text, log_event="synthesis_critique_response")
+    if critique_raw is None:
+        logger.warning("synthesis_critique_response_invalid", raw=critique_text[:200])
+        return draft
+
+    return draft.model_copy(update={k: v for k, v in critique_raw.items() if v is not None})
