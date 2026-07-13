@@ -246,3 +246,98 @@ class SkillUpdateRequest(BaseModel):
         if self.system_prompt is not None:
             return self.system_prompt
         return self.content
+
+
+# ── AI-советник: стратегическая консультация ──────────────────────────
+
+class ConsultationStartRequest(BaseModel):
+    """Тело POST /api/v1/advisor/consultations."""
+
+    query: str = Field(min_length=3, max_length=2000)
+    role: str = Field(default="employee", max_length=64)
+    language: str = Field(default="ru", pattern="^(ru|en|kk)$")
+
+
+class ClarificationQuestion(BaseModel):
+    id: str
+    text: str
+    why_it_matters: str = ""
+    options: list[str] = Field(default_factory=list)
+    allow_custom: bool = True
+    required: bool = False
+
+
+class ClarificationRequiredResponse(BaseModel):
+    mode: Literal["clarification_required"] = "clarification_required"
+    session_id: str
+    decision_type: str
+    questions: list[ClarificationQuestion]
+    question_limit: int = 5
+
+
+class QuestionAnswer(BaseModel):
+    question_id: str
+    answer: str = ""
+    skipped: bool = False
+
+
+class ConsultationRespondRequest(BaseModel):
+    """Тело POST /api/v1/advisor/consultations/{id}/respond."""
+
+    answers: list[QuestionAnswer] = Field(default_factory=list)
+    give_advice_now: bool = False
+
+
+class UnderstandingSnapshot(BaseModel):
+    decision: str
+    desired_outcome: str
+    horizon: str
+    constraints: list[str] = Field(default_factory=list)
+    stakeholders: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class UnderstandingSnapshotResponse(BaseModel):
+    mode: Literal["understanding_snapshot"] = "understanding_snapshot"
+    session_id: str
+    snapshot: UnderstandingSnapshot
+
+
+class ConsultationSnapshotUpdate(BaseModel):
+    """Тело PUT /api/v1/advisor/consultations/{id}/snapshot — частичное обновление."""
+
+    decision: str | None = None
+    desired_outcome: str | None = None
+    horizon: str | None = None
+    constraints: list[str] | None = None
+    stakeholders: list[str] | None = None
+    success_criteria: list[str] | None = None
+    assumptions: list[str] | None = None
+
+
+class DecisionBrief(BaseModel):
+    recommendation: str
+    why_now: str
+    problem_frame: str
+    key_assumption: str
+    rationale: str
+    alternatives: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    first_step: str
+    reconsider_if: list[str] = Field(default_factory=list)
+    evidence_strength: Literal["high", "medium", "low"]
+    assumptions: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+
+
+class DecisionBriefResponse(BaseModel):
+    mode: Literal["decision_brief"] = "decision_brief"
+    session_id: str
+    brief: DecisionBrief
+
+
+class ConsultationOutcomeRequest(BaseModel):
+    """Тело POST /api/v1/advisor/consultations/{id}/outcome — лёгкая фиксация результата."""
+
+    outcome: Literal["decided", "need_info", "postponed", "rejected"]
