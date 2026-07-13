@@ -273,6 +273,35 @@ async def test_twin_chat_rejects_more_than_three_personas(client: AsyncClient) -
     assert resp.status_code == 422
 
 
+async def test_twin_chat_dedupes_repeated_persona_ids(client: AsyncClient) -> None:
+    """A client sending the same persona id twice must get one reply, not two."""
+    from llm_wiki.agents.twins import ChatReplyResult
+
+    agent = MagicMock()
+    agent.route_message = AsyncMock(return_value=["musk"])
+    agent.respond_as_persona = AsyncMock(
+        return_value=ChatReplyResult(persona_id="musk", text="Ответ.", cite="")
+    )
+
+    with patch("llm_wiki.api.v1.twins.TwinsAgent", return_value=agent), patch(
+        "llm_wiki.api.v1.twins.load_case_context", return_value="ctx"
+    ), patch("llm_wiki.llm.client.LLMClient") as mock_llm_cls:
+        mock_llm = MagicMock()
+        mock_llm.aclose = AsyncMock()
+        mock_llm_cls.return_value = mock_llm
+
+        resp = await client.post(
+            "/api/v1/twin/chat",
+            json={
+                "case_id": "case-1", "persona_ids": ["musk", "musk"],
+                "message": "Привет", "language": "ru",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert agent.respond_as_persona.await_count == 1
+
+
 async def test_summarize_session_returns_verdict_and_persists_it(
     client: AsyncClient, db_engine
 ) -> None:

@@ -9,7 +9,7 @@ from typing import Literal
 import structlog
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.agents.twins import TwinPersonaData, TwinsAgent, build_chat_transcript, load_case_context
@@ -116,6 +116,11 @@ class TwinChatRequest(BaseModel):
     persona_ids: list[str] = Field(min_length=1, max_length=3)
     message: str = Field(min_length=1, max_length=4000)
     language: str = "ru"
+
+    @field_validator("persona_ids")
+    @classmethod
+    def _dedupe_persona_ids(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
 
 @router.post(

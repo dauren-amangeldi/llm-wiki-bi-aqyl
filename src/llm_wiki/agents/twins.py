@@ -71,6 +71,11 @@ def build_chat_transcript(
         else:
             speaker = real_name_by_id.get(m.persona_id or "", m.persona_id or "?")
         text = m.content.get("text", "") if isinstance(m.content, dict) else ""
+        # ponytail: collapse newlines so a message can't forge its own
+        # "ИмяПерсоны: ..." line and spoof another speaker's turn. Doesn't
+        # stop single-line instruction injection — accepted risk for an
+        # internal tool with a JSON-schema-constrained router.
+        text = " ".join(text.splitlines())
         lines.append(f"{speaker}: {text}")
     return "\n".join(lines)
 
