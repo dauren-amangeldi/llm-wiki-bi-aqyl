@@ -293,6 +293,11 @@ class CaseRecord(Base):
     # "external" (world/university/books/public sources). Chosen once by the
     # user when the case is created — not auto-detected.
     source: Mapped[str] = mapped_column(String, nullable=False, default="internal")
+    # Employee who created the case (User.id) — powers the "top employees by
+    # case count" leaderboard. Nullable: cases created before this column
+    # existed (or via a client that sends no identity header) have no owner
+    # and are excluded from the leaderboard rather than mis-attributed.
+    owner_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -309,7 +314,7 @@ async def ensure_case_columns(conn: AsyncConnection) -> None:
 
     create_all() only creates missing tables, not missing columns on
     existing ones — needed once for any dev/prod DB created before the
-    `sensitive`/`source` columns existed.
+    `sensitive`/`source`/`owner_id` columns existed.
     """
     from sqlalchemy import text
 
@@ -318,6 +323,9 @@ async def ensure_case_columns(conn: AsyncConnection) -> None:
     )
     await conn.execute(
         text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS source varchar NOT NULL DEFAULT 'internal'")
+    )
+    await conn.execute(
+        text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner_id varchar")
     )
 
 

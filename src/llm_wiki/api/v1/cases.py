@@ -9,7 +9,8 @@ from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import get_db
+from llm_wiki.api.deps import get_current_user, get_db
+from llm_wiki.api.schemas import CurrentUser
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import CaseRecord, find_similar_cases, refresh_case_embedding
 
@@ -43,8 +44,12 @@ async def list_cases(db: AsyncSession = Depends(get_db)) -> list[dict[str, objec
 
 
 @router.post("/cases", status_code=201)
-async def create_case(body: CaseBody, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
-    """Create a new case container."""
+async def create_case(
+    body: CaseBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Create a new case container, attributed to the creating user."""
     now = datetime.now(UTC)
     case = CaseRecord(
         id=body.id or f"case-{int(now.timestamp() * 1000):x}-1",
@@ -52,6 +57,7 @@ async def create_case(body: CaseBody, db: AsyncSession = Depends(get_db)) -> dic
         doc_ids=body.doc_ids,
         sensitive=body.sensitive,
         source=body.source,
+        owner_id=current_user.id,
         created_at=now,
         updated_at=now,
     )

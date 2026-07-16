@@ -72,11 +72,11 @@ async def get_current_user(
         user = await get_or_create_user(session, user_id, name, role)
         return CurrentUser(id=user.id, name=user.name, role=user.role)
 
-    user_id = request.headers.get("X-User-Id", "dev-user")
-    name = request.headers.get("X-User-Name", "Dev User")
+    user_id = request.headers.get("X-User-Email") or request.headers.get("X-User-Id", "dev-user")
+    name = request.headers.get("X-User-Name", user_id)
     role = request.headers.get("X-User-Role", "admin")
 
-    if user_id == "dev-user" and "X-User-Id" not in request.headers:
+    if user_id == "dev-user" and "X-User-Id" not in request.headers and "X-User-Email" not in request.headers:
         user = await ensure_dev_user(session)
     else:
         user = await get_or_create_user(session, user_id, name, role)

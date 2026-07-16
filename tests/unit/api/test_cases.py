@@ -177,3 +177,20 @@ async def test_similar_cases_empty_for_unknown_case(client: AsyncClient) -> None
     resp = await client.get("/api/v1/cases/does-not-exist/similar")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+async def test_create_case_records_owner_from_email_header(
+    client: AsyncClient, db_session
+) -> None:
+    resp = await client.post(
+        "/api/v1/cases",
+        json={"id": "case-owner-1", "title": "Owned case"},
+        headers={"X-User-Email": "alice@bi.group"},
+    )
+    assert resp.status_code == 201
+
+    from llm_wiki.storage.metadata import CaseRecord
+
+    row = await db_session.get(CaseRecord, "case-owner-1")
+    assert row is not None
+    assert row.owner_id == "alice@bi.group"
