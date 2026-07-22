@@ -41,9 +41,25 @@ def _extract_title(content: str, slug: str) -> str:
     return slug.replace("-", " ").title()
 
 
+_FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n?", re.DOTALL)
+
+
+def _strip_frontmatter(content: str) -> str:
+    """Remove a leading YAML frontmatter block (---\\n...\\n---) if present.
+
+    Ingested pages carry a title/tags/summary frontmatter block that the
+    frontend parses out before rendering the full page — but the plain-text
+    snippet below is generated straight from the raw stored body, so without
+    this the first ~200 chars of every snippet were the raw frontmatter
+    (dashes, `tags: [...]`, etc.) instead of actual page content.
+    """
+    return _FRONTMATTER_RE.sub("", content, count=1)
+
+
 def _plain_snippet(content: str, length: int = 200) -> str:
     """Strip markdown noise and return a short plain-text preview."""
-    text = re.sub(r"^#+\s*", "", content, flags=re.MULTILINE)
+    text = _strip_frontmatter(content)
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
     text = re.sub(r"[*_`>]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -85,7 +101,9 @@ async def list_wiki_pages(
                 continue
             meta = wiki_store.get_page_meta(hit.slug)
             updated = meta.updated_at if meta else datetime.now(timezone.utc)
-            results.append(_summary(hit.slug, content, updated, snippet=hit.snippet))
+            results.append(
+                _summary(hit.slug, content, updated, snippet=_strip_frontmatter(hit.snippet))
+            )
         return results[offset : offset + limit]
 
     results = []
