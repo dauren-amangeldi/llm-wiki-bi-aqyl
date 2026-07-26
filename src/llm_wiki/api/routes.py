@@ -772,6 +772,8 @@ async def search_documents(
         .limit(limit)
     )
     rows = (await session.scalars(stmt)).all()
+    from llm_wiki.api.v1.documents import _content_type_for
+
     return [
         DocumentSearchResult(
             document_id=fr.file_id,
@@ -780,7 +782,7 @@ async def search_documents(
             scope="internal",
             classification="",
             score=1.0,
-            content_type="pdf" if fr.original_name.lower().endswith(".pdf") else "markdown",
+            content_type=_content_type_for(fr.original_name),
         )
         for fr in rows
     ]

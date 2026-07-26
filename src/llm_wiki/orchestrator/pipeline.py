@@ -20,6 +20,8 @@ from llm_wiki.config import settings
 from llm_wiki.llm.chunk_store import ChunkStore
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
+from llm_wiki.parsers.audio import transcribe_audio
+from llm_wiki.parsers.docx import parse_docx
 from llm_wiki.parsers.markdown import parse_markdown_file
 from llm_wiki.parsers.pdf import parse_pdf
 from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
@@ -34,6 +36,9 @@ from llm_wiki.storage.metadata import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Audio formats that are transcribed to text before ingestion.
+_AUDIO_EXTENSIONS = frozenset({".mp3", ".ogg", ".wav", ".m4a", ".webm"})
 
 
 class FileState(StrEnum):
@@ -326,9 +331,12 @@ def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
     when available; falls back to a legacy scan of the ``raw/`` prefix for
     files uploaded before date-partitioning.
 
+    Supports ``.pdf``, ``.md``, ``.txt``, ``.docx`` (extracted locally) and
+    audio (``.mp3``/``.ogg``/``.wav``/``.m4a``/``.webm``, transcribed via OpenAI).
+
     Raises:
         FileNotFoundError: If no raw object for *file_id* exists.
-        ValueError: If the file extension is not ``.pdf`` or ``.md``.
+        ValueError: If the file extension is not a supported type.
     """
     from llm_wiki.storage.object_store import RAW_PREFIX, get_object_store
 
@@ -355,6 +363,12 @@ def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
             return parse_pdf(path)
         if ext == ".md":
             return parse_markdown_file(path).plain_text
+        if ext == ".txt":
+            return path.read_text(encoding="utf-8", errors="replace")
+        if ext == ".docx":
+            return parse_docx(path)
+        if ext in _AUDIO_EXTENSIONS:
+            return transcribe_audio(path, file_id=file_id)
     raise ValueError(f"Unsupported file extension: {ext!r}")
 
 

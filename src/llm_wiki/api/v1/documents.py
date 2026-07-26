@@ -39,7 +39,7 @@ class Material(BaseModel):
 
     document_id: str
     title: str
-    content_type: Literal["pdf", "markdown"]
+    content_type: Literal["pdf", "markdown", "docx", "text", "audio"]
     scope: Literal["internal", "external"] = "internal"
     business_unit: str = "HQ"
     status: str
@@ -79,12 +79,27 @@ class DocumentText(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_AUDIO_EXTS = (".mp3", ".ogg", ".wav", ".m4a", ".webm")
+
+
+def _content_type_for(name: str) -> Literal["pdf", "markdown", "docx", "text", "audio"]:
+    """Map an original filename to a Material content_type (drives the UI icon)."""
+    n = (name or "").lower()
+    if n.endswith(".pdf"):
+        return "pdf"
+    if n.endswith(".docx"):
+        return "docx"
+    if n.endswith(".txt"):
+        return "text"
+    if n.endswith(_AUDIO_EXTS):
+        return "audio"
+    return "markdown"
+
+
 def _file_record_to_material(fr: FileRecord) -> Material:
     """Convert a FileRecord ORM row into a Material response schema."""
     name = Path(fr.original_name).stem
-    content_type: Literal["pdf", "markdown"] = (
-        "pdf" if fr.original_name.lower().endswith(".pdf") else "markdown"
-    )
+    content_type = _content_type_for(fr.original_name)
     return Material(
         document_id=fr.file_id,
         title=name,
@@ -265,9 +280,7 @@ async def get_related_documents(
             {
                 "document_id": row.file_id,
                 "title": name,
-                "content_type": (
-                    "pdf" if row.original_name.lower().endswith(".pdf") else "markdown"
-                ),
+                "content_type": _content_type_for(row.original_name),
                 "score": round(score, 3),
             }
         )

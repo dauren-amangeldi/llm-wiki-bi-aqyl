@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     llm_provider: Literal["openai", "anthropic"] = "openai"
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-5.4-mini"
+    # Speech-to-text for audio uploads (mp3/ogg/wav/m4a/webm). OpenAI Whisper.
+    transcription_model: str = "whisper-1"
     anthropic_api_key: str = Field(default="", repr=False)
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     llm_timeout_s: float = 60.0  # HTTP timeout for LLM + embedding API calls
@@ -58,7 +60,20 @@ class Settings(BaseSettings):
     # --- API ---
     max_file_size_mb: int = 50
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
-    allowed_extensions: frozenset[str] = frozenset({".pdf", ".md"})
+    allowed_extensions: frozenset[str] = frozenset(
+        {
+            ".pdf",
+            ".md",
+            ".txt",
+            ".docx",
+            # audio → transcribed to text before ingestion
+            ".mp3",
+            ".ogg",
+            ".wav",
+            ".m4a",
+            ".webm",
+        }
+    )
 
     # --- Auth (Keycloak / OIDC) ---
     # When False (default) the app trusts the X-User-Email header (dev/demo) —
