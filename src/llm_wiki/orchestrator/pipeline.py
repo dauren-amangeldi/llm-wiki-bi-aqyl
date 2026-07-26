@@ -147,20 +147,27 @@ async def process_file(file_id: str) -> None:
                 updated_pages: list[str] = []
 
                 if record.sensitive:
-                    # Private file — index chunks for the OWNER's Q&A only. The
-                    # page is generated for chunking but NEVER saved to the shared
-                    # wiki (wiki_fts) or the heading index, and its chunk slug is
+                    # Private file — create a private, owner-only wiki page. The
+                    # owner can read it and ask questions over it; everyone else
+                    # is blocked at the read/search layer (wiki_fts.sensitive +
+                    # owner, plus owner-scoped chunks). It stays OUT of the shared
+                    # graph — no heading index, no backlinks — and its slug is
                     # namespaced by file_id so it can't collide with a public page.
+                    private_slug = f"private-{file_id}"
                     page = await writer.create_page(file_text, file_id)
+                    _save_wiki_page(
+                        page, slug=private_slug, sensitive=True, owner=record.owner
+                    )
                     sync_chunks_for_page(
                         chunk_store=chunk_store,
-                        slug=f"private-{file_id}",
+                        slug=private_slug,
                         title=page.title,
                         content=page.content,
                         file_id=file_id,
                         sensitive=True,
                         owner=record.owner,
                     )
+                    created_pages.append(private_slug)
                 elif not search_results:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
@@ -351,12 +358,25 @@ def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
     raise ValueError(f"Unsupported file extension: {ext!r}")
 
 
-def _save_wiki_page(page: WikiPage) -> None:
-    """Persist the wiki page to Postgres (source of truth + FTS in one write)."""
+def _save_wiki_page(
+    page: WikiPage,
+    *,
+    slug: str | None = None,
+    sensitive: bool = False,
+    owner: str | None = None,
+) -> None:
+    """Persist the wiki page to Postgres (source of truth + FTS in one write).
+
+    *slug* overrides ``page.slug`` (private pages are namespaced by file_id).
+    ``sensitive`` + ``owner`` mark a private, owner-only page.
+    """
     from llm_wiki.storage import wiki_store
 
-    wiki_store.save_page(page.slug, page.title, page.content)
-    logger.debug("wiki_page_saved", slug=page.slug)
+    target_slug = slug or page.slug
+    wiki_store.save_page(
+        target_slug, page.title, page.content, sensitive=sensitive, owner=owner
+    )
+    logger.debug("wiki_page_saved", slug=target_slug, sensitive=sensitive)
 
 
 def _load_existing_pages(search_results: list[SearchHit]) -> list[WikiPage]:

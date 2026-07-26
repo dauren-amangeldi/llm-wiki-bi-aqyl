@@ -3,9 +3,10 @@
 import re
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from pydantic import BaseModel
 
+from llm_wiki.api.deps import get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage import wiki_store
 
@@ -19,6 +20,7 @@ class WikiPageSummary(BaseModel):
     size_chars: int
     updated_at: str
     backlinks_count: int
+    sensitive: bool = False
 
 
 class WikiPageDetail(BaseModel):
@@ -30,6 +32,7 @@ class WikiPageDetail(BaseModel):
     size_chars: int
     updated_at: str
     backlinks: list[str]
+    sensitive: bool = False
 
 
 def _extract_title(content: str, slug: str) -> str:
@@ -51,7 +54,11 @@ def _plain_snippet(content: str, length: int = 200) -> str:
 
 
 def _summary(
-    slug: str, content: str, updated_at: datetime, snippet: str | None = None
+    slug: str,
+    content: str,
+    updated_at: datetime,
+    snippet: str | None = None,
+    sensitive: bool = False,
 ) -> WikiPageSummary:
     """Build a WikiPageSummary from a slug + content + updated_at."""
     return WikiPageSummary(
@@ -61,6 +68,7 @@ def _summary(
         size_chars=len(content),
         updated_at=updated_at.isoformat(),
         backlinks_count=content.count("[[") - content.count("[[]]"),
+        sensitive=sensitive,
     )
 
 
@@ -69,48 +77,67 @@ async def list_wiki_pages(
     q: str | None = None,
     limit: int = 200,
     offset: int = 0,
+    caller: str = Depends(get_user_key),
 ) -> list[WikiPageSummary]:
     """List wiki pages (newest first), or full-text search when *q* is given.
 
     With a query, runs the FTS lexical index over page **bodies** (ranked, with
     ``<mark>`` highlight snippets) — keyword search like Ctrl+F, used when the
     AI advisor is OFF. Without a query, lists all pages by recency.
+
+    Private pages are only listed for their owner (``caller``).
     """
     term = (q or "").strip()
     if term:
         results: list[WikiPageSummary] = []
-        for hit in wiki_store.keyword_search(term, limit=limit + offset):
-            content = wiki_store.get_page(hit.slug)
+        for hit in wiki_store.keyword_search(term, limit=limit + offset, caller=caller):
+            content = wiki_store.get_page(hit.slug, caller=caller)
             if content is None:
                 continue
-            meta = wiki_store.get_page_meta(hit.slug)
+            meta = wiki_store.get_page_meta(hit.slug, caller=caller)
             updated = meta.updated_at if meta else datetime.now(timezone.utc)
-            results.append(_summary(hit.slug, content, updated, snippet=hit.snippet))
+            results.append(
+                _summary(
+                    hit.slug,
+                    content,
+                    updated,
+                    snippet=hit.snippet,
+                    sensitive=bool(meta and meta.sensitive),
+                )
+            )
         return results[offset : offset + limit]
 
     results = []
-    for meta in wiki_store.list_pages():
-        content = wiki_store.get_page(meta.slug)
+    for meta in wiki_store.list_pages(caller=caller):
+        content = wiki_store.get_page(meta.slug, caller=caller)
         if content is None:
             continue
-        results.append(_summary(meta.slug, content, meta.updated_at))
+        results.append(
+            _summary(meta.slug, content, meta.updated_at, sensitive=meta.sensitive)
+        )
     return results[offset : offset + limit]
 
 
 @router.get("/wiki/{slug}/full", response_model=WikiPageDetail)
-async def get_wiki_page_detail(slug: str) -> WikiPageDetail:
-    """Get full markdown and backlinks for a wiki page."""
-    content = wiki_store.get_page(slug)
+async def get_wiki_page_detail(
+    slug: str,
+    caller: str = Depends(get_user_key),
+) -> WikiPageDetail:
+    """Get full markdown and backlinks for a wiki page.
+
+    A private page is returned only to its owner (``caller``); others get 404.
+    """
+    content = wiki_store.get_page(slug, caller=caller)
     if content is None:
         raise HTTPException(404, f"Wiki page '{slug}' not found")
 
     title = _extract_title(content, slug)
-    meta = wiki_store.get_page_meta(slug)
+    meta = wiki_store.get_page_meta(slug, caller=caller)
     updated_at = meta.updated_at if meta else datetime.now(timezone.utc)
 
     backlinks: list[str] = []
     pattern = re.compile(rf"\[\[{re.escape(slug)}\]\]")
-    for other_slug, other in wiki_store.get_all_pages():
+    for other_slug, other in wiki_store.get_all_pages(caller=caller):
         if other_slug == slug:
             continue
         if other and pattern.search(other):
@@ -123,4 +150,5 @@ async def get_wiki_page_detail(slug: str) -> WikiPageDetail:
         size_chars=len(content),
         updated_at=updated_at.isoformat(),
         backlinks=sorted(backlinks),
+        sensitive=bool(meta and meta.sensitive),
     )

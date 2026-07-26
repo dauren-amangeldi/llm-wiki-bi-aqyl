@@ -80,3 +80,35 @@ async def test_get_wiki_page_full_not_found(client: AsyncClient) -> None:
     """Unknown slug returns 404."""
     resp = await client.get("/api/v1/wiki/does-not-exist/full")
     assert resp.status_code == 404
+
+
+async def test_private_page_endpoint_isolation(client: AsyncClient) -> None:
+    """A private page is listed/readable only for its owner via the API."""
+    wiki_store.save_page(
+        "private-hr",
+        "HR Secret",
+        "# HR Secret\nКонфиденциальный документ.",
+        sensitive=True,
+        owner="alice@bi.group",
+    )
+
+    # Owner: sees it in the list and can open it (flagged sensitive).
+    owner_list = await client.get(
+        "/api/v1/wiki", headers={"X-User-Email": "alice@bi.group"}
+    )
+    assert "private-hr" in {p["slug"] for p in owner_list.json()}
+    owner_detail = await client.get(
+        "/api/v1/wiki/private-hr/full", headers={"X-User-Email": "alice@bi.group"}
+    )
+    assert owner_detail.status_code == 200
+    assert owner_detail.json()["sensitive"] is True
+
+    # Another user: not in the list, and 404 on the detail.
+    other_list = await client.get(
+        "/api/v1/wiki", headers={"X-User-Email": "bob@bi.group"}
+    )
+    assert "private-hr" not in {p["slug"] for p in other_list.json()}
+    other_detail = await client.get(
+        "/api/v1/wiki/private-hr/full", headers={"X-User-Email": "bob@bi.group"}
+    )
+    assert other_detail.status_code == 404

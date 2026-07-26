@@ -42,16 +42,22 @@ CREATE TABLE IF NOT EXISTS wiki_fts (
     body  TEXT NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    -- Privacy (LW private-wiki): a sensitive page is readable only by its owner.
+    -- Public pages have sensitive=false / owner=NULL and behave as before.
+    sensitive boolean NOT NULL DEFAULT false,
+    owner text,
     tsv   tsvector GENERATED ALWAYS AS (
         to_tsvector('{_PG_TS_CONFIG}', coalesce(title, '') || ' ' || coalesce(body, ''))
     ) STORED
 )
 """
 _INDEX_DDL = "CREATE INDEX IF NOT EXISTS ix_wiki_fts_tsv ON wiki_fts USING GIN (tsv)"
-# Add the timestamp columns to tables created before wiki pages moved into Postgres.
+# Add columns to tables created before these features landed (idempotent).
 _ALTER_DDL = (
     "ALTER TABLE wiki_fts ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()",
     "ALTER TABLE wiki_fts ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()",
+    "ALTER TABLE wiki_fts ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
+    "ALTER TABLE wiki_fts ADD COLUMN IF NOT EXISTS owner text",
 )
 
 

@@ -155,10 +155,14 @@ async def get_dossier(
     document_id: str,
     language: str = "ru",
     db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> Dossier:
     """Return the full wiki-page content for a document (MVP: no truncation)."""
     fr = await db.get(FileRecord, document_id)
     if not fr:
+        raise HTTPException(404, "Document not found")
+    # A private document's content is readable only by its owner.
+    if fr.sensitive and fr.owner != caller:
         raise HTTPException(404, "Document not found")
 
     summary: str | None = None
@@ -185,10 +189,14 @@ async def get_dossier(
 async def get_document_text(
     document_id: str,
     db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> DocumentText:
     """Return the full processed markdown text of a document."""
     fr = await db.get(FileRecord, document_id)
     if not fr:
+        raise HTTPException(status_code=404, detail="Document not found")
+    # A private document's content is readable only by its owner.
+    if fr.sensitive and fr.owner != caller:
         raise HTTPException(status_code=404, detail="Document not found")
 
     all_pages = list(fr.created_pages or []) + list(fr.updated_pages or [])

@@ -340,6 +340,7 @@ async def get_wiki_page(
     slug: str,
     request: Request,
     session: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> WikiPageResponse | PlainTextResponse:
     """Return a wiki page as markdown or JSON depending on the ``Accept`` header.
 
@@ -367,7 +368,8 @@ async def get_wiki_page(
 
     from llm_wiki.storage import wiki_store
 
-    content = wiki_store.get_page(slug)
+    # A private page resolves only for its owner; everyone else gets 404.
+    content = wiki_store.get_page(slug, caller=caller)
     if content is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -388,7 +390,7 @@ async def get_wiki_page(
             break
 
     backlinks = extract_backlinks(content)
-    _meta = wiki_store.get_page_meta(slug)
+    _meta = wiki_store.get_page_meta(slug, caller=caller)
     last_updated = _meta.updated_at if _meta else datetime.now(timezone.utc)
 
     # Identify source files: FileRecord rows whose created_pages or updated_pages
