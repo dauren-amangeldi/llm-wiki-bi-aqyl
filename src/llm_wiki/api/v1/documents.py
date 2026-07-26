@@ -3,12 +3,12 @@
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, HTTPException, Response, UploadFile
+from fastapi import Depends, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import get_db
+from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import FileRecord
 
@@ -54,6 +54,7 @@ class Material(BaseModel):
     language: str = "ru"
     classification: str | None = None
     possible_duplicate: bool = False
+    sensitive: bool = False
 
 
 class Dossier(BaseModel):
@@ -102,6 +103,7 @@ def _file_record_to_material(fr: FileRecord) -> Material:
         language="ru",
         classification=None,
         possible_duplicate=False,
+        sensitive=fr.sensitive,
     )
 
 
@@ -117,9 +119,16 @@ async def list_documents(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> list[Material]:
-    """Return all non-rolled-back documents, optionally filtered by name."""
-    stmt = select(FileRecord).where(FileRecord.status != "ROLLED_BACK")
+    """Return non-rolled-back documents visible to the caller.
+
+    Sensitive documents are listed only for their owner.
+    """
+    stmt = select(FileRecord).where(
+        FileRecord.status != "ROLLED_BACK",
+        or_(FileRecord.sensitive.is_(False), FileRecord.owner == caller),
+    )
     if q:
         stmt = stmt.where(FileRecord.original_name.ilike(f"%{q}%"))
     stmt = stmt.order_by(FileRecord.created_at.desc()).limit(limit).offset(offset)
@@ -131,10 +140,12 @@ async def list_documents(
 async def get_document(
     document_id: str,
     db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> Material:
-    """Return a single document by ID."""
+    """Return a single document by ID (sensitive docs only for their owner)."""
     fr = await db.get(FileRecord, document_id)
-    if not fr:
+    # 404 (not 403) for a non-owner so a private doc's existence isn't revealed.
+    if not fr or (fr.sensitive and fr.owner != caller):
         raise HTTPException(404, "Document not found")
     return _file_record_to_material(fr)
 
@@ -260,11 +271,18 @@ async def get_related_documents(
 async def uploads_alias(
     file: UploadFile,
     response: Response,
+    sensitive: bool = Form(False),
     session: AsyncSession = Depends(get_db),
+    owner: str = Depends(get_user_key),
 ) -> object:
     """Alias for POST /api/v1/files — used by the frontend upload component."""
     from llm_wiki.api.routes import upload_file
 
     return await upload_file(
-        file=file, response=response, session=session, _rate_check=None
+        file=file,
+        response=response,
+        sensitive=sensitive,
+        session=session,
+        owner=owner,
+        _rate_check=None,
     )

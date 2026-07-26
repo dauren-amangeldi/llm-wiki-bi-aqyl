@@ -124,9 +124,14 @@ async def process_file(file_id: str) -> None:
             heading_texts = [h.text for h in headings]
 
             search_agent = SearchAgent(llm, embedding_store)
-            search_results: list[SearchHit] = await search_agent.run(
-                file_text, heading_texts, file_id=file_id
-            )
+            # Sensitive files never merge into shared pages — they always create a
+            # private, owner-scoped page. Skip the shared-page search entirely so
+            # private content can never leak into (or be pulled from) the wiki.
+            search_results: list[SearchHit] = []
+            if not record.sensitive:
+                search_results = await search_agent.run(
+                    file_text, heading_texts, file_id=file_id
+                )
 
             if "SEARCHED" not in completed:
                 await _transition(session, file_id, "SEARCHED")
@@ -141,7 +146,22 @@ async def process_file(file_id: str) -> None:
                 created_pages: list[str] = []
                 updated_pages: list[str] = []
 
-                if not search_results:
+                if record.sensitive:
+                    # Private file — index chunks for the OWNER's Q&A only. The
+                    # page is generated for chunking but NEVER saved to the shared
+                    # wiki (wiki_fts) or the heading index, and its chunk slug is
+                    # namespaced by file_id so it can't collide with a public page.
+                    page = await writer.create_page(file_text, file_id)
+                    sync_chunks_for_page(
+                        chunk_store=chunk_store,
+                        slug=f"private-{file_id}",
+                        title=page.title,
+                        content=page.content,
+                        file_id=file_id,
+                        sensitive=True,
+                        owner=record.owner,
+                    )
+                elif not search_results:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
                     _save_wiki_page(page)

@@ -82,6 +82,10 @@ class ChunkEmbedding(Base):
     section: Mapped[str] = mapped_column(String, nullable=False, default="")
     chunk_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     file_id: Mapped[str] = mapped_column(String, nullable=False, default="", index=True)
+    # Access control: sensitive chunks are only returned to their owner (Q&A).
+    # Non-sensitive chunks have sensitive=False / owner=NULL (visible to all).
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     document: Mapped[str] = mapped_column(Text, nullable=False, default="")
     embedding: Mapped[list[float]] = mapped_column(Vector(_EMBED_DIM), nullable=False)
 
@@ -214,6 +218,10 @@ class FileRecord(Base):
     # Human-readable failure reason, set when status becomes FAILED. Surfaced in
     # GET /files/{id} and the status stream so the cause is visible without logs.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Access control (sensitive files): indexed but owner-scoped — excluded from
+    # the shared wiki/search and only retrievable by their owner.
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     state_history: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
     created_pages: Mapped[list[str]] = mapped_column(JSON, default=list)
     updated_pages: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -237,6 +245,10 @@ class CaseRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     doc_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Case-level privacy: a private (sensitive) case keeps its files owner-scoped
+    # — indexed but never surfaced in the shared wiki/search for other users.
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -429,6 +441,8 @@ async def create_file_record(
     original_name: str,
     content_sha256: str | None = None,
     raw_key: str | None = None,
+    sensitive: bool = False,
+    owner: str | None = None,
 ) -> FileRecord:
     """Insert a new FileRecord in RECEIVED state and return it.
 
@@ -446,6 +460,8 @@ async def create_file_record(
         original_name=original_name,
         raw_key=raw_key,
         status="RECEIVED",
+        sensitive=sensitive,
+        owner=owner,
         state_history=[],
         created_pages=[],
         updated_pages=[],

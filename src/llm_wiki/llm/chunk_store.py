@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass
 
 import structlog
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
@@ -150,6 +150,7 @@ class ChunkStore:
         self,
         llm_client: "LLMClient",  # noqa: F821
         engine: Engine | None = None,
+        caller: str | None = None,
     ) -> None:
         """Initialise the store and validate the model/dim guard.
 
@@ -166,6 +167,10 @@ class ChunkStore:
         from llm_wiki.llm.client import LLMClient  # noqa: PLC0415
 
         self._llm: LLMClient = llm_client  # type: ignore[assignment]
+        # Identity of the requester — sensitive chunks are only returned to their
+        # owner. Set per-request in the API endpoints; None (system/pipeline) sees
+        # only non-sensitive chunks. Can be overridden per query() call.
+        self._caller: str | None = caller
         self._model: str = settings.embedding_model
         self._dim: int = settings.embedding_dimensions
         self._max_chars: int = settings.chunk_max_chars
@@ -184,6 +189,8 @@ class ChunkStore:
         title: str,
         content: str,
         file_id: str = "",
+        sensitive: bool = False,
+        owner: str | None = None,
     ) -> None:
         """Replace all chunks for *slug* with a fresh chunking of *content*.
 
@@ -213,6 +220,8 @@ class ChunkStore:
                 "section": section_name,
                 "chunk_idx": i,
                 "file_id": file_id,
+                "sensitive": sensitive,
+                "owner": owner,
                 "document": ch_text,
                 "embedding": vec,
             }
@@ -246,6 +255,7 @@ class ChunkStore:
         file_id: str = "",
         file_ids: list[str] | None = None,
         usage_file_id: str = "",
+        caller: str | None = None,
     ) -> list[ChunkHit]:
         """Return the *top_k* most similar chunks to *text*.
 
@@ -286,6 +296,15 @@ class ChunkStore:
             stmt = stmt.where(ChunkEmbedding.file_id.in_(file_ids))
         elif file_id:
             stmt = stmt.where(ChunkEmbedding.file_id == file_id)
+        # Access control (fail-closed): sensitive chunks are only ever returned
+        # to their owner. Applied unconditionally so no caller can skip it.
+        resolved_caller = caller if caller is not None else self._caller
+        stmt = stmt.where(
+            or_(
+                ChunkEmbedding.sensitive.is_(False),
+                ChunkEmbedding.owner == resolved_caller,
+            )
+        )
         stmt = stmt.order_by(distance).limit(top_k)
 
         try:
@@ -364,6 +383,8 @@ class ChunkStore:
                 "section": ins.excluded.section,
                 "chunk_idx": ins.excluded.chunk_idx,
                 "file_id": ins.excluded.file_id,
+                "sensitive": ins.excluded.sensitive,
+                "owner": ins.excluded.owner,
                 "document": ins.excluded.document,
                 "embedding": ins.excluded.embedding,
             },

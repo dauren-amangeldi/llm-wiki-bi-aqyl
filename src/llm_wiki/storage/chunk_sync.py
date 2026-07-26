@@ -19,6 +19,8 @@ def sync_chunks_for_page(
     title: str,
     content: str,
     file_id: str = "",
+    sensitive: bool = False,
+    owner: str | None = None,
 ) -> None:
     """Update the chunk index for one wiki page after it was saved to disk.
 
@@ -36,7 +38,14 @@ def sync_chunks_for_page(
     if chunk_store is None:
         return
     try:
-        chunk_store.upsert_page(slug=slug, title=title, content=content, file_id=file_id)
+        chunk_store.upsert_page(
+            slug=slug,
+            title=title,
+            content=content,
+            file_id=file_id,
+            sensitive=sensitive,
+            owner=owner,
+        )
         logger.debug("chunk_sync_ok", slug=slug, file_id=file_id)
     except Exception as exc:  # noqa: BLE001
         logger.error("chunk_sync_failed", slug=slug, file_id=file_id, error=str(exc))

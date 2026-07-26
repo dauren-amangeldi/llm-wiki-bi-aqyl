@@ -28,6 +28,8 @@ def test_sync_calls_upsert_page() -> None:
         title="My Page",
         content="## Section\n\nContent.",
         file_id="fid-001",
+        sensitive=False,
+        owner=None,
     )
 
 

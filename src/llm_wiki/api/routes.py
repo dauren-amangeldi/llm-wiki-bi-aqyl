@@ -8,12 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db
+from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db, get_user_key
 from llm_wiki.api.schemas import (
     AdvisorPointResponse,
     AdvisorRequest,
@@ -67,7 +67,9 @@ _VALID_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
 async def upload_file(
     file: UploadFile,
     response: Response,
+    sensitive: bool = Form(False),
     session: AsyncSession = Depends(get_db),
+    owner: str = Depends(get_user_key),
     _rate_check: None = Depends(check_files_rate_limit),
 ) -> FileUploadResponse:
     """Accept a PDF or Markdown file and enqueue it for async wiki ingestion.
@@ -176,7 +178,13 @@ async def upload_file(
     get_object_store().put_bytes(key, content)
 
     await create_file_record(
-        session, file_id, filename, content_sha256=sha, raw_key=key
+        session,
+        file_id,
+        filename,
+        content_sha256=sha,
+        raw_key=key,
+        sensitive=sensitive,
+        owner=owner if owner != "anon" else None,
     )
 
     task = process_file_task.delay(file_id)
@@ -789,6 +797,7 @@ async def search_documents(
 )
 async def ask_question(
     body: AskRequest,
+    caller: str = Depends(get_user_key),
     _rate_check: None = Depends(check_ask_rate_limit),
 ) -> AskResponse:
     """Run retrieval + LLM synthesis and return a cited answer.
@@ -805,7 +814,7 @@ async def ask_question(
     llm = LLMClient()
     try:
         embedding_store = EmbeddingStore(llm_client=llm)
-        chunk_store = ChunkStore(llm_client=llm)
+        chunk_store = ChunkStore(llm_client=llm, caller=caller)
         agent = AnswerAgent(llm, embedding_store, chunk_store=chunk_store)
         result = await agent.answer(question=body.question, top_k=body.top_k)
     finally:
@@ -843,6 +852,7 @@ async def advisor_endpoint(
     body: AdvisorRequest,
     stream: bool = Query(False, description="When true, stream SSE progress events"),
     session: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
     _rate_check: None = Depends(check_ask_rate_limit),
 ) -> StreamingResponse:
     """Run the Advisor Agent and return structured insights via SSE.
@@ -864,7 +874,7 @@ async def advisor_endpoint(
             if stream:
                 yield _sse_line({"status": "searching", "step": 1, "total": 2})
 
-            chunk_store = ChunkStore(llm_client=llm)
+            chunk_store = ChunkStore(llm_client=llm, caller=caller)
             agent = AdvisorAgent(llm, chunk_store)
             history = [
                 HistoryTurn(role=t.role, content=t.content) for t in body.history
