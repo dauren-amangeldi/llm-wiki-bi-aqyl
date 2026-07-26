@@ -262,7 +262,9 @@ async def process_file(file_id: str) -> None:
 
         except Exception as exc:
             logger.error("pipeline_failed", file_id=file_id, error=str(exc))
-            await update_file_status(session, file_id, "FAILED")
+            # Persist the reason so it is visible in the API / status stream / UI,
+            # not only in the logs.
+            await update_file_status(session, file_id, "FAILED", error=str(exc))
             raise
         finally:
             # Always close the SDK client within the active event loop so that

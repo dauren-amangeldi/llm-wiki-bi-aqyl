@@ -1,5 +1,6 @@
 """API route definitions — all endpoints under /api/v1/."""
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator
@@ -220,6 +221,7 @@ async def get_file_status(
         file_id=record.file_id,
         original_name=record.original_name,
         status=record.status,
+        error=record.error,
         state_history=[
             StateEntry(state=e["state"], at=e["at"])
             for e in (record.state_history or [])
@@ -227,6 +229,91 @@ async def get_file_status(
         created_pages=list(record.created_pages or []),
         updated_pages=list(record.updated_pages or []),
         cost_usd=record.cost_usd,
+    )
+
+
+_TERMINAL_STATES = {"DONE", "FAILED", "ROLLED_BACK"}
+_STATUS_POLL_SECONDS = 1.5
+_STATUS_STREAM_MAX_SECONDS = 600.0  # hard guard so a stuck task can't hold forever
+
+
+@router.get(
+    "/files/{file_id}/status/stream",
+    summary="Stream a file's ingestion status (SSE) until it is done or failed",
+    tags=["files"],
+    response_class=StreamingResponse,
+)
+async def file_status_stream(file_id: str, request: Request) -> StreamingResponse:
+    """Server-Sent Events stream of a file's ingestion status.
+
+    Emits the current status immediately, then one event per change, and a final
+    ``done: true`` event when the pipeline reaches a terminal state (DONE /
+    FAILED / ROLLED_BACK). The server does the polling (a fresh short-lived
+    session per tick, so it always sees the worker's latest write and never
+    holds a connection open); the client only listens and reacts. A hard timeout
+    closes the stream so a stuck task never leaves it open forever.
+
+    Payload per event: ``{file_id, name, status, processing, done}`` plus, on a
+    terminal state, ``ok`` and either ``pages`` (created/updated wiki slugs) or
+    ``error`` (the failure reason).
+    """
+    from llm_wiki.api.deps import _SessionLocal
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        last_status: str | None = None
+        waited = 0.0
+        while waited <= _STATUS_STREAM_MAX_SECONDS:
+            if await request.is_disconnected():
+                break
+            async with _SessionLocal() as poll_session:
+                record = await get_file_record(poll_session, file_id)
+                if record is None:
+                    yield _sse_line({"error": "not_found", "done": True})
+                    return
+                status = record.status
+                name = record.original_name
+                pages = list(record.created_pages or []) + list(
+                    record.updated_pages or []
+                )
+                err = record.error
+
+            if status != last_status:
+                last_status = status
+                is_terminal = status in _TERMINAL_STATES
+                payload: dict[str, object] = {
+                    "file_id": file_id,
+                    "name": name,
+                    "status": status,
+                    "processing": not is_terminal,
+                    "done": is_terminal,
+                }
+                if status == "DONE":
+                    payload["ok"] = True
+                    payload["pages"] = pages
+                elif status in {"FAILED", "ROLLED_BACK"}:
+                    payload["ok"] = False
+                    payload["error"] = err or "Не удалось обработать файл"
+                yield _sse_line(payload)
+                if is_terminal:
+                    return
+
+            await asyncio.sleep(_STATUS_POLL_SECONDS)
+            waited += _STATUS_POLL_SECONDS
+
+        # Timeout guard — tell the client to stop waiting.
+        yield _sse_line(
+            {
+                "file_id": file_id,
+                "status": last_status or "UNKNOWN",
+                "done": True,
+                "timeout": True,
+            }
+        )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

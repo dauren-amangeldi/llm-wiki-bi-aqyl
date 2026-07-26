@@ -75,6 +75,7 @@ class FileStatusResponse(BaseModel):
     file_id: str
     original_name: str
     status: str
+    error: str | None = None
     state_history: list[StateEntry]
     created_pages: list[str]
     updated_pages: list[str]

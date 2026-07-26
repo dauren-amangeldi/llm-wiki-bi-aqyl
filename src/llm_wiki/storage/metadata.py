@@ -211,6 +211,9 @@ class FileRecord(Base):
     # rows created before date-partitioning (read via the legacy raw/ path).
     raw_key: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="RECEIVED")
+    # Human-readable failure reason, set when status becomes FAILED. Surfaced in
+    # GET /files/{id} and the status stream so the cause is visible without logs.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     state_history: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
     created_pages: Mapped[list[str]] = mapped_column(JSON, default=list)
     updated_pages: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -476,18 +479,24 @@ async def update_file_status(
     session: AsyncSession,
     file_id: str,
     new_status: str,
+    error: str | None = None,
 ) -> None:
-    """Update the status field of an existing FileRecord.
+    """Update the status (and optionally the failure reason) of a FileRecord.
 
     Args:
         session: Active async SQLAlchemy session.
         file_id: UUID of the file to update.
         new_status: New status string (e.g. ``"DONE"``, ``"FAILED"``).
+        error: Failure reason to persist (truncated); ignored when None.
     """
+    values: dict[str, object] = {
+        "status": new_status,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    if error is not None:
+        values["error"] = error[:2000]
     await session.execute(
-        sa_update(FileRecord)
-        .where(FileRecord.file_id == file_id)
-        .values(status=new_status, updated_at=datetime.now(timezone.utc))
+        sa_update(FileRecord).where(FileRecord.file_id == file_id).values(**values)
     )
     await session.commit()
 
