@@ -65,6 +65,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if seeded:
                 logger.info("allowed_users_startup_seed", inserted=seeded)
 
+        # Seed/refresh Twins council personas + presets from the .md files.
+        # seed_twin_personas upserts, so editing a persona file and restarting
+        # applies the change without a migration.
+        from llm_wiki.storage.metadata import seed_twin_personas
+
+        twins_inserted = await seed_twin_personas(session)
+        if twins_inserted:
+            logger.info("twin_personas_startup_seed", inserted=twins_inserted)
+
     logger.info("startup_complete", service=settings.service_name)
     yield
     logger.info("shutdown", service=settings.service_name)

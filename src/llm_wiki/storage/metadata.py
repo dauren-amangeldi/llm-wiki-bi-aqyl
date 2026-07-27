@@ -822,3 +822,268 @@ async def clear_chat_messages(
     return len(rows)
 
 
+# ---------------------------------------------------------------------------
+# Twins council (BI-AQYL-TWINS) — personas, presets, sessions, messages
+# Ported from feature/round2, reconciled to this schema (timezone.utc; wiki in
+# Postgres; suggest degrades gracefully without case-similarity).
+# ---------------------------------------------------------------------------
+
+
+class TwinPersona(Base):
+    """A Twins council persona. Content (name/lens/system_prompt/domain_weights)
+    is seeded from editable .md files in ``personas/twins/`` — see
+    ``seed_twin_personas``."""
+
+    __tablename__ = "twin_personas"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    inspiration: Mapped[str] = mapped_column(String, nullable=False)
+    real_name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    track: Mapped[str] = mapped_column(String, nullable=False)  # "tech" | "dev"
+    pinned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lens: Mapped[str] = mapped_column(String, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(String, nullable=False)
+    domain_weights: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
+    avatar_init: Mapped[str] = mapped_column(String, nullable=False)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TwinPreset(Base):
+    """A ready-made triad preset for the Twins council."""
+
+    __tablename__ = "twin_presets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class TwinSession(Base):
+    """A single Twins council run — which case, which personas."""
+
+    __tablename__ = "twin_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    case_id: Mapped[str] = mapped_column(String, nullable=False)
+    persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    # Outcome journal: did the council's verdict hold up? "" = not reviewed yet.
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="")  # "" | confirmed | refuted
+    outcome_note: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    outcome_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TwinMessage(Base):
+    """A single message in a Twins chat transcript."""
+
+    __tablename__ = "twin_messages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String, nullable=False)  # user | persona | verdict
+    persona_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+_DEFAULT_TWIN_PRESET_SEEDS: list[dict[str, object]] = [
+    {"id": "preset-tech-transform", "name": "Технотрансформация", "persona_ids": ["musk", "huang", "nadella"]},
+    {"id": "preset-should-build", "name": "Стоит ли строить", "persona_ids": ["zell", "bren", "musk"]},
+    {"id": "preset-how-to-build", "name": "Каким строить", "persona_ids": ["hines", "alabbar", "huang"]},
+    {"id": "preset-sell-adopt", "name": "Как продать / внедрить", "persona_ids": ["corcoran", "miller", "nadella"]},
+]
+
+
+async def twin_personas_count(session: AsyncSession) -> int:
+    """Number of persona rows (used to log seeding on first boot)."""
+    result = await session.execute(select(TwinPersona))
+    return len(result.scalars().all())
+
+
+async def get_twin_persona(session: AsyncSession, persona_id: str) -> TwinPersona | None:
+    return await session.get(TwinPersona, persona_id)
+
+
+async def list_twin_personas(session: AsyncSession) -> list[TwinPersona]:
+    """All active personas."""
+    result = await session.execute(select(TwinPersona).where(TwinPersona.active == 1))
+    return list(result.scalars().all())
+
+
+async def list_twin_presets(session: AsyncSession) -> list[TwinPreset]:
+    result = await session.execute(select(TwinPreset))
+    return list(result.scalars().all())
+
+
+async def seed_twin_personas(session: AsyncSession) -> int:
+    """Upsert personas from .md files + insert-if-absent presets.
+
+    Upsert (not insert-only) so editing a persona file and restarting applies
+    the change without a migration. Returns the number of personas newly
+    inserted (updates aren't counted).
+    """
+    from llm_wiki.storage.persona_files import load_persona_files
+
+    inserted = 0
+    for row in load_persona_files():
+        persona_id = str(row["id"])
+        pinned_int = int(bool(row["pinned"]))
+        existing = await get_twin_persona(session, persona_id)
+        if existing is None:
+            session.add(
+                TwinPersona(
+                    id=persona_id,
+                    name=str(row["name"]),
+                    inspiration=str(row["inspiration"]),
+                    real_name=str(row["real_name"]),
+                    track=str(row["track"]),
+                    pinned=pinned_int,
+                    lens=str(row["lens"]),
+                    system_prompt=str(row["system_prompt"]),
+                    domain_weights=row["domain_weights"],  # type: ignore[arg-type]
+                    avatar_init=str(row["avatar_init"]),
+                )
+            )
+            inserted += 1
+        else:
+            existing.name = str(row["name"])
+            existing.inspiration = str(row["inspiration"])
+            existing.real_name = str(row["real_name"])
+            existing.track = str(row["track"])
+            existing.pinned = pinned_int
+            existing.lens = str(row["lens"])
+            existing.system_prompt = str(row["system_prompt"])
+            existing.domain_weights = row["domain_weights"]  # type: ignore[assignment]
+            existing.avatar_init = str(row["avatar_init"])
+
+    for preset_row in _DEFAULT_TWIN_PRESET_SEEDS:
+        preset_id = str(preset_row["id"])
+        if await session.get(TwinPreset, preset_id) is not None:
+            continue
+        session.add(
+            TwinPreset(
+                id=preset_id,
+                name=str(preset_row["name"]),
+                persona_ids=preset_row["persona_ids"],  # type: ignore[arg-type]
+            )
+        )
+
+    await session.commit()
+    return inserted
+
+
+async def create_twin_session(
+    session: AsyncSession, *, case_id: str, persona_ids: list[str], created_by: str
+) -> TwinSession:
+    """Create and persist a new Twins council session."""
+    now = datetime.now(timezone.utc)
+    row = TwinSession(
+        id=f"twin-session-{int(now.timestamp() * 1000):x}",
+        case_id=case_id,
+        persona_ids=persona_ids,
+        created_by=created_by,
+        created_at=now,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def append_twin_message(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    role: str,
+    persona_id: str | None,
+    seq: int,
+    content: dict[str, object],
+) -> TwinMessage:
+    """Persist one message immediately, so a dropped stream keeps partial history."""
+    row = TwinMessage(
+        id=f"twin-msg-{session_id}-{seq}",
+        session_id=session_id,
+        role=role,
+        persona_id=persona_id,
+        seq=seq,
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def get_twin_session_messages(session: AsyncSession, session_id: str) -> list[TwinMessage]:
+    """All messages for a session, ordered by seq."""
+    result = await session.execute(
+        select(TwinMessage).where(TwinMessage.session_id == session_id).order_by(TwinMessage.seq)
+    )
+    return list(result.scalars().all())
+
+
+async def list_twin_sessions(session: AsyncSession, case_id: str) -> list[TwinSession]:
+    """Past councils for a case, newest first (outcome journal view)."""
+    stmt = (
+        select(TwinSession)
+        .where(TwinSession.case_id == case_id)
+        .order_by(TwinSession.created_at.desc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def set_twin_session_outcome(
+    session: AsyncSession, session_id: str, outcome: str, note: str = ""
+) -> bool:
+    """Record whether a council's verdict held up. False if the session is unknown."""
+    row = await session.get(TwinSession, session_id)
+    if not row:
+        return False
+    row.outcome = outcome
+    row.outcome_note = note
+    row.outcome_at = datetime.now(timezone.utc)
+    await session.commit()
+    return True
+
+
+async def suggest_twin_personas(
+    session: AsyncSession, case_id: str, scan_limit: int = 5
+) -> dict[str, object] | None:
+    """Suggest a persona line-up from the latest council of the most similar case.
+
+    Degrades to ``None`` when case-similarity (``find_similar_cases``) is not
+    available in this build — the UI falls back to the normal picker, and the
+    ⭐ recommended personas still come from each persona's ``pinned`` flag.
+    """
+    find_similar = globals().get("find_similar_cases")
+    if find_similar is None:
+        return None
+    for sim_id, title, pct in await find_similar(session, case_id, limit=scan_limit):
+        stmt = (
+            select(TwinSession)
+            .where(TwinSession.case_id == sim_id)
+            .order_by(TwinSession.created_at.desc())
+            .limit(1)
+        )
+        twin_session = (await session.execute(stmt)).scalars().first()
+        if twin_session and twin_session.persona_ids:
+            return {
+                "case_id": sim_id,
+                "case_title": title,
+                "similarity_pct": pct,
+                "persona_ids": twin_session.persona_ids,
+            }
+    return None
+
+
