@@ -82,3 +82,26 @@ async def test_cases_list_hides_others_private(
     bob_ids = {c["id"] for c in (await client.get("/api/v1/cases", headers=_BOB)).json()}
     assert "c-pub" in bob_ids
     assert "c-priv" not in bob_ids  # ← must not leak
+
+
+async def test_file_raw_download_access_control(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """GET /files/{id}/raw denies a sensitive file to anyone but its owner."""
+    db_session.add(
+        FileRecord(
+            file_id="f-sec", original_name="secret.pdf", status="DONE",
+            sensitive=True, owner="alice@bi.group", raw_key="raw/f-sec.pdf",
+        )
+    )
+    db_session.add(FileRecord(file_id="f-pub", original_name="pub.pdf", status="DONE"))
+    await db_session.commit()
+
+    # Bob cannot download Alice's sensitive file — 403 fires before storage.
+    assert (await client.get("/api/v1/files/f-sec/raw", headers=_BOB)).status_code == 403
+    # Unknown file → 404, not 403.
+    assert (await client.get("/api/v1/files/nope/raw", headers=_BOB)).status_code == 404
+    # Owner passes the access gate (404 only because the test store has no bytes).
+    assert (await client.get("/api/v1/files/f-sec/raw", headers=_ALICE)).status_code != 403
+    # A public file passes the gate for anyone (again 404 for want of bytes).
+    assert (await client.get("/api/v1/files/f-pub/raw", headers=_BOB)).status_code != 403

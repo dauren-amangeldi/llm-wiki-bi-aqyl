@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import mimetypes
 import re
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
@@ -237,6 +238,69 @@ async def get_file_status(
         created_pages=list(record.created_pages or []),
         updated_pages=list(record.updated_pages or []),
         cost_usd=record.cost_usd,
+    )
+
+
+@router.get(
+    "/files/{file_id}/raw",
+    summary="View or download the original uploaded file",
+    tags=["files"],
+)
+async def get_file_raw(
+    file_id: str,
+    download: bool = Query(
+        False, description="Force an attachment download instead of an inline view"
+    ),
+    session: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> Response:
+    """Serve the original uploaded file from the object store.
+
+    Access control: a **sensitive** (owner-scoped) file is served only to its
+    owner — everyone else gets 403. Public files are readable by any authorised
+    caller. The content type is guessed from the original filename; by default
+    the browser views it inline where it can (pdf, images, text, audio) and
+    ``?download=1`` forces a download.
+    """
+    from urllib.parse import quote
+
+    from llm_wiki.storage.object_store import get_object_store, legacy_raw_key
+
+    record = await get_file_record(session, file_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"File {file_id!r} not found")
+    # Owner-scoped privacy: a sensitive file leaves storage only for its owner.
+    if record.sensitive and record.owner and record.owner != caller:
+        raise HTTPException(status_code=403, detail="This file is private to its owner")
+
+    store = get_object_store()
+    ext = Path(record.original_name).suffix
+    key = record.raw_key or legacy_raw_key(file_id, ext)
+    if not store.exists(key):
+        raise HTTPException(status_code=404, detail="Raw file is not in storage")
+
+    # mimetypes misses a few of the formats we accept — fill those in so a .docx
+    # downloads with the right type and .md/.markdown can render inline.
+    _extra_types = {
+        ".md": "text/markdown; charset=utf-8",
+        ".markdown": "text/markdown; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".ogg": "audio/ogg",
+        ".m4a": "audio/mp4",
+        ".webm": "audio/webm",
+    }
+    media_type = (
+        mimetypes.guess_type(record.original_name)[0]
+        or _extra_types.get(ext.lower())
+        or "application/octet-stream"
+    )
+    disposition = "attachment" if download else "inline"
+    # filename* (RFC 5987) so Cyrillic / non-ASCII names survive the header.
+    content_disposition = f"{disposition}; filename*=UTF-8''{quote(record.original_name)}"
+    return Response(
+        content=store.get_bytes(key),
+        media_type=media_type,
+        headers={"Content-Disposition": content_disposition},
     )
 
 

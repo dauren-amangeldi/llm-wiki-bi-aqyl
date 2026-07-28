@@ -1,9 +1,6 @@
 """Mock endpoints for all remaining frontend routes (MVP stub layer)."""
 
-from pathlib import Path
-
-from fastapi import Depends, HTTPException
-from fastapi.responses import Response
+from fastapi import Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,28 +71,8 @@ async def metrics(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 
-@router.get("/files/{file_id}/raw")
-async def file_raw(
-    file_id: str,
-    db: AsyncSession = Depends(get_db),
-) -> Response:
-    """Serve the original PDF/MD from the object store."""
-    from llm_wiki.storage.object_store import get_object_store, legacy_raw_key
-
-    fr = await db.get(FileRecord, file_id)
-    if not fr:
-        raise HTTPException(404, "File not found")
-    ext = Path(fr.original_name).suffix
-    store = get_object_store()
-    key = fr.raw_key or legacy_raw_key(file_id, ext)
-    if not store.exists(key):
-        raise HTTPException(404, "Raw file not found in storage")
-    media_type = "application/pdf" if ext.lower() == ".pdf" else "text/markdown"
-    return Response(
-        content=store.get_bytes(key),
-        media_type=media_type,
-        headers={"Content-Disposition": f'inline; filename="{fr.original_name}"'},
-    )
+# GET /files/{file_id}/raw now lives in api/routes.py — the real endpoint adds
+# owner/sensitive access control + all file types. Removed from the mock layer.
 
 
 # ── POST — 200 with stub payload ─────────────────────────────────────────────
