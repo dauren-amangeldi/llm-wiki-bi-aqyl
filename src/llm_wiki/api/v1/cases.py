@@ -1,10 +1,11 @@
 """Cases (topic containers) CRUD endpoints."""
 
 from datetime import datetime, timezone
+from typing import Literal
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-from sqlalchemy import or_, select, update as sa_update
+from sqlalchemy import and_, func, or_, select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key
@@ -27,15 +28,44 @@ class CaseBody(BaseModel):
 
 @router.get("/cases")
 async def list_cases(
+    response: Response,
     db: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
+    q: str | None = Query(
+        None, description="Case-insensitive substring match on the case title"
+    ),
+    category: Literal["all", "private", "public"] = Query(
+        "all", description="Все / Приватные (свои) / Общие"
+    ),
+    limit: int | None = Query(
+        None, ge=1, le=200, description="Page size; omit to return all (legacy behaviour)"
+    ),
+    offset: int = Query(0, ge=0, description="Number of rows to skip (pagination)"),
 ) -> list[dict[str, object]]:
-    """Return cases visible to the caller — private cases only for their owner."""
-    stmt = (
-        select(CaseRecord)
-        .where(or_(CaseRecord.sensitive.is_(False), CaseRecord.owner == caller))
-        .order_by(CaseRecord.created_at)
-    )
+    """Return cases visible to the caller, with search + category filter + pagination.
+
+    Visibility is always enforced: the caller sees public cases and their own
+    private ones. ``category`` narrows within that — ``all`` (both), ``public``
+    (shared only) or ``private`` (the caller's own). ``q`` is a case-insensitive
+    substring match on the title. Newest first (``created_at`` desc). The total
+    number of matches (ignoring ``limit``/``offset``) is returned in the
+    ``X-Total-Count`` header so the client can render pagination.
+    """
+    conds = [or_(CaseRecord.sensitive.is_(False), CaseRecord.owner == caller)]
+    if category == "public":
+        conds.append(CaseRecord.sensitive.is_(False))
+    elif category == "private":
+        conds.append(and_(CaseRecord.sensitive.is_(True), CaseRecord.owner == caller))
+    if q and q.strip():
+        conds.append(CaseRecord.title.ilike(f"%{q.strip()}%"))
+    where = and_(*conds)
+
+    total = await db.scalar(select(func.count()).select_from(CaseRecord).where(where))
+    response.headers["X-Total-Count"] = str(total or 0)
+
+    stmt = select(CaseRecord).where(where).order_by(CaseRecord.created_at.desc())
+    if limit is not None:
+        stmt = stmt.offset(offset).limit(limit)
     rows = (await db.scalars(stmt)).all()
     return [
         {"id": r.id, "title": r.title, "doc_ids": r.doc_ids or [], "sensitive": r.sensitive}

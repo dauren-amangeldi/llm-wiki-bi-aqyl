@@ -103,6 +103,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Pagination total for GET /cases — readable by the SPA even cross-origin.
+    expose_headers=["X-Total-Count"],
 )
 app.include_router(router, prefix="/api/v1")
 app.include_router(v1_router, prefix="/api/v1")

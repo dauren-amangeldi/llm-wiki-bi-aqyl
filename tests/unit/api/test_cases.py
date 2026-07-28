@@ -113,3 +113,56 @@ async def test_update_nonexistent_case_returns_404(client: AsyncClient) -> None:
         json={"title": "Ghost", "doc_ids": []},
     )
     assert resp.status_code == 404
+
+
+async def test_list_cases_pagination_and_total_header(client: AsyncClient) -> None:
+    for i in range(5):
+        await client.post(
+            "/api/v1/cases", json={"id": f"case-p{i}", "title": f"Case {i}", "doc_ids": []}
+        )
+
+    page1 = await client.get("/api/v1/cases?limit=2&offset=0")
+    assert page1.status_code == 200
+    assert len(page1.json()) == 2
+    assert page1.headers["X-Total-Count"] == "5"
+
+    page2 = await client.get("/api/v1/cases?limit=2&offset=2")
+    assert len(page2.json()) == 2
+    # pages must not overlap
+    ids1 = {c["id"] for c in page1.json()}
+    ids2 = {c["id"] for c in page2.json()}
+    assert ids1.isdisjoint(ids2)
+
+    # no limit → full list (backward-compatible), header still carries the total
+    all_resp = await client.get("/api/v1/cases")
+    assert len(all_resp.json()) == 5
+    assert all_resp.headers["X-Total-Count"] == "5"
+
+
+async def test_list_cases_search_by_title(client: AsyncClient) -> None:
+    await client.post("/api/v1/cases", json={"id": "c-roof", "title": "Roofing defects"})
+    await client.post("/api/v1/cases", json={"id": "c-bud", "title": "Budget review"})
+
+    resp = await client.get("/api/v1/cases?q=roof")  # case-insensitive substring
+    titles = [c["title"] for c in resp.json()]
+    assert titles == ["Roofing defects"]
+    assert resp.headers["X-Total-Count"] == "1"
+
+
+async def test_list_cases_category_filter(client: AsyncClient) -> None:
+    hdr = {"X-User-Email": "alice@bi.group"}
+    await client.post(
+        "/api/v1/cases", json={"id": "c-pub", "title": "Public one", "sensitive": False}, headers=hdr
+    )
+    await client.post(
+        "/api/v1/cases", json={"id": "c-prv", "title": "Private one", "sensitive": True}, headers=hdr
+    )
+
+    all_titles = {c["title"] for c in (await client.get("/api/v1/cases", headers=hdr)).json()}
+    assert all_titles == {"Public one", "Private one"}
+
+    pub = (await client.get("/api/v1/cases?category=public", headers=hdr)).json()
+    assert {c["title"] for c in pub} == {"Public one"}
+
+    prv = (await client.get("/api/v1/cases?category=private", headers=hdr)).json()
+    assert {c["title"] for c in prv} == {"Private one"}
