@@ -29,6 +29,18 @@ class CaseBody(BaseModel):
     tags: list[str] = []
 
 
+def _dispatch_autotag(case_id: str) -> None:
+    """Queue LLM auto-tagging for a case — best-effort so a broker hiccup can't
+    fail the request. The task itself skips cases that already have tags, so it
+    won't clobber manual edits."""
+    try:
+        from llm_wiki.orchestrator.tasks import autotag_case
+
+        autotag_case.delay(case_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @router.get("/cases")
 async def list_cases(
     response: Response,
@@ -102,6 +114,7 @@ async def create_case(
     )
     db.add(case)
     await db.commit()
+    _dispatch_autotag(case.id)
     return {
         "id": case.id,
         "title": case.title,
@@ -131,6 +144,7 @@ async def update_case(
         )
     )
     await db.commit()
+    _dispatch_autotag(case_id)
     return {"ok": True}
 
 

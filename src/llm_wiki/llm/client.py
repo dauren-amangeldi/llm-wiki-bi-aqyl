@@ -33,7 +33,7 @@ class LLMUsage:
     """Usage record written to data/usage.log after every LLM call."""
 
     file_id: str
-    agent_type: Literal["search", "writer", "lint", "audit", "embed", "answer", "advisor", "twins"]
+    agent_type: Literal["search", "writer", "lint", "audit", "embed", "answer", "advisor", "twins", "tagger"]
     model: str
     input_tokens: int
     output_tokens: int
@@ -292,7 +292,7 @@ class LLMClient:
         prompt: str,
         system: str,
         file_id: str,
-        agent_type: Literal["search", "writer", "lint", "audit", "answer", "advisor", "twins"],
+        agent_type: Literal["search", "writer", "lint", "audit", "answer", "advisor", "twins", "tagger"],
         response_format: Literal["text", "json"] = "text",
         json_schema: dict[str, Any] | None = None,
         schema_name: str = "response",

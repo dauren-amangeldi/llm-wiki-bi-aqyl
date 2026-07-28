@@ -287,3 +287,77 @@ def run_weekly_audit(
     )
     structlog.contextvars.clear_contextvars()
     return {"issues_found": len(issues), "mode": mode, "dry_run": dry_run}
+
+
+@celery_app.task(name="llm_wiki.orchestrator.tasks.autotag_case")
+def autotag_case(case_id: str, force: bool = False) -> dict[str, object]:
+    """Classify a case against the fixed taxonomy and set its tags.
+
+    Skips a case that already has tags (unless ``force``) so it never clobbers a
+    user's manual edits. Best-effort — any failure leaves the tags untouched.
+    """
+    import asyncio
+
+    from llm_wiki.logging_config import configure_logging
+
+    configure_logging()
+
+    async def _run() -> dict[str, object]:
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from llm_wiki.agents.tagger import classify_case_tags, gather_case_text
+        from llm_wiki.api.deps import _engine
+        from llm_wiki.llm.client import LLMClient
+        from llm_wiki.storage.metadata import CaseRecord
+
+        factory = async_sessionmaker(bind=_engine, expire_on_commit=False)
+        async with factory() as session:
+            case = await session.get(CaseRecord, case_id)
+            if case is None:
+                return {"case_id": case_id, "status": "not_found"}
+            if case.tags and not force:
+                return {"case_id": case_id, "status": "already_tagged", "tags": case.tags}
+            content = await gather_case_text(case, session)
+            llm = LLMClient()
+            try:
+                tags = await classify_case_tags(case.title, content, llm, file_id=f"case-{case_id}")
+            finally:
+                await llm.aclose()
+            case.tags = tags
+            await session.commit()
+            logger.info("autotag_case_done", case_id=case_id, tags=tags)
+            return {"case_id": case_id, "status": "tagged", "tags": tags}
+
+    with asyncio.Runner() as runner:
+        return runner.run(_run())
+
+
+@celery_app.task(name="llm_wiki.orchestrator.tasks.backfill_case_tags")
+def backfill_case_tags(force: bool = False) -> dict[str, object]:
+    """One-off backfill: queue auto-tagging for every case with no tags yet (or
+    all cases when ``force``). Each becomes its own ``autotag_case`` task so the
+    single worker chews through them one-by-one with per-case retry."""
+    import asyncio
+
+    from llm_wiki.logging_config import configure_logging
+
+    configure_logging()
+
+    async def _ids() -> list[str]:
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from llm_wiki.api.deps import _engine
+        from llm_wiki.storage.metadata import CaseRecord
+
+        factory = async_sessionmaker(bind=_engine, expire_on_commit=False)
+        async with factory() as session:
+            cases = (await session.scalars(select(CaseRecord))).all()
+        return [c.id for c in cases if force or not c.tags]
+
+    with asyncio.Runner() as runner:
+        ids = runner.run(_ids())
+    for cid in ids:
+        autotag_case.delay(cid, force)
+    logger.info("backfill_case_tags_queued", count=len(ids), force=force)
+    return {"queued": len(ids), "force": force}
