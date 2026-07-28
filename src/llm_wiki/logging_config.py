@@ -21,7 +21,7 @@ from llm_wiki.config import settings
 
 
 def configure_logging() -> None:
-    """Configure structlog + stdlib logging for JSON output to stdout.
+    """Configure structlog + stdlib logging for JSON output to stderr.
 
     Idempotent: safe to call multiple times (``structlog.configure`` is
     itself idempotent; ``logging.basicConfig`` is guarded by ``force=True``
@@ -33,12 +33,20 @@ def configure_logging() -> None:
     """
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
-    # Stdlib root logger → stdout with a bare format string.
+    # Stdlib root logger → stderr with a bare format string.
     # structlog's JSONRenderer does the real work; the stdlib format is just
     # the transport layer.
+    #
+    # stderr (not stdout) on purpose: on this cluster filebeat ships only the
+    # containers' stderr to Kibana — the worker's stdout, where these app logs
+    # and tracebacks (pipeline_failed / pipeline_retry) would otherwise go, is
+    # dropped, so failures were invisible. Routing app logs to stderr puts them
+    # in the stream that is actually indexed. stderr is also line-buffered, so
+    # records survive a hard worker kill (OOM/SIGKILL) instead of dying in an
+    # unflushed buffer.
     logging.basicConfig(
         format="%(message)s",
-        stream=sys.stdout,
+        stream=sys.stderr,
         level=level,
         force=True,
     )
@@ -57,7 +65,7 @@ def configure_logging() -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,
     )
 
