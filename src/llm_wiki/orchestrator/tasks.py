@@ -24,6 +24,15 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    # Keep Celery's hands off sys.stdout/sys.stderr. Its default
+    # (worker_redirect_stdouts=True) swaps them for a LoggingProxy that
+    # swallows structlog's PrintLogger writes — so pipeline_failed and the
+    # pipeline_retry traceback never reached the container's stdout/stderr and
+    # were invisible in BOTH Kibana and `kubectl logs`, even though the task's
+    # except clause ran (the file went to status=FAILED). With this off,
+    # structlog writes straight to the real stderr (see logging_config) and the
+    # failure reason + traceback are shipped as-is.
+    worker_redirect_stdouts=False,
     worker_concurrency=1,  # MVP: single worker to avoid index.md race conditions
     # At-least-once delivery: ack only AFTER the task finishes, and re-queue if
     # the worker dies mid-task (OOM / SIGKILL / eviction). Combined with the

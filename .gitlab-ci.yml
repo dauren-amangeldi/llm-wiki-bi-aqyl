@@ -1,0 +1,140 @@
+stages:
+  - code-quality
+  - build-image
+  - deploy
+
+
+include:
+  - project: 'gitlab-instance/templates/cicd/code-quality'
+    ref: main
+    file: 'sonarqube.yml'
+
+default:
+  tags:
+    - gitlab-runner-ai-office
+
+variables:
+  DEPLOY_NAME: bi-aqyl-api
+  PROJECT_FAMILY: bi-aqyl
+  REGISTRY_IMAGE: $REGISTRY_URL/$PROJECT_FAMILY/$DEPLOY_NAME/$CI_COMMIT_BRANCH:$CI_COMMIT_SHORT_SHA
+
+.sonarqube: &sonarqube
+  extends: .sonarqube-job
+  
+.build:docker:image: &build_docker_definition
+  stage: build-image
+  image:
+    name: registry.bi.group/custom-images/kaniko-project/executor:debug
+    entrypoint: [""]
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - |
+      cat << EOF > /kaniko/.docker/config.json
+      {
+        "auths": {
+          "$REGISTRY_URL": {
+            "auth": "$REGISTRY_TOKEN"
+          }
+        }
+      }
+      EOF
+  script:
+    - >-
+      /kaniko/executor
+      --cache=false 
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile"
+      --destination "$REGISTRY_IMAGE"
+
+
+.deploy:template: &deploy_definition
+  stage: deploy
+  image: registry.bi.group/public/kubectl:gitlab-1.0.0
+  script:
+    - kubectl config set-cluster k8s --server="$K8S_SERVER" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials gitlab --token="$K8S_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=gitlab --namespace="$K8S_NAMESPACE"
+    - kubectl config use-context default
+    - kubectl set image deployment/$DEPLOY_NAME $DEPLOY_NAME=$REGISTRY_IMAGE
+    - kubectl set image deployment/bi-aqyl-worker bi-aqyl-worker=$REGISTRY_IMAGE
+    - kubectl set image deployment/bi-aqyl-beat bi-aqyl-beat=$REGISTRY_IMAGE
+
+
+.rules:testing:template: &rules_testing_definition
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop" 
+
+.rules:staging:template: &rules_staging_definition
+  rules:
+    - if: $CI_COMMIT_BRANCH == "stage" 
+
+.rules:production:template: &rules_production_definition
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" 
+
+
+sonarqube:testing:
+  <<: [*sonarqube, *rules_testing_definition ]
+
+docker:build:testing:
+  <<: *build_docker_definition
+  <<: *rules_testing_definition
+  variables:
+  needs:
+   - sonarqube:testing
+
+deploy:image:testing:
+  <<: *deploy_definition
+  <<: *rules_testing_definition
+  variables:
+    K8S_SERVER: $TEST_K8S_SERVER
+    K8S_TOKEN: $TEST_K8S_TOKEN
+    K8S_NAMESPACE: $TEST_K8S_NAMESPACE
+  needs:
+    - docker:build:testing
+  dependencies: []
+
+
+sonarqube:staging:
+  <<: [*sonarqube, *rules_staging_definition ]  
+
+docker:build:staging:
+  <<: *build_docker_definition
+  <<: *rules_staging_definition
+  variables:
+  needs:
+   - sonarqube:staging
+
+deploy:image:staging:
+  <<: *deploy_definition
+  <<: *rules_staging_definition
+  variables:
+    K8S_SERVER: $STAGE_K8S_SERVER
+    K8S_TOKEN: $STAGE_K8S_TOKEN
+    K8S_NAMESPACE: $STAGE_K8S_NAMESPACE
+  needs:
+    - docker:build:staging
+  dependencies: []
+
+
+sonarqube:production:
+  <<: [*sonarqube, *rules_production_definition ]
+
+docker:build:production:
+  <<: *build_docker_definition
+  <<: *rules_production_definition
+  variables:
+  needs:
+    - sonarqube:production
+  dependencies:
+    
+deploy:image:production:
+  <<: *deploy_definition
+  <<: *rules_production_definition
+  variables:
+    K8S_SERVER: $PROD_K8S_SERVER
+    K8S_TOKEN: $PROD_K8S_TOKEN
+    K8S_NAMESPACE: $PROD_K8S_NAMESPACE
+  dependencies: []
+  needs:
+    - docker:build:production
