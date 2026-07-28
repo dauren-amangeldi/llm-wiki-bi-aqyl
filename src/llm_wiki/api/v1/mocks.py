@@ -12,10 +12,7 @@ from llm_wiki.storage.metadata import FileRecord
 # ── GET — empty / minimal responses ─────────────────────────────────────────
 
 
-@router.get("/tags")
-async def list_tags() -> list:
-    """MOCK."""
-    return []
+# GET /tags now lives in api/v1/cases.py — returns the real taxonomy.
 
 
 @router.get("/documents/{document_id}/sources")

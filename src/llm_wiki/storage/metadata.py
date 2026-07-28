@@ -59,6 +59,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
     "CREATE INDEX IF NOT EXISTS ix_cases_owner ON cases (owner)",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS tags json",
 )
 
 
@@ -282,6 +283,9 @@ class CaseRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     doc_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Fixed-taxonomy tags (see llm_wiki.taxonomy): auto-assigned at creation,
+    # then user-editable. Used to filter cases in the navigation.
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     # Case-level privacy: a private (sensitive) case keeps its files owner-scoped
     # — indexed but never surfaced in the shared wiki/search for other users.
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

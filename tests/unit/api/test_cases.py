@@ -166,3 +166,31 @@ async def test_list_cases_category_filter(client: AsyncClient) -> None:
 
     prv = (await client.get("/api/v1/cases?category=private", headers=hdr)).json()
     assert {c["title"] for c in prv} == {"Private one"}
+
+
+async def test_tags_taxonomy_endpoint(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/tags")
+    assert resp.status_code == 200
+    names = {t["name"] for t in resp.json()}
+    assert len(names) >= 30
+    assert {"Качество", "Финансы", "Стратегия"} <= names
+
+
+async def test_case_tags_persist_and_drop_unknown(client: AsyncClient) -> None:
+    # Unknown tags are silently dropped; kept ones come back in taxonomy order.
+    resp = await client.post(
+        "/api/v1/cases",
+        json={"id": "c-tags", "title": "Tagged", "tags": ["Финансы", "BogusTag", "Качество"]},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["tags"] == ["Качество", "Финансы"]
+
+    c = next(x for x in (await client.get("/api/v1/cases")).json() if x["id"] == "c-tags")
+    assert c["tags"] == ["Качество", "Финансы"]
+
+    # PUT replaces the tag set (still validated against the taxonomy).
+    await client.put(
+        "/api/v1/cases/c-tags", json={"title": "Tagged", "doc_ids": [], "tags": ["HR"]}
+    )
+    c2 = next(x for x in (await client.get("/api/v1/cases")).json() if x["id"] == "c-tags")
+    assert c2["tags"] == ["HR"]

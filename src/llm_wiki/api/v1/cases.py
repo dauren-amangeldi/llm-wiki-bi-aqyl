@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import CaseRecord
+from llm_wiki.taxonomy import CASE_TAGS, clean_tags
 
 
 class CaseBody(BaseModel):
@@ -24,6 +25,8 @@ class CaseBody(BaseModel):
     # so a client that omits it gets a normal, visible case. File-level privacy
     # (owner-scoped chunks) is what actually protects sensitive content.
     sensitive: bool = False
+    # Fixed-taxonomy tags; unknown tags are dropped server-side (see clean_tags).
+    tags: list[str] = []
 
 
 @router.get("/cases")
@@ -68,7 +71,13 @@ async def list_cases(
         stmt = stmt.offset(offset).limit(limit)
     rows = (await db.scalars(stmt)).all()
     return [
-        {"id": r.id, "title": r.title, "doc_ids": r.doc_ids or [], "sensitive": r.sensitive}
+        {
+            "id": r.id,
+            "title": r.title,
+            "doc_ids": r.doc_ids or [],
+            "sensitive": r.sensitive,
+            "tags": r.tags or [],
+        }
         for r in rows
     ]
 
@@ -85,6 +94,7 @@ async def create_case(
         id=body.id or f"case-{int(now.timestamp() * 1000):x}-1",
         title=body.title.strip() or "Без названия",
         doc_ids=body.doc_ids,
+        tags=clean_tags(body.tags),
         sensitive=body.sensitive,
         owner=owner if owner != "anon" else None,
         created_at=now,
@@ -97,6 +107,7 @@ async def create_case(
         "title": case.title,
         "doc_ids": case.doc_ids,
         "sensitive": case.sensitive,
+        "tags": case.tags,
     }
 
 
@@ -114,6 +125,7 @@ async def update_case(
         .values(
             title=body.title.strip() or row.title,
             doc_ids=body.doc_ids,
+            tags=clean_tags(body.tags),
             sensitive=body.sensitive,
             updated_at=datetime.now(timezone.utc),
         )
@@ -131,3 +143,9 @@ async def delete_case(case_id: str, db: AsyncSession = Depends(get_db)) -> dict[
     await db.delete(row)
     await db.commit()
     return {"ok": True}
+
+
+@router.get("/tags")
+async def list_tags() -> list[dict[str, str]]:
+    """The fixed case-tag taxonomy — name + description, for the tag picker/filter."""
+    return [{"name": name, "description": desc} for name, desc in CASE_TAGS]
