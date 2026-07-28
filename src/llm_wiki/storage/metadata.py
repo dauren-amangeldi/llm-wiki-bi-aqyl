@@ -19,10 +19,11 @@ from sqlalchemy import (
     Text,
     create_engine,
     select,
+    text,
     update as sa_update,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from llm_wiki.config import settings
@@ -33,6 +34,42 @@ logger = structlog.get_logger(__name__)
 _DEV_USER_ID = "dev-user"
 _DEV_USER_NAME = "Dev User"
 _DEV_USER_ROLE = "admin"
+
+
+# ---------------------------------------------------------------------------
+# Idempotent column back-fill migrations
+# ---------------------------------------------------------------------------
+# ``Base.metadata.create_all`` creates missing *tables* but never adds *columns*
+# to a table that already exists. These "ADD COLUMN IF NOT EXISTS" statements
+# backfill columns that later features added to pre-existing tables — the
+# failure reason on ``files`` and the owner-scoped private flags on
+# ``files`` / ``chunk_embeddings`` / ``cases`` — so an older database
+# self-migrates on startup instead of needing a manual DBA step. Idempotent and
+# safe to re-run; mirrors the pattern in ``wiki_fts.ensure_wiki_fts_table``.
+# Index names match SQLAlchemy's default (``ix_<table>_<column>``) so a fresh
+# ``create_all`` and this backfill never create a duplicate.
+_COLUMN_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS error text",
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS owner varchar",
+    "CREATE INDEX IF NOT EXISTS ix_files_owner ON files (owner)",
+    "ALTER TABLE chunk_embeddings ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
+    "ALTER TABLE chunk_embeddings ADD COLUMN IF NOT EXISTS owner varchar",
+    "CREATE INDEX IF NOT EXISTS ix_chunk_embeddings_owner ON chunk_embeddings (owner)",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
+    "CREATE INDEX IF NOT EXISTS ix_cases_owner ON cases (owner)",
+)
+
+
+async def ensure_column_migrations(conn: AsyncConnection) -> None:
+    """Backfill columns added to pre-existing tables (idempotent).
+
+    ``create_all`` does not ALTER existing tables, so these run on startup in
+    the same transaction as ``create_all``. A no-op once the columns exist.
+    """
+    for stmt in _COLUMN_MIGRATIONS:
+        await conn.execute(text(stmt))
 
 
 class Base(DeclarativeBase):
