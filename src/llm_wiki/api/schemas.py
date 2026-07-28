@@ -196,7 +196,8 @@ class AdvisorHistoryTurn(BaseModel):
 class AdvisorRequest(BaseModel):
     """Request body for POST /api/v1/advisor."""
 
-    query: str = Field(min_length=3, max_length=1000)
+    # 1200 to match the advisor input's client-side cap (SearchHero maxLength).
+    query: str = Field(min_length=3, max_length=1200)
     role: str = Field(default="employee", max_length=64)
     language: str = Field(default="ru", pattern="^(ru|en|kk)$")
     scope: str = Field(default="all", max_length=32)
