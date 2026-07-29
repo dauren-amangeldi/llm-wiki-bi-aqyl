@@ -1,9 +1,12 @@
 FROM python:3.11-slim
 
 # System dependencies for pdfplumber (poppler). curl is only needed to fetch uv.
+# fonts-dejavu-core supplies the Unicode TTF (Cyrillic) that fpdf2 embeds when
+# exporting artifacts to PDF — the fpdf2 core fonts are latin-1 only.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpoppler-cpp-dev \
     poppler-utils \
+    fonts-dejavu-core \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

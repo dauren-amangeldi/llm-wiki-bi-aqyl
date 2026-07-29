@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.agents.artifacts import ArtifactError, generate_content
+from llm_wiki.agents.artifacts_export import ExportError, export_artifact, supported_formats
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage import artifacts_store
@@ -41,6 +42,70 @@ async def get_artifact(
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return artifacts_store.serialize_detail(record)
+
+
+def _version_content(record: Any, language: str) -> dict[str, Any]:
+    """Pick the ``language`` version's content (fall back to the first stored)."""
+    versions = record.versions or []
+    for v in versions:
+        if isinstance(v, dict) and v.get("language") == language:
+            return v.get("content") or {}
+    for v in versions:
+        if isinstance(v, dict):
+            return v.get("content") or {}
+    return {}
+
+
+@router.get("/artifacts/{artifact_id}/export")
+async def export_artifact_file(
+    artifact_id: str,
+    format: str = "pdf",
+    language: str = "ru",
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    """Stream the rendered artifact as a downloadable file.
+
+    Reached by ``window.open`` (browser navigation), so it carries no auth
+    header — fine while AUTH runs in demo mode. The POST sibling below validates
+    the request under auth; this route only serves the bytes.
+    """
+    record = await artifacts_store.get_artifact(session, artifact_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    try:
+        data, media_type = export_artifact(
+            record.kind, _version_content(record, language), format
+        )
+    except ExportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = f"{record.kind}-{artifact_id[:8]}.{format}"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/artifacts/{artifact_id}/export")
+async def export_artifact_prepare(
+    artifact_id: str,
+    body: dict[str, Any],
+    session: AsyncSession = Depends(get_db),
+    _caller: str = Depends(get_user_key),
+) -> dict[str, Any]:
+    """Validate an export request (kind/format) so the UI can toast on error.
+
+    Returns ``{}`` (no ``url``) so the frontend downloads via the GET route.
+    """
+    record = await artifacts_store.get_artifact(session, artifact_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    fmt = str(body.get("format") or "")
+    if fmt not in supported_formats(record.kind):
+        raise HTTPException(
+            status_code=400, detail=f"Cannot export {record.kind!r} as {fmt!r}"
+        )
+    return {}
 
 
 async def _generate_and_store(
