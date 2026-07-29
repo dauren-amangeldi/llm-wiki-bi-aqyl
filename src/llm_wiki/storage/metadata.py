@@ -301,6 +301,35 @@ class CaseRecord(Base):
     )
 
 
+class ArtifactRecord(Base):
+    """A generated studio artifact for a document/case — test, report,
+    presentation, card, or infographic — with per-language versions.
+
+    One row per (document_id, kind): regenerating updates the row and appends
+    or replaces the language version. Content shape is kind-specific and matches
+    the frontend renderers (e.g. test → {questions:[...]}, report →
+    {executive_summary, metrics, sections}).
+    """
+
+    __tablename__ = "artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(String, primary_key=True)
+    document_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # versions: [{"language": "ru", "content": {...}}, ...]
+    versions: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="ready")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class ChatRecord(Base):
     """A single persisted chat turn, scoped to a user + (document|case).
 

@@ -1,0 +1,91 @@
+"""CRUD for generated studio artifacts (``ArtifactRecord``).
+
+One row per (document_id, kind); regenerating replaces that language's version.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from llm_wiki.storage.metadata import ArtifactRecord
+
+
+async def get_artifact(session: AsyncSession, artifact_id: str) -> ArtifactRecord | None:
+    return await session.get(ArtifactRecord, artifact_id)
+
+
+async def list_artifacts(session: AsyncSession, document_id: str) -> list[ArtifactRecord]:
+    rows = await session.scalars(
+        select(ArtifactRecord).where(ArtifactRecord.document_id == document_id)
+    )
+    return list(rows)
+
+
+async def find_by_kind(
+    session: AsyncSession, document_id: str, kind: str
+) -> ArtifactRecord | None:
+    return await session.scalar(
+        select(ArtifactRecord).where(
+            ArtifactRecord.document_id == document_id,
+            ArtifactRecord.kind == kind,
+        )
+    )
+
+
+async def upsert_artifact(
+    session: AsyncSession,
+    *,
+    document_id: str,
+    kind: str,
+    language: str,
+    content: dict[str, Any],
+) -> ArtifactRecord:
+    """Store (or replace) the ``language`` version of the (document, kind) artifact.
+
+    Reassigns ``versions`` to a new list so SQLAlchemy tracks the JSON change.
+    """
+    record = await find_by_kind(session, document_id, kind)
+    version = {"language": language, "content": content}
+    if record is None:
+        record = ArtifactRecord(
+            artifact_id=uuid.uuid4().hex,
+            document_id=document_id,
+            kind=kind,
+            versions=[version],
+            status="ready",
+        )
+        session.add(record)
+    else:
+        others = [
+            v
+            for v in (record.versions or [])
+            if isinstance(v, dict) and v.get("language") != language
+        ]
+        record.versions = [*others, version]
+        record.status = "ready"
+    await session.commit()
+    return record
+
+
+def serialize_detail(record: ArtifactRecord) -> dict[str, Any]:
+    """Shape a record for GET /artifacts/{id} (versions = [{language, content}])."""
+    versions = [
+        {"language": v.get("language", ""), "content": v.get("content")}
+        for v in (record.versions or [])
+        if isinstance(v, dict)
+    ]
+    return {"artifact_id": record.artifact_id, "kind": record.kind, "versions": versions}
+
+
+def serialize_summary(record: ArtifactRecord) -> dict[str, Any]:
+    """Shape a record for GET /artifacts (list)."""
+    return {
+        "artifact_id": record.artifact_id,
+        "kind": record.kind,
+        "status": record.status,
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }

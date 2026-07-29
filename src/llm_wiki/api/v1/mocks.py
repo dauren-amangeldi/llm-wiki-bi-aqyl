@@ -49,12 +49,6 @@ async def guidelines() -> dict:
     return {"cards": []}
 
 
-@router.get("/artifacts")
-async def artifacts(document_id: str | None = None) -> list:
-    """MOCK."""
-    return []
-
-
 @router.get("/metrics")
 async def metrics(db: AsyncSession = Depends(get_db)) -> dict:
     """Return real document count; all other counters are zero."""
@@ -87,30 +81,8 @@ async def dashboard_chat(body: dict) -> dict:
     }
 
 
-@router.post("/studio/generate")
-async def studio_generate(body: dict) -> dict:
-    """MOCK: returns an empty presentation artifact."""
-    return {
-        "artifact_id": "mock-not-implemented",
-        "kind": "presentation",
-        "payload": {"slides": []},
-    }
-
-
-@router.post("/cards/generate")
-async def cards_generate(body: dict) -> dict:
-    """MOCK."""
-    return {"artifact_id": "mock-not-implemented", "kind": "card", "payload": {}}
-
-
 @router.post("/speech/podcast")
 async def podcast(body: dict) -> dict:
-    """MOCK."""
-    return {"ok": True, "url": None}
-
-
-@router.post("/images/generate")
-async def images(body: dict) -> dict:
     """MOCK."""
     return {"ok": True, "url": None}
 
