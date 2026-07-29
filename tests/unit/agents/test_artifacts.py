@@ -74,13 +74,32 @@ async def test_test_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def test_cards_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = json.dumps({
-        "title": "T", "summary": "s",
-        "key_points": [{"label": "Инсайт", "text": "t"}],
-        "recommendations": ["r"], "tags": ["a", "b"],
+        "insight": "Главный вывод.",
+        "context": "Что за материал.",
+        "steps": [{"title": "Шаг A", "text": "пояснение"}],
+        "risk": "Что сломается.",
+        "action": "Собрать команду на час.",
+        "action_minutes": 60,
+        "relevance_pct": 93,
+        "source_language": "RU",
     })
     out = await _gen("card", resp, monkeypatch)
-    assert out["key_points"][0]["label"] == "Инсайт"
-    assert out["tags"] == ["a", "b"]
+    assert out["insight"] == "Главный вывод."
+    assert out["steps"][0]["title"] == "Шаг A"
+    assert out["action_minutes"] == 60
+
+
+async def test_cards_clamps_badges(monkeypatch: pytest.MonkeyPatch) -> None:
+    resp = json.dumps({
+        "insight": "i", "context": "c",
+        "steps": [{"title": f"s{n}", "text": "t"} for n in range(9)],  # capped at 6
+        "risk": "r", "action": "a",
+        "action_minutes": 100000, "relevance_pct": -5, "source_language": "EN",
+    })
+    out = await _gen("card", resp, monkeypatch)
+    assert out["relevance_pct"] == 0
+    assert out["action_minutes"] == 480
+    assert len(out["steps"]) == 6
 
 
 async def test_presentation_shape(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -39,6 +39,16 @@ TEST = {
     ]
 }
 CARD = {
+    "insight": "Главный вывод одним предложением.",
+    "context": "Что за материал и зачем.",
+    "steps": [{"title": "Шаг A", "text": "Пояснение шага."}],
+    "risk": "Что может сломаться.",
+    "action": "Собрать команду на 60 минут.",
+    "action_minutes": 60,
+    "relevance_pct": 93,
+    "source_language": "RU",
+}
+CARD_LEGACY = {
     "title": "Карточка знаний",
     "summary": "Краткий итог.",
     "key_points": [{"label": "Инсайт", "text": "Важная мысль."}],
@@ -81,7 +91,8 @@ def test_unsupported_pair_raises(kind: str, fmt: str) -> None:
 
 
 @pytest.mark.parametrize("kind,content", [
-    ("report", REPORT), ("report", REPORT_LEGACY), ("test", TEST), ("card", CARD),
+    ("report", REPORT), ("report", REPORT_LEGACY), ("test", TEST),
+    ("card", CARD), ("card", CARD_LEGACY),
 ])
 def test_docx_is_valid_ooxml(kind: str, content: dict) -> None:
     data, media = export_artifact(kind, content, "docx")
@@ -105,8 +116,8 @@ def test_pptx_has_slides() -> None:
 
 @needs_font
 @pytest.mark.parametrize("kind,content", [
-    ("report", REPORT), ("report", REPORT_LEGACY), ("test", TEST), ("card", CARD),
-    ("presentation", PRESENTATION),
+    ("report", REPORT), ("report", REPORT_LEGACY), ("test", TEST),
+    ("card", CARD), ("card", CARD_LEGACY), ("presentation", PRESENTATION),
 ])
 def test_pdf_magic(kind: str, content: dict) -> None:
     data, media = export_artifact(kind, content, "pdf")

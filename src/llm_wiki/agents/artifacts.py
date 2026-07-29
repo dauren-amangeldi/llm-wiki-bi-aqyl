@@ -69,18 +69,32 @@ _REPORT_SCHEMA = _obj(
     ],
 )
 
+# Reference structure — a horizontal deck of typed cards:
+# ИНСАЙТ / КОНТЕКСТ / ШАГ 1..N / РИСК / ДЕЙСТВИЕ (badges: %, язык, 01.., ⚠, N′).
 _CARDS_SCHEMA = _obj(
     {
-        "title": {"type": "string"},
-        "summary": {"type": "string"},
-        "key_points": {
+        "insight": {"type": "string"},
+        "context": {"type": "string"},
+        "steps": {
             "type": "array",
-            "items": _obj({"label": {"type": "string"}, "text": {"type": "string"}}, ["label", "text"]),
+            "items": _obj({"title": {"type": "string"}, "text": {"type": "string"}}, ["title", "text"]),
         },
-        "recommendations": {"type": "array", "items": {"type": "string"}},
-        "tags": {"type": "array", "items": {"type": "string"}},
+        "risk": {"type": "string"},
+        "action": {"type": "string"},
+        "action_minutes": {"type": "integer"},
+        "relevance_pct": {"type": "integer"},
+        "source_language": {"type": "string"},
     },
-    ["title", "summary", "key_points", "recommendations", "tags"],
+    [
+        "insight",
+        "context",
+        "steps",
+        "risk",
+        "action",
+        "action_minutes",
+        "relevance_pct",
+        "source_language",
+    ],
 )
 
 _TEST_SCHEMA = _obj(
@@ -237,6 +251,8 @@ async def generate_content(
         return {"svg": _render_infographic_svg(data)}
     if kind == "report":
         return _finalize_report(data, source_titles)
+    if kind == "card":
+        return _finalize_cards(data)
     return data
 
 
@@ -245,6 +261,19 @@ def _clamp_pct(value: Any) -> int:
         return max(0, min(100, int(value)))
     except (TypeError, ValueError):
         return 0
+
+
+def _finalize_cards(data: dict[str, Any]) -> dict[str, Any]:
+    """Sanity clamps for the card deck (badges must stay renderable)."""
+    data["relevance_pct"] = _clamp_pct(data.get("relevance_pct"))
+    try:
+        minutes = int(data.get("action_minutes"))
+    except (TypeError, ValueError):
+        minutes = 30
+    data["action_minutes"] = max(5, min(480, minutes))
+    steps = [s for s in data.get("steps") or [] if isinstance(s, dict)]
+    data["steps"] = steps[:6]
+    return data
 
 
 def _finalize_report(data: dict[str, Any], source_titles: list[str]) -> dict[str, Any]:

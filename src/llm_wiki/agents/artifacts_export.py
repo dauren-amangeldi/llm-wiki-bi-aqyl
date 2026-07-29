@@ -118,7 +118,29 @@ def _build_docx(kind: str, content: dict[str, Any]) -> bytes:
                 p.add_run("Пояснение: ").bold = True
                 p.add_run(str(q["explanation"]))
     elif kind == "card":
-        doc.add_heading(str(content.get("title") or "Карточка"), level=0)
+        doc.add_heading("Карточки с выводами", level=0)
+        # v2 (reference deck): ИНСАЙТ / КОНТЕКСТ / ШАГи / РИСК / ДЕЙСТВИЕ
+        for heading, text in (
+            ("Инсайт", content.get("insight")),
+            ("Контекст", content.get("context")),
+        ):
+            if text:
+                doc.add_heading(heading, level=1)
+                doc.add_paragraph(str(text))
+        steps = [s for s in content.get("steps") or [] if isinstance(s, dict)]
+        if steps:
+            doc.add_heading("Шаги", level=1)
+            for i, s in enumerate(steps, 1):
+                p = doc.add_paragraph()
+                p.add_run(f"Шаг {i}. {s.get('title', '')} — ").bold = True
+                p.add_run(str(s.get("text", "")))
+        for heading, text in (("Риск", content.get("risk")), ("Действие", content.get("action"))):
+            if text:
+                doc.add_heading(heading, level=1)
+                doc.add_paragraph(str(text))
+        # v1 (legacy stored artifacts)
+        if content.get("title"):
+            doc.add_heading(str(content["title"]), level=1)
         if content.get("summary"):
             doc.add_paragraph(str(content["summary"]))
         for kp in content.get("key_points") or []:
@@ -272,7 +294,27 @@ def _build_pdf(kind: str, content: dict[str, Any]) -> bytes:
             if q.get("explanation"):
                 _para(pdf, f"Пояснение: {q['explanation']}")
     elif kind == "card":
-        _heading(pdf, str(content.get("title") or "Карточка"), size=20)
+        _heading(pdf, "Карточки с выводами", size=20)
+        # v2 (reference deck)
+        for heading, text in (
+            ("Инсайт", content.get("insight")),
+            ("Контекст", content.get("context")),
+        ):
+            if text:
+                _heading(pdf, heading)
+                _para(pdf, str(text))
+        steps = [s for s in content.get("steps") or [] if isinstance(s, dict)]
+        if steps:
+            _heading(pdf, "Шаги")
+            for i, s in enumerate(steps, 1):
+                _para(pdf, f"Шаг {i}. {s.get('title', '')} — {s.get('text', '')}")
+        for heading, text in (("Риск", content.get("risk")), ("Действие", content.get("action"))):
+            if text:
+                _heading(pdf, heading)
+                _para(pdf, str(text))
+        # v1 (legacy stored artifacts)
+        if content.get("title"):
+            _heading(pdf, str(content["title"]))
         if content.get("summary"):
             _para(pdf, str(content["summary"]))
         for kp in content.get("key_points") or []:
