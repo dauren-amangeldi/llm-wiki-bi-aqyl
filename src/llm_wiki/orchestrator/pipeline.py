@@ -23,7 +23,7 @@ from llm_wiki.llm.embeddings import EmbeddingStore, SearchHit
 from llm_wiki.parsers.audio import transcribe_audio
 from llm_wiki.parsers.docx import parse_docx
 from llm_wiki.parsers.markdown import parse_markdown_file
-from llm_wiki.parsers.pdf import parse_pdf
+from llm_wiki.parsers.pdf import ParseError, parse_pdf
 from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
 from llm_wiki.storage.chunk_sync import sync_chunks_for_page
 from llm_wiki.storage.index import IndexStorage
@@ -360,7 +360,32 @@ def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
     # Parsers read from a path; as_local_path downloads S3 keys to a tempfile.
     with store.as_local_path(key) as path:
         if ext == ".pdf":
-            return parse_pdf(path)
+            try:
+                text = parse_pdf(path)
+            except ParseError:
+                text = ""
+            # Scanned/photo PDF (no usable text layer) → OCR via the vision API.
+            # Only when the extracted text is thin, so normal PDFs cost nothing.
+            if settings.ocr_enabled and len(text.strip()) < settings.ocr_min_text_chars:
+                from llm_wiki.parsers.ocr import OCRError, ocr_pdf
+
+                try:
+                    ocr_text = ocr_pdf(path, file_id=file_id)
+                    if len(ocr_text.strip()) > len(text.strip()):
+                        logger.info(
+                            "pdf_ocr_used",
+                            file_id=file_id,
+                            ocr_chars=len(ocr_text),
+                            text_chars=len(text),
+                        )
+                        return ocr_text
+                except OCRError as exc:
+                    logger.warning("pdf_ocr_failed", file_id=file_id, error=str(exc))
+            if not text:
+                raise ParseError(
+                    f"No extractable text in PDF {file_id!r} (and OCR unavailable/failed)"
+                )
+            return text
         if ext == ".md":
             return parse_markdown_file(path).plain_text
         if ext == ".txt":

@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.4-mini"
     # Speech-to-text for audio uploads (mp3/ogg/wav/m4a/webm). OpenAI Whisper.
     transcription_model: str = "whisper-1"
+    # OCR for scanned/photo PDFs with no text layer: render each page and read
+    # it with a vision model. Only runs as a fallback when pypdf+pdfplumber
+    # extract < ocr_min_text_chars, so text PDFs are untouched (no extra cost).
+    # ocr_model must be a VISION-capable model.
+    ocr_enabled: bool = True
+    ocr_model: str = "gpt-5.4-mini"
+    ocr_max_pages: int = 20            # cost/latency cap per document
+    ocr_min_text_chars: int = 100      # below this, treat the PDF as scanned → OCR
+    ocr_render_scale: float = 2.0      # pypdfium2 render scale (~144 DPI at 2.0)
     anthropic_api_key: str = Field(default="", repr=False)
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     llm_timeout_s: float = 60.0  # HTTP timeout for LLM + embedding API calls
