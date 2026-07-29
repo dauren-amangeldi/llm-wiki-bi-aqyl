@@ -16,7 +16,19 @@ from llm_wiki.agents.artifacts_export import (
 )
 
 REPORT = {
-    "executive_summary": "Резюме материала о летнем лагере.",
+    "summary": "Резюме материала о летнем лагере.",
+    "key_insight": "Главный вывод одним предложением.",
+    "risks": ["Нет владельца процесса.", "Метрики собираются вручную."],
+    "recommendations": ["Пилот — запустить на 6 недель."],
+    "sources": ["Страница-источник"],
+    "relevance_pct": 93,
+    "citation_coverage_pct": 95,
+    "effect_horizon": "6–12 мес",
+    "source_language": "RU",
+    "reading_minutes": 3,
+}
+REPORT_LEGACY = {
+    "executive_summary": "Резюме материала (старый формат).",
     "metrics": [{"label": "Формат", "value": "Лагерь"}],
     "sections": [{"heading": "Замысел", "body": "Тело раздела с кириллицей."}],
 }
@@ -69,7 +81,7 @@ def test_unsupported_pair_raises(kind: str, fmt: str) -> None:
 
 
 @pytest.mark.parametrize("kind,content", [
-    ("report", REPORT), ("test", TEST), ("card", CARD),
+    ("report", REPORT), ("report", REPORT_LEGACY), ("test", TEST), ("card", CARD),
 ])
 def test_docx_is_valid_ooxml(kind: str, content: dict) -> None:
     data, media = export_artifact(kind, content, "docx")
@@ -93,7 +105,8 @@ def test_pptx_has_slides() -> None:
 
 @needs_font
 @pytest.mark.parametrize("kind,content", [
-    ("report", REPORT), ("test", TEST), ("card", CARD), ("presentation", PRESENTATION),
+    ("report", REPORT), ("report", REPORT_LEGACY), ("test", TEST), ("card", CARD),
+    ("presentation", PRESENTATION),
 ])
 def test_pdf_magic(kind: str, content: dict) -> None:
     data, media = export_artifact(kind, content, "pdf")

@@ -43,19 +43,30 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     }
 
 
+# Reference structure: Резюме / Ключевой вывод / Риски / Рекомендации + chips
+# (релевантность %, покрытие цитатами %, горизонт эффекта) + язык оригинала.
+# «Источники» и «~мин чтения» заполняются программно (не доверяем их LLM).
 _REPORT_SCHEMA = _obj(
     {
-        "executive_summary": {"type": "string"},
-        "metrics": {
-            "type": "array",
-            "items": _obj({"label": {"type": "string"}, "value": {"type": "string"}}, ["label", "value"]),
-        },
-        "sections": {
-            "type": "array",
-            "items": _obj({"heading": {"type": "string"}, "body": {"type": "string"}}, ["heading", "body"]),
-        },
+        "summary": {"type": "string"},
+        "key_insight": {"type": "string"},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "recommendations": {"type": "array", "items": {"type": "string"}},
+        "relevance_pct": {"type": "integer"},
+        "citation_coverage_pct": {"type": "integer"},
+        "effect_horizon": {"type": "string"},
+        "source_language": {"type": "string"},
     },
-    ["executive_summary", "metrics", "sections"],
+    [
+        "summary",
+        "key_insight",
+        "risks",
+        "recommendations",
+        "relevance_pct",
+        "citation_coverage_pct",
+        "effect_horizon",
+        "source_language",
+    ],
 )
 
 _CARDS_SCHEMA = _obj(
@@ -150,8 +161,21 @@ async def _title_and_slugs(session: Any, document_id: str) -> tuple[str, list[st
     return document_id, []
 
 
-def _load_bodies(slugs: list[str]) -> str:
+def _page_title(slug: str, body: str) -> str:
+    """First markdown H1 of the page, else the slug prettified."""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+        if stripped:
+            break
+    return slug.replace("-", " ").replace("_", " ").strip() or slug
+
+
+def _load_bodies(slugs: list[str]) -> tuple[str, list[str]]:
+    """Concatenated (truncated) page bodies + titles of the pages actually used."""
     parts: list[str] = []
+    titles: list[str] = []
     total = 0
     for slug in slugs:
         try:
@@ -165,8 +189,9 @@ def _load_bodies(slugs: list[str]) -> str:
         if total + len(chunk) > _MAX_TOTAL_CHARS:
             break
         parts.append(chunk)
+        titles.append(_page_title(slug, body))
         total += len(chunk)
-    return "\n\n---\n\n".join(parts)
+    return "\n\n---\n\n".join(parts), titles
 
 
 # --- Generation --------------------------------------------------------------
@@ -184,7 +209,7 @@ async def generate_content(
         raise ArtifactError(f"Unsupported artifact kind: {kind!r}")
 
     title, slugs = await _title_and_slugs(session, document_id)
-    content_text = _load_bodies(slugs)
+    content_text, source_titles = _load_bodies(slugs)
     if not content_text.strip():
         raise ArtifactError("No source content available to generate from.")
 
@@ -210,6 +235,31 @@ async def generate_content(
 
     if kind == "infographic":
         return {"svg": _render_infographic_svg(data)}
+    if kind == "report":
+        return _finalize_report(data, source_titles)
+    return data
+
+
+def _clamp_pct(value: Any) -> int:
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _finalize_report(data: dict[str, Any], source_titles: list[str]) -> dict[str, Any]:
+    """Programmatic report fields: real sources, clamped %, reading time."""
+    data["sources"] = source_titles
+    data["relevance_pct"] = _clamp_pct(data.get("relevance_pct"))
+    data["citation_coverage_pct"] = _clamp_pct(data.get("citation_coverage_pct"))
+    text_parts = [
+        str(data.get("summary") or ""),
+        str(data.get("key_insight") or ""),
+        *[str(r) for r in data.get("risks") or []],
+        *[str(r) for r in data.get("recommendations") or []],
+    ]
+    words = len(" ".join(text_parts).split())
+    data["reading_minutes"] = max(1, round(words / 170))
     return data
 
 

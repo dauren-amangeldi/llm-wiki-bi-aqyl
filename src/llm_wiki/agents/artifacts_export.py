@@ -74,6 +74,24 @@ def _build_docx(kind: str, content: dict[str, Any]) -> bytes:
     doc = Document()
     if kind == "report":
         doc.add_heading("Отчёт", level=0)
+        # v2 (reference structure): Резюме / Ключевой вывод / Риски / Рекомендации / Источники
+        if content.get("summary"):
+            doc.add_heading("Резюме", level=1)
+            doc.add_paragraph(str(content["summary"]))
+        if content.get("key_insight"):
+            doc.add_heading("Ключевой вывод", level=1)
+            doc.add_paragraph(str(content["key_insight"]))
+        for heading, items in (("Риски", content.get("risks")), ("Рекомендации", content.get("recommendations"))):
+            if items:
+                doc.add_heading(heading, level=1)
+                for i, item in enumerate(items, 1):
+                    doc.add_paragraph(f"{i}. {item}")
+        sources = content.get("sources") or []
+        if sources:
+            doc.add_heading("Источники", level=1)
+            for i, src in enumerate(sources, 1):
+                doc.add_paragraph(f"[{i}] {src}")
+        # v1 (legacy stored artifacts)
         if content.get("executive_summary"):
             doc.add_heading("Резюме", level=1)
             doc.add_paragraph(str(content["executive_summary"]))
@@ -214,6 +232,24 @@ def _build_pdf(kind: str, content: dict[str, Any]) -> bytes:
     pdf = _new_pdf()
     if kind == "report":
         _heading(pdf, "Отчёт", size=20)
+        # v2 (reference structure)
+        if content.get("summary"):
+            _heading(pdf, "Резюме")
+            _para(pdf, str(content["summary"]))
+        if content.get("key_insight"):
+            _heading(pdf, "Ключевой вывод")
+            _para(pdf, str(content["key_insight"]))
+        for heading, items in (("Риски", content.get("risks")), ("Рекомендации", content.get("recommendations"))):
+            if items:
+                _heading(pdf, heading)
+                for i, item in enumerate(items, 1):
+                    _para(pdf, f"{i}. {item}")
+        sources = content.get("sources") or []
+        if sources:
+            _heading(pdf, "Источники")
+            for i, src in enumerate(sources, 1):
+                _para(pdf, f"[{i}] {src}")
+        # v1 (legacy stored artifacts)
         if content.get("executive_summary"):
             _heading(pdf, "Резюме")
             _para(pdf, str(content["executive_summary"]))

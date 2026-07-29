@@ -27,20 +27,40 @@ class _StubLLM:
 
 async def _gen(kind: str, response: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(art, "_title_and_slugs", AsyncMock(return_value=("Title", ["slug"])))
-    monkeypatch.setattr(art, "_load_bodies", lambda _slugs: "source material")
+    monkeypatch.setattr(art, "_load_bodies", lambda _slugs: ("source material", ["Страница-источник"]))
     return await generate_content(object(), _StubLLM(response), kind=kind, document_id="d", language="ru")
 
 
 async def test_report_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = json.dumps({
-        "executive_summary": "s",
-        "metrics": [{"label": "Рел.", "value": "94%"}],
-        "sections": [{"heading": "h", "body": "b"}],
+        "summary": "Кратко о материале.",
+        "key_insight": "Главный вывод.",
+        "risks": ["Риск один", "Риск два"],
+        "recommendations": ["Шаг — пояснение"],
+        "relevance_pct": 93,
+        "citation_coverage_pct": 95,
+        "effect_horizon": "6–12 мес",
+        "source_language": "RU",
     })
     out = await _gen("report", resp, monkeypatch)
-    assert out["executive_summary"] == "s"
-    assert out["metrics"][0]["value"] == "94%"
-    assert out["sections"][0]["heading"] == "h"
+    assert out["summary"] == "Кратко о материале."
+    assert out["key_insight"] == "Главный вывод."
+    assert out["risks"] == ["Риск один", "Риск два"]
+    assert out["effect_horizon"] == "6–12 мес"
+    # programmatic fields: real source titles + computed reading time
+    assert out["sources"] == ["Страница-источник"]
+    assert out["reading_minutes"] >= 1
+
+
+async def test_report_clamps_out_of_range_pct(monkeypatch: pytest.MonkeyPatch) -> None:
+    resp = json.dumps({
+        "summary": "s", "key_insight": "k", "risks": [], "recommendations": [],
+        "relevance_pct": 250, "citation_coverage_pct": -10,
+        "effect_horizon": "1–3 мес", "source_language": "EN",
+    })
+    out = await _gen("report", resp, monkeypatch)
+    assert out["relevance_pct"] == 100
+    assert out["citation_coverage_pct"] == 0
 
 
 async def test_test_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,9 +105,14 @@ async def test_infographic_returns_svg(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def test_no_source_content_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(art, "_title_and_slugs", AsyncMock(return_value=("T", [])))
-    monkeypatch.setattr(art, "_load_bodies", lambda _slugs: "")
+    monkeypatch.setattr(art, "_load_bodies", lambda _slugs: ("", []))
     with pytest.raises(ArtifactError, match="No source content"):
         await generate_content(object(), _StubLLM("{}"), kind="report", document_id="d", language="ru")
+
+
+def test_page_title_extraction() -> None:
+    assert art._page_title("my-slug", "# Заголовок страницы\n\nтело") == "Заголовок страницы"
+    assert art._page_title("my-slug", "просто текст без заголовка") == "my slug"
 
 
 async def test_invalid_json_raises(monkeypatch: pytest.MonkeyPatch) -> None:
