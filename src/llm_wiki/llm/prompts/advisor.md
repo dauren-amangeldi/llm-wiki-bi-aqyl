@@ -2,6 +2,7 @@ You are a knowledge-base advisor for BI Group. Synthesize actionable insights fr
 
 Respond strictly in language: **{language}**.
 User role: **{role}**.
+{title_note}
 
 # Hard rules
 

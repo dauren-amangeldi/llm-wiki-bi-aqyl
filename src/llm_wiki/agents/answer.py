@@ -69,6 +69,22 @@ KEYWORD_FALLBACK_THRESHOLD: float = 0.45  # if best retrieval below this, run ke
 MAX_PAGE_CHARS: int = 4000              # truncate each page body in the assembled context
 MAX_TOTAL_CONTEXT_CHARS: int = 24_000   # hard cap on total LLM input context
 
+_QA_SYSTEM_BASE = "You are a precise wiki Q&A assistant. Return only valid JSON."
+
+
+def _qa_system(title: str = "") -> str:
+    """System message for the Q&A call, optionally tailored to the caller's job
+    title so the answer's depth and wording fit their role — without changing
+    the facts or the required JSON structure. Empty title → the base persona."""
+    title = (title or "").strip()
+    if not title:
+        return _QA_SYSTEM_BASE
+    return (
+        f'{_QA_SYSTEM_BASE} The person asking has the job title "{title}" — '
+        "calibrate the depth and vocabulary of the answer text to that role, "
+        "without changing the facts or the JSON structure."
+    )
+
 # ---------------------------------------------------------------------------
 # Russian + Kazakh morphology aids (Patch 1)
 # ---------------------------------------------------------------------------
@@ -143,6 +159,7 @@ class AnswerAgent(BaseAgent):
         document: FileRecord,
         language: str = "ru",
         file_id: str = "ask",
+        title: str = "",
     ) -> AnswerResult:
         """Ask scoped to a specific uploaded document.
 
@@ -170,6 +187,7 @@ class AnswerAgent(BaseAgent):
             language=language,
             file_id=file_id,
             status=document.status,
+            title=title,
         )
 
     async def answer_for_case(
@@ -178,6 +196,7 @@ class AnswerAgent(BaseAgent):
         documents: list[FileRecord],
         language: str = "ru",
         file_id: str = "ask",
+        title: str = "",
     ) -> AnswerResult:
         """Ask scoped to a whole case — answers across all its documents.
 
@@ -211,6 +230,7 @@ class AnswerAgent(BaseAgent):
             language=language,
             file_id=file_id,
             status=status_label,
+            title=title,
         )
 
     async def _answer_from_slugs(
@@ -220,6 +240,7 @@ class AnswerAgent(BaseAgent):
         language: str,
         file_id: str,
         status: str,
+        title: str = "",
     ) -> AnswerResult:
         """Answer a question from a fixed set of wiki page slugs (no retrieval).
 
@@ -272,7 +293,7 @@ class AnswerAgent(BaseAgent):
         )
         text, usage = await self._llm.complete(
             prompt=prompt,
-            system="You are a precise wiki Q&A assistant. Return only valid JSON.",
+            system=_qa_system(title),
             file_id=file_id,
             agent_type="answer",
             response_format="json",

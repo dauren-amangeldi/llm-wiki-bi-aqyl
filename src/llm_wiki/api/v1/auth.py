@@ -24,7 +24,13 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.auth import bearer_token, claims_email, verify_access_token
+from llm_wiki.api.auth import (
+    bearer_token,
+    claims_email,
+    claims_given_name,
+    claims_title,
+    verify_access_token,
+)
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
 from llm_wiki.config import settings
@@ -143,6 +149,10 @@ async def auth_me(
         {
             "email": email,
             "name": claims.get("name") or claims.get("preferred_username") or email,
+            # given_name → SPA greeting; title (job title) → LLM personalization.
+            # Both are best-effort ("" when the token/mapper doesn't carry them).
+            "given_name": claims_given_name(claims),
+            "title": claims_title(claims),
             "role": "admin" if decision.is_admin else "employee",
         }
     )

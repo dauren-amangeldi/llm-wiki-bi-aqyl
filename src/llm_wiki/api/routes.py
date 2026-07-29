@@ -14,7 +14,13 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import check_ask_rate_limit, check_files_rate_limit, get_db, get_user_key
+from llm_wiki.api.deps import (
+    check_ask_rate_limit,
+    check_files_rate_limit,
+    get_db,
+    get_user_key,
+    get_user_title,
+)
 from llm_wiki.api.schemas import (
     AdvisorPointResponse,
     AdvisorRequest,
@@ -921,6 +927,7 @@ async def advisor_endpoint(
     stream: bool = Query(False, description="When true, stream SSE progress events"),
     session: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
+    title: str = Depends(get_user_title),
     _rate_check: None = Depends(check_ask_rate_limit),
 ) -> StreamingResponse:
     """Run the Advisor Agent and return structured insights via SSE.
@@ -951,6 +958,7 @@ async def advisor_endpoint(
                 query=body.query,
                 role=body.role,
                 language=body.language,
+                title=title,
                 history=history or None,
                 system_prompt=role_prompt,
             )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jwt as pyjwt
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 
 from llm_wiki.api import auth as auth_mod
-from llm_wiki.api.deps import get_user_key
+from llm_wiki.api.deps import get_user_key, get_user_title
 from llm_wiki.config import settings
 
 
@@ -145,3 +146,57 @@ def test_get_user_key_reads_email_from_token_when_auth_on(
         assert get_user_key(req) == "jwt-user@bi.group"
     finally:
         patcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# claim extraction — title (LLM personalization) + given_name (greeting)
+# ---------------------------------------------------------------------------
+
+
+def test_claims_title_extracts_and_defaults() -> None:
+    assert auth_mod.claims_title({"title": "AI Инженер Senior"}) == "AI Инженер Senior"
+    assert auth_mod.claims_title({"title": "  spaced  "}) == "spaced"
+    assert auth_mod.claims_title({}) == ""
+
+
+def test_claims_given_name_prefers_given_name_then_first_of_name() -> None:
+    assert auth_mod.claims_given_name({"given_name": "Даурен"}) == "Даурен"
+    assert auth_mod.claims_given_name({"name": "Даурен Амангелді"}) == "Даурен"
+    assert auth_mod.claims_given_name({}) == ""
+
+
+def test_get_user_title_auth_off_reads_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "auth_enabled", False)
+    req = MagicMock()
+    req.headers = {"X-User-Title": "Аналитик"}
+    assert get_user_title(req) == "Аналитик"
+
+
+def test_get_user_title_auth_off_defaults_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "auth_enabled", False)
+    req = MagicMock()
+    req.headers = {}
+    assert get_user_title(req) == ""
+
+
+def test_get_user_title_uses_stashed_claims_when_auth_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The gate middleware already verified the token and stashed the claims,
+    # so no JWKS/token round-trip is needed here.
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    req = MagicMock()
+    req.headers = {}
+    req.state = SimpleNamespace(user_claims={"title": "AI Инженер Senior"})
+    assert get_user_title(req) == "AI Инженер Senior"
+
+
+def test_get_user_title_missing_is_empty_not_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Auth on, but no stashed claims and no bearer → best-effort empty, never raises.
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    req = MagicMock()
+    req.headers = {}
+    req.state = SimpleNamespace()
+    assert get_user_title(req) == ""

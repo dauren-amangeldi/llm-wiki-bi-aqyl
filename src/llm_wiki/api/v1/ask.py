@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import get_db, get_user_key
+from llm_wiki.api.deps import get_db, get_user_key, get_user_title
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import FileRecord, append_chat_message
 
@@ -87,6 +87,7 @@ async def ask_document(
     body: AskBody,
     db: AsyncSession = Depends(get_db),
     user_key: str = Depends(get_user_key),
+    title: str = Depends(get_user_title),
     scope_type: str = "document",
 ) -> DocAskResponse:
     """Ask a question scoped to a specific document using its wiki pages."""
@@ -127,6 +128,7 @@ async def ask_document(
             document=fr,
             language=body.language,
             file_id=document_id,
+            title=title,
         )
     finally:
         await llm.aclose()
@@ -155,10 +157,11 @@ async def ask_card(
     body: AskBody,
     db: AsyncSession = Depends(get_db),
     user_key: str = Depends(get_user_key),
+    title: str = Depends(get_user_title),
 ) -> DocAskResponse:
     """Alias: card_id is treated as document_id."""
     return await ask_document(
-        document_id=card_id, body=body, db=db, user_key=user_key
+        document_id=card_id, body=body, db=db, user_key=user_key, title=title
     )
 
 
@@ -168,6 +171,7 @@ async def ask_case(
     body: AskBody,
     db: AsyncSession = Depends(get_db),
     user_key: str = Depends(get_user_key),
+    title: str = Depends(get_user_title),
 ) -> DocAskResponse:
     """Ask a question scoped to a whole case (NotebookLM-style, across all docs)."""
     from llm_wiki.storage.metadata import CaseRecord
@@ -217,6 +221,7 @@ async def ask_case(
         agent = AnswerAgent(llm, store)
         result = await agent.answer_for_case(
             question=body.question,
+            title=title,
             documents=documents,
             language=body.language,
             file_id=case_id,

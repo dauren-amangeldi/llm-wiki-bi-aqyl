@@ -411,3 +411,24 @@ async def test_answer_heading_path_still_works_without_chunk_store(tmp_path: Pat
     result = await agent.answer("What is LoRA?", top_k=5)
     assert result.confidence == "high"
     assert result.sources[0].slug == "lora"
+
+
+# ---------------------------------------------------------------------------
+# _qa_system — job-title personalization of the Q&A system message
+# ---------------------------------------------------------------------------
+
+
+def test_qa_system_base_when_no_title() -> None:
+    from llm_wiki.agents.answer import _QA_SYSTEM_BASE, _qa_system
+
+    assert _qa_system("") == _QA_SYSTEM_BASE
+    assert _qa_system("   ") == _QA_SYSTEM_BASE
+
+
+def test_qa_system_includes_title_without_changing_json_contract() -> None:
+    from llm_wiki.agents.answer import _qa_system
+
+    sys = _qa_system("AI Инженер Senior")
+    assert "AI Инженер Senior" in sys
+    # The JSON-only instruction must survive so the response contract is intact.
+    assert "valid JSON" in sys

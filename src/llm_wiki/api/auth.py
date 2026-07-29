@@ -74,6 +74,32 @@ def claims_email(claims: dict[str, Any]) -> str:
     )
 
 
+def claims_given_name(claims: dict[str, Any]) -> str:
+    """User's first name for greetings — the Keycloak ``given_name`` claim
+    (present via the standard ``profile`` scope), falling back to the first
+    token of ``name``, or "" when unknown."""
+    given = claims.get("given_name")
+    if given:
+        return str(given).strip()
+    name = claims.get("name")
+    if name:
+        parts = str(name).strip().split()
+        if parts:
+            return parts[0]
+    return ""
+
+
+def claims_title(claims: dict[str, Any]) -> str:
+    """User's job title (e.g. "AI Инженер Senior") for tailoring LLM answers.
+
+    Comes from the Keycloak ``title`` claim, which needs a protocol mapper on
+    the client to be emitted into the access token — returns "" when absent
+    (demo mode, or the mapper isn't configured), and callers fall back to a
+    generic persona.
+    """
+    return str(claims.get("title") or "").strip()
+
+
 def require_email(request: Request) -> str:
     """Verify the request's bearer token and return the caller's email.
 

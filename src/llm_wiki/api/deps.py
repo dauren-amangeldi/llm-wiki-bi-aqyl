@@ -42,6 +42,34 @@ def get_user_key(request: Request) -> str:
     )
 
 
+def get_user_title(request: Request) -> str:
+    """The caller's job title (Keycloak ``title`` claim) for LLM personalization.
+
+    With ``AUTH_ENABLED`` it comes from the verified token — preferring the
+    claims the gate middleware already stashed on ``request.state``, else
+    verifying the bearer directly. Empty when the token lacks the claim (e.g. no
+    Keycloak mapper configured). Without auth (dev/demo) it falls back to an
+    ``X-User-Title`` header so the feature can be exercised locally, defaulting
+    to "" (a generic persona). Personalization is best-effort: never raises.
+    """
+    if settings.auth_enabled:
+        from llm_wiki.api.auth import claims_title
+
+        claims = getattr(request.state, "user_claims", None)
+        if claims is None:
+            from llm_wiki.api.auth import bearer_token, verify_access_token
+
+            token = bearer_token(request)
+            if not token:
+                return ""
+            try:
+                claims = verify_access_token(token)
+            except Exception:  # noqa: BLE001 — personalization must not break the call
+                return ""
+        return claims_title(claims)
+    return (request.headers.get("X-User-Title") or "").strip()
+
+
 async def get_current_user(
     request: Request,
     session: AsyncSession = Depends(get_db),

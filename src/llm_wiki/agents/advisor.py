@@ -77,6 +77,7 @@ class AdvisorAgent(BaseAgent):
         query: str,
         role: str = "employee",
         language: str = "ru",
+        title: str = "",
         history: list[HistoryTurn] | None = None,
         file_id: str = "advisor",
         system_prompt: str | None = None,
@@ -87,6 +88,8 @@ class AdvisorAgent(BaseAgent):
             query: User question (3–1000 chars, validated upstream).
             role: User role for tone/audience (``employee``, ``pm``, etc.).
             language: Response language (``ru``, ``en``, or ``kk``).
+            title: Caller's job title from the Keycloak ``title`` claim (e.g.
+                "AI Инженер Senior"); tailors depth/framing. "" → generic persona.
             history: Optional prior conversation turns for follow-ups.
             file_id: Correlation ID for usage logging.
             system_prompt: Role-specific system message from the skills table.
@@ -116,11 +119,19 @@ class AdvisorAgent(BaseAgent):
 
         cases_block, allowed_ids, case_texts = self._build_cases_context(hits)
         history_block = self._format_history(history or [])
+        title = (title or "").strip()
+        title_note = (
+            f"The user's job title is **{title}** — calibrate the depth, framing "
+            "and terminology of your advice to that role and seniority.\n"
+            if title
+            else ""
+        )
 
         prompt = self._llm.load_prompt(
             "advisor",
             language=language,
             role=role,
+            title_note=title_note,
             query=query,
             cases_block=cases_block,
             allowed_case_ids=", ".join(sorted(allowed_ids)) or "(none)",
