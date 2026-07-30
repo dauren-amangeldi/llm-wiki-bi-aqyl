@@ -131,9 +131,3 @@ async def delete_doc(
         fr.status = "ROLLED_BACK"
         await db.commit()
     return {"ok": True}
-
-
-@router.delete("/topics/{topic_id}/documents/{document_id}")
-async def topic_remove(topic_id: str, document_id: str) -> dict:
-    """MOCK."""
-    return {"ok": True}

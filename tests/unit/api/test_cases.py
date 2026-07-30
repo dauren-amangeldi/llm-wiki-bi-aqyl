@@ -194,3 +194,49 @@ async def test_case_tags_persist_and_drop_unknown(client: AsyncClient) -> None:
     )
     c2 = next(x for x in (await client.get("/api/v1/cases")).json() if x["id"] == "c-tags")
     assert c2["tags"] == ["HR"]
+
+
+async def test_unlink_document_removes_it_from_the_case_and_persists(client: AsyncClient) -> None:
+    # item 10: deleting a source must actually unlink it (was a no-op mock).
+    await client.post("/api/v1/cases", json={"id": "c-unlink", "title": "C", "doc_ids": ["d1", "d2", "d3"]})
+    resp = await client.delete("/api/v1/cases/c-unlink/documents/d2")
+    assert resp.status_code == 200
+
+    c = next(x for x in (await client.get("/api/v1/cases")).json() if x["id"] == "c-unlink")
+    assert c["doc_ids"] == ["d1", "d3"]  # d2 gone, and it stays gone on reload
+
+
+async def test_unlink_document_on_missing_case_returns_404(client: AsyncClient) -> None:
+    resp = await client.delete("/api/v1/cases/ghost/documents/d1")
+    assert resp.status_code == 404
+
+
+async def test_case_list_exposes_owner(client: AsyncClient) -> None:
+    await client.post("/api/v1/cases", json={"id": "c-owner", "title": "C", "doc_ids": []})
+    c = next(x for x in (await client.get("/api/v1/cases")).json() if x["id"] == "c-owner")
+    assert "owner" in c  # frontend needs it to gate author-only edits
+
+
+def test_assert_can_edit_only_blocks_a_different_author_under_auth(monkeypatch) -> None:
+    # item 4: a public case is author-only — but only enforced with real auth.
+    import pytest
+    from fastapi import HTTPException
+
+    from llm_wiki.api.v1 import cases
+    from llm_wiki.config import settings
+    from llm_wiki.storage.metadata import CaseRecord
+
+    owned = CaseRecord(owner="alice@bi.group")
+    ownerless = CaseRecord(owner=None)
+
+    # auth OFF (demo): never blocks, even a different caller
+    monkeypatch.setattr(settings, "auth_enabled", False)
+    cases._assert_can_edit(owned, "bob@bi.group")
+
+    # auth ON: block a different author, allow the author and ownerless cases
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    with pytest.raises(HTTPException) as exc:
+        cases._assert_can_edit(owned, "bob@bi.group")
+    assert exc.value.status_code == 403
+    cases._assert_can_edit(owned, "alice@bi.group")
+    cases._assert_can_edit(ownerless, "bob@bi.group")

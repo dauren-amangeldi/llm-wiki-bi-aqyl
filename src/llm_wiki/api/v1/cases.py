@@ -10,8 +10,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
+from llm_wiki.config import settings
 from llm_wiki.storage.metadata import CaseRecord
 from llm_wiki.taxonomy import CASE_TAGS, clean_tags
+
+
+def _assert_can_edit(row: CaseRecord, caller: str) -> None:
+    """A case (public or private) may only be modified by its author.
+
+    A public case is shared and immutable for everyone else; a private case is
+    already owner-scoped. Enforced ONLY with real auth on — in demo mode the
+    caller identity/owner aren't reliable, so we don't block local editing.
+    """
+    if settings.auth_enabled and row.owner and row.owner != caller:
+        raise HTTPException(status_code=403, detail="Only the case author can modify this case")
 
 
 class CaseBody(BaseModel):
@@ -89,6 +101,7 @@ async def list_cases(
             "doc_ids": r.doc_ids or [],
             "sensitive": r.sensitive,
             "tags": r.tags or [],
+            "owner": r.owner,
         }
         for r in rows
     ]
@@ -126,12 +139,16 @@ async def create_case(
 
 @router.put("/cases/{case_id}")
 async def update_case(
-    case_id: str, body: CaseBody, db: AsyncSession = Depends(get_db)
+    case_id: str,
+    body: CaseBody,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, bool]:
     """Update case title and document membership."""
     row = await db.get(CaseRecord, case_id)
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
+    _assert_can_edit(row, caller)
     await db.execute(
         sa_update(CaseRecord)
         .where(CaseRecord.id == case_id)
@@ -149,12 +166,44 @@ async def update_case(
 
 
 @router.delete("/cases/{case_id}")
-async def delete_case(case_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, bool]:
+async def delete_case(
+    case_id: str,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> dict[str, bool]:
     """Delete a case by id."""
     row = await db.get(CaseRecord, case_id)
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
+    _assert_can_edit(row, caller)
     await db.delete(row)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/cases/{case_id}/documents/{document_id}")
+async def unlink_document(
+    case_id: str,
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> dict[str, bool]:
+    """Remove a document (source) from a case.
+
+    Unlinks the doc from the case's ``doc_ids`` and persists it — previously
+    this was a mock, so a deleted source reappeared on reopening the case.
+    The document itself is left in place; it just no longer belongs here.
+    """
+    row = await db.get(CaseRecord, case_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Case not found")
+    _assert_can_edit(row, caller)
+    doc_ids = [d for d in (row.doc_ids or []) if d != document_id]
+    await db.execute(
+        sa_update(CaseRecord)
+        .where(CaseRecord.id == case_id)
+        .values(doc_ids=doc_ids, updated_at=datetime.now(timezone.utc))
+    )
     await db.commit()
     return {"ok": True}
 
