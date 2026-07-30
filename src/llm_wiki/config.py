@@ -209,6 +209,11 @@ class Settings(BaseSettings):
         return f"{self.keycloak_realm_url}/protocol/openid-connect/token"
 
     @property
+    def keycloak_logout_url(self) -> str:
+        """End-session endpoint (RP-initiated logout — kills the SSO session)."""
+        return f"{self.keycloak_realm_url}/protocol/openid-connect/logout"
+
+    @property
     def usage_log_path(self) -> Path:
         """Path to the LLM usage JSONL log."""
         return self.data_dir / "usage.log"

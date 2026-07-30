@@ -124,6 +124,30 @@ async def auth_callback(request: Request, code: str = "", state: str = "") -> Re
     return resp
 
 
+@router.get("/auth/logout")
+async def auth_logout(request: Request) -> RedirectResponse:
+    """RP-initiated logout: end the Keycloak SSO session, then return to the app.
+
+    Clearing only the app's local token is not enough — the Keycloak SSO cookie
+    survives, so the next /auth/login silently re-authenticates (the "logout
+    loops back in" bug). Redirecting through the end-session endpoint kills that
+    session; Keycloak then sends the browser to ``post_logout_redirect_uri``
+    (must be registered on the client), where the SPA shows the login form.
+    """
+    base = _public_base(request)
+    if not settings.auth_enabled:
+        return RedirectResponse(base + "/", status_code=307)
+    params = {
+        "client_id": settings.keycloak_client_id,
+        "post_logout_redirect_uri": base + "/",
+    }
+    resp = RedirectResponse(
+        f"{settings.keycloak_logout_url}?{urlencode(params)}", status_code=307
+    )
+    resp.delete_cookie(_STATE_COOKIE)
+    return resp
+
+
 @router.get("/auth/me")
 async def auth_me(
     request: Request, session: AsyncSession = Depends(get_db)
