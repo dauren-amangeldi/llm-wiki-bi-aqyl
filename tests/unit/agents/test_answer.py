@@ -359,6 +359,9 @@ async def test_answer_for_document_returns_answer_when_pages_exist(
     assert result.confidence == "high"
     assert "[[lora]]" in result.answer
     assert [s.slug for s in result.sources] == ["lora"]
+    # Citation carries the human page title (from wiki_fts), not the raw slug —
+    # this is what the frontend renders in the numbered sources footer.
+    assert [s.title for s in result.sources] == ["LoRA"]
     llm.complete.assert_called_once()  # type: ignore[attr-defined]
     assert llm.load_prompt.call_args.kwargs["language"] == "ru"  # type: ignore[union-attr]
 

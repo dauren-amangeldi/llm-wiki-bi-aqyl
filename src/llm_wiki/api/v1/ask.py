@@ -54,9 +54,10 @@ class AskBody(BaseModel):
 
 
 class Citation(BaseModel):
-    """A citation anchor pointing to a wiki slug."""
+    """A citation anchor pointing to a wiki slug, with its human display title."""
 
     anchor: str
+    title: str = ""
 
 
 class DocAskResponse(BaseModel):
@@ -135,7 +136,7 @@ async def ask_document(
 
     response = DocAskResponse(
         answer=result.answer,
-        citations=[Citation(anchor=s.slug) for s in result.sources],
+        citations=[Citation(anchor=s.slug, title=s.title) for s in result.sources],
         follow_ups=[],
         insufficient_evidence=False,
         contact=None,
@@ -231,7 +232,7 @@ async def ask_case(
 
     response = DocAskResponse(
         answer=result.answer,
-        citations=[Citation(anchor=s.slug) for s in result.sources],
+        citations=[Citation(anchor=s.slug, title=s.title) for s in result.sources],
         follow_ups=[],
         insufficient_evidence=not result.sources,
         contact=None,

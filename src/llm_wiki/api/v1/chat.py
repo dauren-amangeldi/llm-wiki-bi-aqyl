@@ -14,9 +14,10 @@ from llm_wiki.storage.metadata import (
 
 
 class ChatCitation(BaseModel):
-    """Citation anchor pointing to a wiki slug."""
+    """Citation anchor pointing to a wiki slug, with its human display title."""
 
     anchor: str
+    title: str = ""
 
 
 class ChatTurn(BaseModel):
@@ -28,11 +29,27 @@ class ChatTurn(BaseModel):
     model_name: str | None = None
 
 
+def _anchor_title(anchor: str) -> str:
+    """Resolve a stored citation anchor (a wiki slug) to its current page title
+    so reloaded history shows real titles instead of raw slugs/UUIDs. Only the
+    anchor is persisted, so the title is re-derived from the wiki on read."""
+    from llm_wiki.storage import wiki_store
+
+    try:
+        title = wiki_store.get_page_title(anchor)
+    except Exception:  # noqa: BLE001
+        title = None
+    return (title or "").strip() or anchor.replace("-", " ").title()
+
+
 def _to_turn(record: ChatRecord) -> ChatTurn:
     return ChatTurn(
         role=record.role,
         text=record.text,
-        citations=[ChatCitation(anchor=a) for a in (record.citations or [])],
+        citations=[
+            ChatCitation(anchor=a, title=_anchor_title(a))
+            for a in (record.citations or [])
+        ],
         model_name=record.model_name,
     )
 

@@ -303,11 +303,13 @@ class AnswerAgent(BaseAgent):
 
         provided_slugs = {slug for slug, _ in loaded}
         parsed = self._parse_response(text, provided_slugs)
+        # Resolve each cited slug to its human page title so the frontend shows
+        # "Деловой отчёт…" in the citation footer instead of a raw slug/UUID.
         used = [
-            SearchHit(slug=s, title=s, section="", similarity=1.0)
+            SearchHit(slug=s, title=self._load_page_title(s), section="", similarity=1.0)
             for s in parsed["used_sources"]
         ] or [
-            SearchHit(slug=s, title=s, section="", similarity=1.0)
+            SearchHit(slug=s, title=self._load_page_title(s), section="", similarity=1.0)
             for s, _ in loaded[:3]
         ]
 
@@ -556,6 +558,19 @@ class AnswerAgent(BaseAgent):
         except Exception as exc:  # noqa: BLE001
             logger.warning("ask_load_page_failed", slug=slug, error=str(exc))
             return ""
+
+    def _load_page_title(self, slug: str) -> str:
+        """Human page title for a slug (the stored ``wiki_fts.title``), falling
+        back to a humanised slug when the page has no title or isn't found —
+        so a citation never surfaces a raw slug/UUID to the reader."""
+        from llm_wiki.storage import wiki_store
+
+        try:
+            title = wiki_store.get_page_title(slug)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ask_load_title_failed", slug=slug, error=str(exc))
+            title = None
+        return (title or "").strip() or slug.replace("-", " ").title()
 
     def _keyword_fallback(
         self, question: str, exclude: set[str], limit: int
