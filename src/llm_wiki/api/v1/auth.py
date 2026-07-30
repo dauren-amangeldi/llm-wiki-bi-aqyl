@@ -116,16 +116,22 @@ async def auth_callback(request: Request, code: str = "", state: str = "") -> Re
         logger.warning("oidc_token_exchange_failed", status=r.status_code, body=r.text[:200])
         raise HTTPException(status_code=401, detail="Token exchange failed")
 
-    access_token = str(r.json().get("access_token", ""))
-    # Fragment (#…) stays client-side — the SPA reads it, stores it, and cleans
-    # the URL; it is never sent to any server.
-    resp = RedirectResponse(f"{_public_base(request)}/#access_token={access_token}", status_code=307)
+    payload = r.json()
+    access_token = str(payload.get("access_token", ""))
+    # The id_token is needed later as the logout id_token_hint (so Keycloak ends
+    # the session silently, without its confirmation page). Fragment (#…) stays
+    # client-side — the SPA reads it, stores it, and cleans the URL.
+    id_token = str(payload.get("id_token", ""))
+    frag = f"access_token={access_token}"
+    if id_token:
+        frag += f"&id_token={id_token}"
+    resp = RedirectResponse(f"{_public_base(request)}/#{frag}", status_code=307)
     resp.delete_cookie(_STATE_COOKIE)
     return resp
 
 
 @router.get("/auth/logout")
-async def auth_logout(request: Request) -> RedirectResponse:
+async def auth_logout(request: Request, id_token_hint: str = "") -> RedirectResponse:
     """RP-initiated logout: end the Keycloak SSO session, then return to the app.
 
     Clearing only the app's local token is not enough — the Keycloak SSO cookie
@@ -133,6 +139,12 @@ async def auth_logout(request: Request) -> RedirectResponse:
     loops back in" bug). Redirecting through the end-session endpoint kills that
     session; Keycloak then sends the browser to ``post_logout_redirect_uri``
     (must be registered on the client), where the SPA shows the login form.
+
+    ``id_token_hint`` (the login id_token, forwarded by the SPA) is what lets
+    Keycloak log out SILENTLY. Without it Keycloak shows a logout-confirmation
+    page — which this realm's theme renders as a blank white screen, and the
+    session isn't ended until confirmed (hence "logout → white screen, then
+    reopening logs me back in").
     """
     base = _public_base(request)
     if not settings.auth_enabled:
@@ -141,6 +153,8 @@ async def auth_logout(request: Request) -> RedirectResponse:
         "client_id": settings.keycloak_client_id,
         "post_logout_redirect_uri": base + "/",
     }
+    if id_token_hint:
+        params["id_token_hint"] = id_token_hint
     resp = RedirectResponse(
         f"{settings.keycloak_logout_url}?{urlencode(params)}", status_code=307
     )
