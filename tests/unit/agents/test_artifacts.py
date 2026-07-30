@@ -111,15 +111,25 @@ async def test_presentation_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["slides"][0]["bullets"] == ["one", "two"]
 
 
-async def test_infographic_returns_svg(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_infographic_returns_svg_and_structured_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = json.dumps({
-        "title": "Заголовок",
-        "stats": [{"label": "Рел.", "value": "94%"}],
-        "points": ["Пункт один", "Пункт два"],
+        "eyebrow": "Управление рисками",
+        "key_insight": "Уровень 3–4 даёт на 35% меньше убытков.",
+        "implementation_path": ["Assess", "Map", "Control", "Optimize"],
+        "relevance_pct": 94,
+        "source_language": "RU",
     })
     out = await _gen("infographic", resp, monkeypatch)
+    # SVG carries the visible text
     assert out["svg"].startswith("<svg")
-    assert "94%" in out["svg"] and "Пункт один" in out["svg"]
+    assert "ГЛАВНЫЙ ИНСАЙТ" in out["svg"] and "94%" in out["svg"]
+    assert "Assess → Map → Control → Optimize" in out["svg"]
+    assert "УПРАВЛЕНИЕ РИСКАМИ" in out["svg"]  # eyebrow uppercased
+    # structured fields kept alongside for Copy / .md export
+    assert out["key_insight"].startswith("Уровень 3–4")
+    assert out["implementation_path"] == ["Assess", "Map", "Control", "Optimize"]
+    assert out["relevance_pct"] == 94
+    assert out["sources_count"] == 1  # from the mocked _load_bodies
 
 
 async def test_no_source_content_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,11 +154,19 @@ async def test_unsupported_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         await _gen("podcast", "{}", monkeypatch)
 
 
-def test_infographic_svg_escapes_and_caps() -> None:
-    svg = _render_infographic_svg({
-        "title": "<script>x</script>",
-        "stats": [{"label": "a", "value": "1"}] * 5,  # capped at 3
-        "points": ["p"] * 10,  # capped at 6
-    })
-    assert "<script>" not in svg  # escaped
-    assert svg.count("<circle") == 6  # points capped
+def test_infographic_svg_escapes_and_clamps() -> None:
+    svg = _render_infographic_svg(
+        {
+            "eyebrow": "<script>x</script>",
+            "key_insight": "<b>bold?</b>",
+            "implementation_path": [f"Step{n}" for n in range(9)],  # capped at 6
+            "relevance_pct": 250,  # clamped to 100
+            "source_language": "ru",
+        },
+        title="<img onerror=alert(1)>",
+        source_titles=["Страница A", "Страница B"],
+    )
+    assert "<script>" not in svg and "<img" not in svg and "<b>" not in svg  # escaped
+    assert "100%" in svg  # relevance clamped
+    assert ">2<" in svg  # sources_count = len(source_titles)
+    assert "Step5" in svg and "Step6" not in svg  # path capped at 6 (Step0..Step5)

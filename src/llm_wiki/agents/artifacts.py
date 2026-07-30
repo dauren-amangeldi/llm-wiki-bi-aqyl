@@ -133,16 +133,18 @@ _PRESENTATION_SCHEMA = _obj(
     ["title", "slides"],
 )
 
+# Reference: a one-screen "визуальная сводка" — eyebrow (direction) + title +
+# key insight + implementation path (arrow steps) + stat cards (релевантность /
+# источников / шагов / язык). Rendered as a self-contained SVG (shareable image).
 _INFOGRAPHIC_SCHEMA = _obj(
     {
-        "title": {"type": "string"},
-        "stats": {
-            "type": "array",
-            "items": _obj({"label": {"type": "string"}, "value": {"type": "string"}}, ["label", "value"]),
-        },
-        "points": {"type": "array", "items": {"type": "string"}},
+        "eyebrow": {"type": "string"},
+        "key_insight": {"type": "string"},
+        "implementation_path": {"type": "array", "items": {"type": "string"}},
+        "relevance_pct": {"type": "integer"},
+        "source_language": {"type": "string"},
     },
-    ["title", "stats", "points"],
+    ["eyebrow", "key_insight", "implementation_path", "relevance_pct", "source_language"],
 )
 
 _PROMPT_BY_KIND = {
@@ -248,7 +250,19 @@ async def generate_content(
         raise ArtifactError("Artifact LLM output was not a JSON object.")
 
     if kind == "infographic":
-        return {"svg": _render_infographic_svg(data)}
+        svg = _render_infographic_svg(data, title=title, source_titles=source_titles)
+        # Keep the structured fields alongside the SVG so Copy / .md export have
+        # real text (the renderer only needs `svg`).
+        return {
+            "svg": svg,
+            "title": title,
+            "eyebrow": str(data.get("eyebrow") or ""),
+            "key_insight": str(data.get("key_insight") or ""),
+            "implementation_path": [str(s) for s in (data.get("implementation_path") or [])],
+            "relevance_pct": _clamp_pct(data.get("relevance_pct")),
+            "source_language": str(data.get("source_language") or ""),
+            "sources_count": max(1, len(source_titles)),
+        }
     if kind == "report":
         return _finalize_report(data, source_titles)
     if kind == "card":
@@ -294,42 +308,95 @@ def _finalize_report(data: dict[str, Any], source_titles: list[str]) -> dict[str
 
 # --- Infographic SVG template (built from LLM summary, not LLM-drawn) ---------
 
-def _render_infographic_svg(data: dict[str, Any]) -> str:
-    """Render a clean, self-contained infographic SVG from {title, stats, points}."""
-    title = html.escape(str(data.get("title") or "")[:120])
-    stats = [s for s in (data.get("stats") or []) if isinstance(s, dict)][:3]
-    points = [str(p) for p in (data.get("points") or []) if str(p).strip()][:6]
+# Palette (light, "email/dashboard" graphic — intentionally not theme-aware).
+_IG_GOLD = "#B7791F"
+_IG_INK = "#1A2233"
+_IG_MUTED = "#64748B"
+_IG_CARD = "#F3F5FB"
+_IG_BORDER = "#E6ECF5"
 
-    w, h = 900, 560
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" '
-        f'width="100%" role="img" aria-label="{title}" font-family="Inter, system-ui, sans-serif">',
-        f'<rect x="0" y="0" width="{w}" height="{h}" rx="20" fill="#f6f8fb"/>',
-        f'<rect x="0" y="0" width="{w}" height="88" rx="20" fill="#0058ff"/>',
-        f'<rect x="0" y="60" width="{w}" height="28" fill="#0058ff"/>',
-        f'<text x="40" y="56" fill="#ffffff" font-size="30" font-weight="700">{title}</text>',
+
+def _wrap_words(text: str, max_chars: int, max_lines: int) -> list[str]:
+    """Greedy word-wrap to ~max_chars per line (SVG <text> doesn't wrap)."""
+    lines: list[str] = []
+    cur = ""
+    for word in text.split():
+        if cur and len(cur) + 1 + len(word) > max_chars:
+            lines.append(cur)
+            cur = word
+            if len(lines) == max_lines - 1:
+                break
+        else:
+            cur = f"{cur} {word}".strip()
+    rest = text.split()
+    if len(lines) == max_lines - 1:  # dump whatever's left onto the final line
+        used = sum(len(line_.split()) for line_ in lines)
+        cur = " ".join(rest[used:])
+    if cur:
+        lines.append(cur)
+    if lines and len(lines) == max_lines and len(cur) > max_chars:
+        lines[-1] = cur[: max_chars - 1].rstrip() + "…"
+    return lines[:max_lines]
+
+
+def _svg_lines(x: int, y: int, lines: list[str], size: int, lh: int, color: str, weight: int) -> str:
+    tspans = "".join(
+        f'<tspan x="{x}" y="{y + i * lh}">{html.escape(s)}</tspan>' for i, s in enumerate(lines)
+    )
+    return f'<text fill="{color}" font-size="{size}" font-weight="{weight}">{tspans}</text>'
+
+
+def _render_infographic_svg(
+    data: dict[str, Any], *, title: str, source_titles: list[str]
+) -> str:
+    """Render the one-screen "визуальная сводка" SVG (reference layout):
+    eyebrow + title + key insight + implementation path, and a 2×2 stat grid.
+    Self-contained + shareable (email/dashboard)."""
+    eyebrow = html.escape(str(data.get("eyebrow") or "").upper()[:40])
+    insight = str(data.get("key_insight") or "")
+    path_steps = [str(s).strip() for s in (data.get("implementation_path") or []) if str(s).strip()][:6]
+    relevance = _clamp_pct(data.get("relevance_pct"))
+    lang = html.escape(str(data.get("source_language") or "").upper()[:4] or "—")
+    sources_count = max(1, len(source_titles))
+    steps_count = len(path_steps)
+    source_line = html.escape((" · ".join(source_titles[:3]) or title)[:90])
+    path_str = html.escape(" → ".join(path_steps)[:80])
+
+    w, h = 1000, 600
+    p: list[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="100%" '
+        f'role="img" aria-label="{html.escape(title[:80])}" '
+        f'font-family="Inter, -apple-system, Segoe UI, Roboto, sans-serif">',
+        f'<rect x="8" y="8" width="{w - 16}" height="{h - 16}" rx="22" fill="#ffffff" stroke="{_IG_BORDER}"/>',
+        f'<line x1="620" y1="56" x2="620" y2="{h - 56}" stroke="{_IG_BORDER}"/>',
     ]
 
-    # KPI cards
-    if stats:
-        n = len(stats)
-        gap = 24
-        card_w = (w - 80 - gap * (n - 1)) / n
-        for i, s in enumerate(stats):
-            x = 40 + i * (card_w + gap)
-            value = html.escape(str(s.get("value") or "")[:16])
-            label = html.escape(str(s.get("label") or "")[:40])
-            parts.append(f'<rect x="{x:.0f}" y="120" width="{card_w:.0f}" height="120" rx="14" fill="#ffffff" stroke="#e6ecf5"/>')
-            parts.append(f'<text x="{x + card_w / 2:.0f}" y="180" fill="#0058ff" font-size="34" font-weight="800" text-anchor="middle">{value}</text>')
-            parts.append(f'<text x="{x + card_w / 2:.0f}" y="210" fill="#5b6b82" font-size="15" text-anchor="middle">{label}</text>')
+    # ── Left column ──
+    p.append(f'<text x="52" y="78" fill="{_IG_GOLD}" font-size="14" font-weight="700" letter-spacing="1.5">{eyebrow}</text>')
+    p.append(_svg_lines(52, 118, _wrap_words(title, 26, 2), 32, 42, _IG_INK, 800))
 
-    # Bullet points
-    y = 290 if stats else 140
-    for p in points:
-        text = html.escape(p[:110])
-        parts.append(f'<circle cx="52" cy="{y - 5:.0f}" r="5" fill="#0058ff"/>')
-        parts.append(f'<text x="72" y="{y:.0f}" fill="#1a2740" font-size="18">{text}</text>')
-        y += 40
+    p.append(f'<text x="52" y="264" fill="{_IG_MUTED}" font-size="13" font-weight="700" letter-spacing="1.2">ГЛАВНЫЙ ИНСАЙТ</text>')
+    p.append(_svg_lines(52, 296, _wrap_words(insight, 36, 4), 22, 31, _IG_GOLD, 700))
 
-    parts.append("</svg>")
-    return "".join(parts)
+    p.append(f'<text x="52" y="472" fill="{_IG_MUTED}" font-size="13" font-weight="700" letter-spacing="1.2">ПУТЬ ВНЕДРЕНИЯ</text>')
+    p.append(f'<text x="52" y="506" fill="{_IG_INK}" font-size="20" font-weight="700">{path_str}</text>')
+
+    p.append(f'<text x="52" y="{h - 40}" fill="{_IG_MUTED}" font-size="13">{source_line}</text>')
+
+    # ── Right column: 2×2 stat cards ──
+    cards = [
+        (f"{relevance}%", "Релевантность"),
+        (str(sources_count), "Источников"),
+        (str(steps_count), "Шагов внедрения"),
+        (lang, "Язык оригинала"),
+    ]
+    cw, ch, gap, x0, y0 = 150, 96, 16, 656, 60
+    for i, (value, label) in enumerate(cards):
+        cx = x0 + (i % 2) * (cw + gap)
+        cy = y0 + (i // 2) * (ch + gap)
+        p.append(f'<rect x="{cx}" y="{cy}" width="{cw}" height="{ch}" rx="14" fill="{_IG_CARD}" stroke="{_IG_BORDER}"/>')
+        p.append(f'<text x="{cx + 20}" y="{cy + 46}" fill="{_IG_GOLD}" font-size="30" font-weight="800">{html.escape(value)}</text>')
+        p.append(f'<text x="{cx + 20}" y="{cy + 74}" fill="{_IG_MUTED}" font-size="14">{label}</text>')
+
+    p.append("</svg>")
+    return "".join(p)
