@@ -677,15 +677,25 @@ async def get_allowed_user(session: AsyncSession, email: str) -> AllowedUser | N
 async def access_for_email(session: AsyncSession, email: str) -> AccessDecision:
     """Decide whether *email* may use the API and whether it is an admin.
 
-    Strict whitelist: unknown email → denied; ``blocked`` row → denied;
-    otherwise allowed with ``is_admin`` taken from the row.
+    Default (OPEN, Zebo-style): any authenticated user is allowed; the
+    ``allowed_users`` row, when present, only grants the admin role — its
+    absence no longer denies access.
+
+    Strict mode (``settings.auth_strict_allowlist``): deny-by-default — the
+    email must have a non-blocked ``allowed_users`` row; unknown → denied,
+    ``blocked`` row → denied.
     """
+    from llm_wiki.config import settings
+
     row = await get_allowed_user(session, email)
-    if row is None:
-        return AccessDecision(False, False, "not_whitelisted")
-    if row.blocked:
-        return AccessDecision(False, False, "blocked")
-    return AccessDecision(True, bool(row.is_admin), "ok")
+    if settings.auth_strict_allowlist:
+        if row is None:
+            return AccessDecision(False, False, "not_whitelisted")
+        if row.blocked:
+            return AccessDecision(False, False, "blocked")
+        return AccessDecision(True, bool(row.is_admin), "ok")
+    # Open access: everyone in; a non-blocked admin row still grants admin.
+    return AccessDecision(True, bool(row and row.is_admin and not row.blocked), "ok")
 
 
 async def allowed_users_count(session: AsyncSession) -> int:

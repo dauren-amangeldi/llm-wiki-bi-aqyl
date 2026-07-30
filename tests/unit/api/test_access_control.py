@@ -25,11 +25,12 @@ from llm_wiki.storage.metadata import (
 # ---------------------------------------------------------------------------
 
 
-async def test_access_denied_for_unknown_email(db_session: AsyncSession) -> None:
+async def test_open_access_allows_unknown_email(db_session: AsyncSession) -> None:
+    # Default (open): any authenticated user is allowed, no whitelist row needed.
     d = await access_for_email(db_session, "nobody@bi.group")
-    assert d.allowed is False
+    assert d.allowed is True
     assert d.is_admin is False
-    assert d.reason == "not_whitelisted"
+    assert d.reason == "ok"
 
 
 async def test_access_allowed_and_admin_case_insensitive(db_session: AsyncSession) -> None:
@@ -41,12 +42,28 @@ async def test_access_allowed_and_admin_case_insensitive(db_session: AsyncSessio
     assert d.reason == "ok"
 
 
-async def test_access_blocked_denied(db_session: AsyncSession) -> None:
-    db_session.add(AllowedUser(email="bob@bi.group", is_admin=False, blocked=True))
+async def test_open_access_ignores_blocked_but_drops_admin(db_session: AsyncSession) -> None:
+    db_session.add(AllowedUser(email="bob@bi.group", is_admin=True, blocked=True))
     await db_session.commit()
     d = await access_for_email(db_session, "bob@bi.group")
-    assert d.allowed is False
-    assert d.reason == "blocked"
+    assert d.allowed is True  # open mode has no block list
+    assert d.is_admin is False  # a blocked row doesn't get admin
+
+
+async def test_strict_mode_denies_unknown_and_blocked(
+    db_session: AsyncSession, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "auth_strict_allowlist", True)
+    unknown = await access_for_email(db_session, "ghost@bi.group")
+    assert unknown.allowed is False and unknown.reason == "not_whitelisted"
+
+    db_session.add(AllowedUser(email="carol@bi.group", is_admin=True))
+    db_session.add(AllowedUser(email="dave@bi.group", blocked=True))
+    await db_session.commit()
+    ok = await access_for_email(db_session, "carol@bi.group")
+    assert ok.allowed is True and ok.is_admin is True
+    blocked = await access_for_email(db_session, "dave@bi.group")
+    assert blocked.allowed is False and blocked.reason == "blocked"
 
 
 async def test_seed_allowed_users_seeds_demo_and_is_idempotent(
@@ -123,11 +140,13 @@ async def test_gate_missing_token_is_401(gate_client: AsyncClient) -> None:
     assert r.status_code == 401
 
 
-async def test_gate_unknown_email_is_403(gate_client: AsyncClient) -> None:
+async def test_gate_any_authenticated_email_passes_when_open(gate_client: AsyncClient) -> None:
+    # Open by default: a valid token with any email gets in — no whitelist row.
     r = await gate_client.get(
         "/api/v1/protected", headers={"Authorization": "Bearer ghost@bi.group"}
     )
-    assert r.status_code == 403
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
 
 
 async def test_gate_allowed_email_passes(
@@ -142,9 +161,20 @@ async def test_gate_allowed_email_passes(
     assert r.json() == {"ok": True}
 
 
-async def test_gate_blocked_email_is_403(
-    gate_client: AsyncClient, db_session: AsyncSession
+async def test_gate_unknown_email_is_403_in_strict_mode(
+    gate_client: AsyncClient, monkeypatch
 ) -> None:
+    monkeypatch.setattr(settings, "auth_strict_allowlist", True)
+    r = await gate_client.get(
+        "/api/v1/protected", headers={"Authorization": "Bearer ghost@bi.group"}
+    )
+    assert r.status_code == 403
+
+
+async def test_gate_blocked_email_is_403_in_strict_mode(
+    gate_client: AsyncClient, db_session: AsyncSession, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "auth_strict_allowlist", True)
     db_session.add(AllowedUser(email="bob@bi.group", blocked=True))
     await db_session.commit()
     r = await gate_client.get(

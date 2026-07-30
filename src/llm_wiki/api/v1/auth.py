@@ -130,10 +130,11 @@ async def auth_me(
 ) -> JSONResponse:
     """Return the verified caller's identity + role (for the SPA session).
 
-    Also enforces the whitelist here (this endpoint is outside the middleware
-    gate), so a valid-but-not-allowed account gets a clear 403 the SPA can act
-    on. The role comes from ``allowed_users.is_admin`` (our source of truth),
-    not the Keycloak realm roles.
+    Also runs ``access_for_email`` here (this endpoint is outside the middleware
+    gate). Access is OPEN by default (any authenticated user); under
+    ``AUTH_STRICT_ALLOWLIST`` a valid-but-not-allowed account gets a clear 403
+    the SPA renders as «Нет доступа». The admin role comes from
+    ``allowed_users.is_admin``, not the Keycloak realm roles.
     """
     token = bearer_token(request)
     if not token:

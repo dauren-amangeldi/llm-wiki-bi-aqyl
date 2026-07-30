@@ -77,15 +77,15 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 
 class AuthGateMiddleware(BaseHTTPMiddleware):
-    """Enforce Keycloak auth + the access whitelist on every protected route.
+    """Enforce Keycloak auth on every protected route.
 
     When ``settings.auth_enabled`` is off (dev/demo, the default) this is a
     no-op. When on, each request outside the open-list must carry a valid
-    Keycloak access token (``isBIGroupPerson``) whose email is whitelisted and
-    not blocked (``allowed_users``); otherwise the request is rejected with 401
-    (missing/invalid token) or 403 (not allowed). This is the single, uniform
-    gate — individual routes need not re-check — so upload/wiki/case endpoints
-    are protected too, not just ask/chat.
+    Keycloak access token; the caller is then admitted by ``access_for_email``
+    — OPEN by default (any authenticated user), or deny-by-default whitelist
+    when ``AUTH_STRICT_ALLOWLIST`` is set. Rejected with 401 (missing/invalid
+    token) or 403 (denied). This is the single, uniform gate — individual
+    routes need not re-check — so upload/wiki/case endpoints are protected too.
 
     On success the verified identity is stashed on ``request.state``
     (``user_email``, ``user_is_admin``, ``user_claims``) for downstream deps.

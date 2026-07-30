@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     # tests and the current demo rely on this. When True, API requests must
     # carry a valid Keycloak access-token (bearer JWT, verified via JWKS).
     auth_enabled: bool = False
+    # Access model once auth is on. Default OPEN (Zebo-style): ANY user who
+    # passes Keycloak SSO is allowed in — the allowed_users table only grants
+    # the admin role. Set AUTH_STRICT_ALLOWLIST=true to restore deny-by-default,
+    # where an email must have a non-blocked allowed_users row to use the API.
+    auth_strict_allowlist: bool = False
     keycloak_url: str = "https://sso.test.bi.group"
     keycloak_realm: str = "bi-group"
     # Full realm issuer (e.g. https://sso.test.bi.group/realms/bi-group). When
