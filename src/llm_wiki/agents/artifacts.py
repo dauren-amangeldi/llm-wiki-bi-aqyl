@@ -140,15 +140,22 @@ _PRESENTATION_SCHEMA = _obj(
 _INFOGRAPHIC_SCHEMA = _obj(
     {
         "eyebrow": {"type": "string"},
+        "headline": {"type": "string"},
         "key_insight": {"type": "string"},
+        "stats": {
+            "type": "array",
+            "items": _obj(
+                {"label": {"type": "string"}, "value": {"type": "string"}},
+                ["label", "value"],
+            ),
+        },
         "implementation_path": {"type": "array", "items": {"type": "string"}},
         "relevance_pct": {"type": "integer"},
         "source_language": {"type": "string"},
-        "image_prompt": {"type": "string"},
     },
     [
-        "eyebrow", "key_insight", "implementation_path",
-        "relevance_pct", "source_language", "image_prompt",
+        "eyebrow", "headline", "key_insight", "stats",
+        "implementation_path", "relevance_pct", "source_language",
     ],
 )
 
@@ -260,7 +267,13 @@ async def generate_content(
         fields: dict[str, Any] = {
             "title": title,
             "eyebrow": str(data.get("eyebrow") or ""),
+            "headline": str(data.get("headline") or ""),
             "key_insight": str(data.get("key_insight") or ""),
+            "stats": [
+                {"label": str(s.get("label") or ""), "value": str(s.get("value") or "")}
+                for s in (data.get("stats") or [])
+                if isinstance(s, dict)
+            ][:3],
             "implementation_path": [str(s) for s in (data.get("implementation_path") or [])],
             "relevance_pct": _clamp_pct(data.get("relevance_pct")),
             "source_language": str(data.get("source_language") or ""),
@@ -332,26 +345,46 @@ _IG_CARD = "#F3F5FB"
 _IG_BORDER = "#E6ECF5"
 
 
-def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
-    """Build a text-free image prompt for the generated infographic picture.
+_IG_LANG_NAME = {"RU": "Russian", "EN": "English", "KK": "Kazakh"}
 
-    Image models garble embedded text, so we ask for a clean, thematic, wordless
-    illustration in the brand palette — the accurate figures are rendered as HTML
-    cards beside the picture, never inside it.
-    """
-    theme = str(
-        data.get("image_prompt") or data.get("eyebrow") or title or "business strategy"
-    ).strip()
+
+def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
+    """Build a DATA infographic prompt: embed the real figures, steps and title so
+    gpt-image-1 draws an informative infographic (numbers, labels, charts) — not a
+    decorative illustration. Text is requested in the source language, spelled as
+    given; the HTML cards below stay the accurate source of truth."""
+    lang = _IG_LANG_NAME.get(str(data.get("source_language") or "").upper(), "Russian")
+    headline = str(data.get("headline") or data.get("eyebrow") or title or "").strip()
+    tagline = str(data.get("eyebrow") or "").strip()
+    stats = [s for s in (data.get("stats") or []) if isinstance(s, dict)][:3]
+    steps = [str(s).strip() for s in (data.get("implementation_path") or []) if str(s).strip()][:4]
+
+    stat_lines = "\n".join(
+        f'   - big number "{str(s.get("value", "")).strip()}" with the caption '
+        f'"{str(s.get("label", "")).strip()}"'
+        for s in stats
+    ) or "   - three key KPI numbers with captions"
+    step_lines = ", ".join(f'"{s}"' for s in steps) or "four short steps"
+
     return (
-        f"A premium, magazine-quality business infographic illustration about: {theme}. "
-        "One cohesive, well-composed scene — NOT scattered clip-art icons. Modern flat "
-        "editorial vector style with subtle depth, soft shadows and gentle gradients; a "
-        "refined palette of deep navy blue and warm gold on a clean off-white background. "
-        "Elegant custom iconography and tasteful data-visualisation motifs (a sleek chart, "
-        "a directional process flow, connected nodes) arranged in a balanced, high-detail, "
-        "professional layout with generous whitespace. Crisp, polished, corporate. "
-        "IMPORTANT: absolutely NO words, letters, numbers or text of any kind anywhere in "
-        "the image — communicate purely through shapes, icons and charts."
+        "Design a professional full-page CORPORATE INFOGRAPHIC POSTER, portrait "
+        "orientation, modern flat vector style, clean, premium and trustworthy. "
+        "Palette: deep navy blue + warm gold + white on a light background. "
+        "Lay it out top-to-bottom like a polished business report:\n"
+        f'1) A full-width colored HEADER BAND with the bold title "{headline}"'
+        f'{f" and a short subtitle “{tagline}”" if tagline else ""} in white, '
+        "plus a small upward-trend chart icon on the right.\n"
+        "2) A row of THREE KPI STATS, each a circular flat icon above a large bold "
+        f"number and a one-word caption:\n{stat_lines}\n"
+        f"3) A process section (write its heading in {lang}, e.g. «{len(steps) or 4} шага»): "
+        "four connected chevron/arrow blocks numbered 01–04, each with a simple icon "
+        f"and a short label ({step_lines}) and a tiny one-line caption under it.\n"
+        "4) Two data charts side by side: a vertical BAR CHART with an axis and value "
+        "labels, and a DONUT CHART with a small legend and percentage labels.\n"
+        "5) A full-width colored FOOTER BAND with a small globe icon and a short source line.\n"
+        f"Write ALL text and numbers in {lang}, spelled EXACTLY as given, crisp and "
+        "legible. Balanced grid, clear hierarchy, generous whitespace, high detail — a "
+        "real data infographic like a corporate annual-report one-pager."
     )
 
 

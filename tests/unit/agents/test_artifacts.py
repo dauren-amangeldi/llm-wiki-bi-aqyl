@@ -129,11 +129,16 @@ async def test_presentation_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 
 _INFOGRAPHIC_RESP = json.dumps({
     "eyebrow": "Управление рисками",
+    "headline": "Зрелость управления рисками",
     "key_insight": "Уровень 3–4 даёт на 35% меньше убытков.",
+    "stats": [
+        {"label": "Экономия", "value": "20 млн $"},
+        {"label": "Меньше убытков", "value": "35%"},
+        {"label": "Уровни", "value": "4"},
+    ],
     "implementation_path": ["Assess", "Map", "Control", "Optimize"],
     "relevance_pct": 94,
     "source_language": "RU",
-    "image_prompt": "risk management maturity on a construction site",
 })
 
 
@@ -144,7 +149,9 @@ async def test_infographic_returns_generated_image_and_fields(monkeypatch: pytes
     assert "svg" not in out
     # structured fields drive the HTML cards next to the picture
     assert out["eyebrow"] == "Управление рисками"
+    assert out["headline"] == "Зрелость управления рисками"
     assert out["key_insight"].startswith("Уровень 3–4")
+    assert [s["value"] for s in out["stats"]] == ["20 млн $", "35%", "4"]
     assert out["implementation_path"] == ["Assess", "Map", "Control", "Optimize"]
     assert out["relevance_pct"] == 94
     assert out["sources_count"] == 1  # from the mocked _load_bodies
