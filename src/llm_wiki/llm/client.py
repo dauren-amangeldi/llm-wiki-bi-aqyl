@@ -414,8 +414,9 @@ class LLMClient:
             model=settings.image_model,
             prompt=prompt,
             size=settings.image_size,
+            quality=settings.image_quality,
             n=1,
-            timeout=max(settings.llm_timeout_s, 120),
+            timeout=max(settings.llm_timeout_s, 180),
         )
         item = response.data[0] if response.data else None
         if item is None:

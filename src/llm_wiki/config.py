@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # self-contained SVG when generation is unavailable.
     image_model: str = "gpt-image-1"
     image_size: str = "1024x1024"
+    image_quality: str = "high"  # gpt-image-1: low|medium|high|auto — the main quality lever
     # Speech-to-text for audio uploads (mp3/ogg/wav/m4a/webm). OpenAI Whisper.
     transcription_model: str = "whisper-1"
     # OCR for scanned/photo PDFs with no text layer: render each page and read

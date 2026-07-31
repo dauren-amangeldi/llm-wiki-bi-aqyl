@@ -343,12 +343,15 @@ def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
         data.get("image_prompt") or data.get("eyebrow") or title or "business strategy"
     ).strip()
     return (
-        f"A clean modern corporate infographic illustration about: {theme}. "
-        "Flat vector business style, professional and minimal, deep blue with warm "
-        "gold accents on a white background, simple line icons, abstract charts, "
-        "arrows and a four-step process flow, generous whitespace, balanced layout. "
-        "IMPORTANT: do NOT render any words, letters, numbers, labels or text of any "
-        "kind anywhere in the image — purely visual shapes, icons and charts."
+        f"A premium, magazine-quality business infographic illustration about: {theme}. "
+        "One cohesive, well-composed scene — NOT scattered clip-art icons. Modern flat "
+        "editorial vector style with subtle depth, soft shadows and gentle gradients; a "
+        "refined palette of deep navy blue and warm gold on a clean off-white background. "
+        "Elegant custom iconography and tasteful data-visualisation motifs (a sleek chart, "
+        "a directional process flow, connected nodes) arranged in a balanced, high-detail, "
+        "professional layout with generous whitespace. Crisp, polished, corporate. "
+        "IMPORTANT: absolutely NO words, letters, numbers or text of any kind anywhere in "
+        "the image — communicate purely through shapes, icons and charts."
     )
 
 
