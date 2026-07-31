@@ -347,6 +347,12 @@ _IG_BORDER = "#E6ECF5"
 
 _IG_LANG_NAME = {"RU": "Russian", "EN": "English", "KK": "Kazakh"}
 
+# The generated-picture palette (tweak here to restyle the infographic image).
+_IG_IMAGE_PALETTE = (
+    "a bright royal/cobalt blue as the primary colour (vivid and saturated — NOT a "
+    "pale sky-blue or cyan) with warm orange accents, on a clean white background"
+)
+
 
 def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
     """Build a DATA infographic prompt: embed the real figures, steps and title so
@@ -369,7 +375,7 @@ def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
     return (
         "Design a professional full-page CORPORATE INFOGRAPHIC POSTER, portrait "
         "orientation, modern flat vector style, clean, premium and trustworthy. "
-        "Palette: deep navy blue + warm gold + white on a light background. "
+        f"Palette: {_IG_IMAGE_PALETTE}. "
         "Lay it out top-to-bottom like a polished business report:\n"
         f'1) A full-width colored HEADER BAND with the bold title "{headline}"'
         f'{f" and a short subtitle “{tagline}”" if tagline else ""} in white, '
