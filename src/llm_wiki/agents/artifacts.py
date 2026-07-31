@@ -133,9 +133,10 @@ _PRESENTATION_SCHEMA = _obj(
     ["title", "slides"],
 )
 
-# Reference: a one-screen "визуальная сводка" — eyebrow (direction) + title +
-# key insight + implementation path (arrow steps) + stat cards (релевантность /
-# источников / шагов / язык). Rendered as a self-contained SVG (shareable image).
+# Reference: a generated infographic PICTURE (OpenAI Images) on top + info cards
+# below — eyebrow (direction), key insight (ЦИФРА-ГЕРОЙ), implementation path,
+# and stat cards (релевантность / источников / шагов / язык). `image_prompt`
+# drives the picture; the structured fields drive the cards.
 _INFOGRAPHIC_SCHEMA = _obj(
     {
         "eyebrow": {"type": "string"},
@@ -143,8 +144,12 @@ _INFOGRAPHIC_SCHEMA = _obj(
         "implementation_path": {"type": "array", "items": {"type": "string"}},
         "relevance_pct": {"type": "integer"},
         "source_language": {"type": "string"},
+        "image_prompt": {"type": "string"},
     },
-    ["eyebrow", "key_insight", "implementation_path", "relevance_pct", "source_language"],
+    [
+        "eyebrow", "key_insight", "implementation_path",
+        "relevance_pct", "source_language", "image_prompt",
+    ],
 )
 
 _PROMPT_BY_KIND = {
@@ -250,11 +255,9 @@ async def generate_content(
         raise ArtifactError("Artifact LLM output was not a JSON object.")
 
     if kind == "infographic":
-        svg = _render_infographic_svg(data, title=title, source_titles=source_titles)
-        # Keep the structured fields alongside the SVG so Copy / .md export have
-        # real text (the renderer only needs `svg`).
-        return {
-            "svg": svg,
+        # Structured fields drive the HTML info cards the frontend renders under
+        # the picture (relevance / sources / steps + ЦИФРА-ГЕРОЙ + source line).
+        fields: dict[str, Any] = {
             "title": title,
             "eyebrow": str(data.get("eyebrow") or ""),
             "key_insight": str(data.get("key_insight") or ""),
@@ -262,7 +265,20 @@ async def generate_content(
             "relevance_pct": _clamp_pct(data.get("relevance_pct")),
             "source_language": str(data.get("source_language") or ""),
             "sources_count": max(1, len(source_titles)),
+            "source_line": " · ".join(source_titles[:3]) or title,
         }
+        # Primary: a generated picture (OpenAI Images, text-free prompt). Fall
+        # back to the self-contained SVG when image generation is unavailable
+        # (no model access, API error) so the artifact always renders.
+        try:
+            image_url = await llm.generate_image(_infographic_image_prompt(data, title))
+            return {"image_url": image_url, **fields}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "infographic_image_failed", error=str(exc), document_id=document_id
+            )
+            svg = _render_infographic_svg(data, title=title, source_titles=source_titles)
+            return {"svg": svg, **fields}
     if kind == "report":
         return _finalize_report(data, source_titles)
     if kind == "card":
@@ -314,6 +330,26 @@ _IG_INK = "#1A2233"
 _IG_MUTED = "#64748B"
 _IG_CARD = "#F3F5FB"
 _IG_BORDER = "#E6ECF5"
+
+
+def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
+    """Build a text-free image prompt for the generated infographic picture.
+
+    Image models garble embedded text, so we ask for a clean, thematic, wordless
+    illustration in the brand palette — the accurate figures are rendered as HTML
+    cards beside the picture, never inside it.
+    """
+    theme = str(
+        data.get("image_prompt") or data.get("eyebrow") or title or "business strategy"
+    ).strip()
+    return (
+        f"A clean modern corporate infographic illustration about: {theme}. "
+        "Flat vector business style, professional and minimal, deep blue with warm "
+        "gold accents on a white background, simple line icons, abstract charts, "
+        "arrows and a four-step process flow, generous whitespace, balanced layout. "
+        "IMPORTANT: do NOT render any words, letters, numbers, labels or text of any "
+        "kind anywhere in the image — purely visual shapes, icons and charts."
+    )
 
 
 def _wrap_words(text: str, max_chars: int, max_lines: int) -> list[str]:

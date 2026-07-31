@@ -387,6 +387,56 @@ class LLMClient:
         raise last_exc or RuntimeError("LLM call failed after retries with no recorded exception")
 
     # ------------------------------------------------------------------
+    # Image generation (infographic artifact)
+    # ------------------------------------------------------------------
+
+    async def generate_image(self, prompt: str) -> str:
+        """Generate an image via the OpenAI Images API; return a PNG data URI.
+
+        Used by the infographic artifact. OpenAI provider only. Raises on any
+        provider/config/API error so the caller can fall back to a non-image
+        rendering. The prompt is intentionally text-free — accurate figures are
+        rendered as HTML cards beside the picture, not baked into the pixels.
+
+        Handles both response shapes: ``b64_json`` (gpt-image-1) and a temporary
+        ``url`` (dall-e-3), fetching + encoding the latter so the stored artifact
+        is self-contained (no expiring external link). ``response_format`` is not
+        passed — some image models reject it as an unknown parameter.
+        """
+        import base64
+
+        from llm_wiki.config import settings
+
+        if self._provider != "openai":
+            raise RuntimeError("Image generation requires the OpenAI provider")
+
+        response = await self._client.images.generate(
+            model=settings.image_model,
+            prompt=prompt,
+            size=settings.image_size,
+            n=1,
+            timeout=max(settings.llm_timeout_s, 120),
+        )
+        item = response.data[0] if response.data else None
+        if item is None:
+            raise RuntimeError("Image API returned no image")
+
+        b64 = getattr(item, "b64_json", None)
+        if not b64:
+            url = getattr(item, "url", None)
+            if not url:
+                raise RuntimeError("Image API returned neither b64_json nor url")
+            import httpx
+
+            async with httpx.AsyncClient(timeout=60) as http:
+                resp = await http.get(url)
+                resp.raise_for_status()
+                b64 = base64.b64encode(resp.content).decode("ascii")
+
+        logger.info("image_generated", model=settings.image_model, b64_len=len(b64))
+        return f"data:image/png;base64,{b64}"
+
+    # ------------------------------------------------------------------
     # Provider dispatch
     # ------------------------------------------------------------------
 

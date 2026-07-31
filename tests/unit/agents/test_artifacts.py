@@ -13,10 +13,12 @@ from llm_wiki.agents.artifacts import ArtifactError, _render_infographic_svg, ge
 
 
 class _StubLLM:
-    """Duck-typed LLMClient: load_prompt is a no-op, complete returns canned JSON."""
+    """Duck-typed LLMClient: load_prompt is a no-op, complete returns canned JSON,
+    generate_image returns a data URI (or raises when ``image_error`` is set)."""
 
-    def __init__(self, response: str) -> None:
+    def __init__(self, response: str, *, image_error: bool = False) -> None:
         self._response = response
+        self._image_error = image_error
 
     def load_prompt(self, _name: str, **_kw: Any) -> str:
         return "prompt"
@@ -24,11 +26,25 @@ class _StubLLM:
     async def complete(self, **_kw: Any) -> tuple[str, None]:
         return self._response, None
 
+    async def generate_image(self, _prompt: str) -> str:
+        if self._image_error:
+            raise RuntimeError("no image model")
+        return "data:image/png;base64,ZmFrZQ=="
 
-async def _gen(kind: str, response: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+
+async def _gen(
+    kind: str,
+    response: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    image_error: bool = False,
+) -> dict[str, Any]:
     monkeypatch.setattr(art, "_title_and_slugs", AsyncMock(return_value=("Title", ["slug"])))
     monkeypatch.setattr(art, "_load_bodies", lambda _slugs: ("source material", ["Страница-источник"]))
-    return await generate_content(object(), _StubLLM(response), kind=kind, document_id="d", language="ru")
+    return await generate_content(
+        object(), _StubLLM(response, image_error=image_error),
+        kind=kind, document_id="d", language="ru",
+    )
 
 
 async def test_report_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,25 +127,39 @@ async def test_presentation_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["slides"][0]["bullets"] == ["one", "two"]
 
 
-async def test_infographic_returns_svg_and_structured_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    resp = json.dumps({
-        "eyebrow": "Управление рисками",
-        "key_insight": "Уровень 3–4 даёт на 35% меньше убытков.",
-        "implementation_path": ["Assess", "Map", "Control", "Optimize"],
-        "relevance_pct": 94,
-        "source_language": "RU",
-    })
-    out = await _gen("infographic", resp, monkeypatch)
-    # SVG carries the visible text
-    assert out["svg"].startswith("<svg")
-    assert "ГЛАВНЫЙ ИНСАЙТ" in out["svg"] and "94%" in out["svg"]
-    assert "Assess → Map → Control → Optimize" in out["svg"]
-    assert "УПРАВЛЕНИЕ РИСКАМИ" in out["svg"]  # eyebrow uppercased
-    # structured fields kept alongside for Copy / .md export
+_INFOGRAPHIC_RESP = json.dumps({
+    "eyebrow": "Управление рисками",
+    "key_insight": "Уровень 3–4 даёт на 35% меньше убытков.",
+    "implementation_path": ["Assess", "Map", "Control", "Optimize"],
+    "relevance_pct": 94,
+    "source_language": "RU",
+    "image_prompt": "risk management maturity on a construction site",
+})
+
+
+async def test_infographic_returns_generated_image_and_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    out = await _gen("infographic", _INFOGRAPHIC_RESP, monkeypatch)
+    # Primary path: a generated picture, not an SVG.
+    assert out["image_url"].startswith("data:image/png;base64,")
+    assert "svg" not in out
+    # structured fields drive the HTML cards next to the picture
+    assert out["eyebrow"] == "Управление рисками"
     assert out["key_insight"].startswith("Уровень 3–4")
     assert out["implementation_path"] == ["Assess", "Map", "Control", "Optimize"]
     assert out["relevance_pct"] == 94
     assert out["sources_count"] == 1  # from the mocked _load_bodies
+    assert out["source_line"] == "Страница-источник"
+
+
+async def test_infographic_falls_back_to_svg_when_image_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    out = await _gen("infographic", _INFOGRAPHIC_RESP, monkeypatch, image_error=True)
+    # Fallback path: the self-contained SVG still renders with the same fields.
+    assert "image_url" not in out
+    assert out["svg"].startswith("<svg")
+    assert "ГЛАВНЫЙ ИНСАЙТ" in out["svg"] and "94%" in out["svg"]
+    assert "УПРАВЛЕНИЕ РИСКАМИ" in out["svg"]  # eyebrow uppercased
+    assert out["relevance_pct"] == 94
+    assert out["sources_count"] == 1
 
 
 async def test_no_source_content_raises(monkeypatch: pytest.MonkeyPatch) -> None:

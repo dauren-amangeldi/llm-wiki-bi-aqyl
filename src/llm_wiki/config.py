@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     llm_provider: Literal["openai", "anthropic"] = "openai"
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-5.4-mini"
+    # Image generation for the infographic artifact (OpenAI Images API). The
+    # picture is decorative/thematic (text-free prompt) — the accurate data
+    # lives in the cards the frontend renders under it. Falls back to a
+    # self-contained SVG when generation is unavailable.
+    image_model: str = "gpt-image-1"
+    image_size: str = "1024x1024"
     # Speech-to-text for audio uploads (mp3/ogg/wav/m4a/webm). OpenAI Whisper.
     transcription_model: str = "whisper-1"
     # OCR for scanned/photo PDFs with no text layer: render each page and read

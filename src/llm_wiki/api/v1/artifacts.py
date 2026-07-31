@@ -178,4 +178,6 @@ async def images_generate(
         artifact_id, content = await _generate_and_store(session, "infographic", document_id, language)
     except ArtifactError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"artifact_id": artifact_id, "kind": "infographic", "svg": content.get("svg")}
+    # Return the whole content: `image_url` (generated picture) OR `svg` (fallback)
+    # plus the structured fields the frontend renders as info cards.
+    return {"artifact_id": artifact_id, "kind": "infographic", **content}
