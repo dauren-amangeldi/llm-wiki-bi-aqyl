@@ -40,6 +40,17 @@ class AdvisorPoint:
 
 
 @dataclass(frozen=True)
+class RelevantCase:
+    """The single most applicable case, with how it matches/differs."""
+
+    title: str = ""
+    applicability: str = ""
+    description: str = ""
+    matches: list[str] = field(default_factory=list)
+    differences: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class AdvisorResponse:
     """Structured advisor output matching the frontend contract."""
 
@@ -48,6 +59,15 @@ class AdvisorResponse:
     points: list[AdvisorPoint] = field(default_factory=list)
     source: str = ""
     caseCount: int = 0
+    # Recommendation fields (reference screens 9-10) — empty when the model
+    # doesn't produce them; the frontend renders each section conditionally.
+    strategic_insight: str = ""
+    evidence_strength: str = ""
+    relevant_case: RelevantCase | None = None
+    transferable: list[str] = field(default_factory=list)
+    non_transferable: list[str] = field(default_factory=list)
+    recommended_scenario: str = ""
+    proposed_terms: list[str] = field(default_factory=list)
     refusal: bool = False
     refusal_message: str = ""
     cost_usd: float = 0.0
@@ -258,12 +278,39 @@ class AdvisorAgent(BaseAgent):
         distinct_in_hits = {h.file_id or h.slug for h in hits}
         case_count = len(distinct_in_hits)
 
+        def _slist(value: Any) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            return [str(x).strip() for x in value if str(x).strip()]
+
+        rc_raw = data.get("relevant_case")
+        relevant_case: RelevantCase | None = None
+        if isinstance(rc_raw, dict) and str(rc_raw.get("title", "")).strip():
+            relevant_case = RelevantCase(
+                title=str(rc_raw.get("title", "")).strip(),
+                applicability=str(rc_raw.get("applicability", "")).strip(),
+                description=str(rc_raw.get("description", "")).strip(),
+                matches=_slist(rc_raw.get("matches")),
+                differences=_slist(rc_raw.get("differences")),
+            )
+
+        evidence = str(data.get("evidence_strength", "")).strip().lower()
+        if evidence not in ("high", "medium", "low"):
+            evidence = ""
+
         return AdvisorResponse(
             title=str(data.get("title", "")).strip(),
             summary=str(data.get("summary", "")).strip(),
             points=points,
             source=str(data.get("source", "")).strip(),
             caseCount=case_count,
+            strategic_insight=str(data.get("strategic_insight", "")).strip(),
+            evidence_strength=evidence,
+            relevant_case=relevant_case,
+            transferable=_slist(data.get("transferable")),
+            non_transferable=_slist(data.get("non_transferable")),
+            recommended_scenario=str(data.get("recommended_scenario", "")).strip(),
+            proposed_terms=_slist(data.get("proposed_terms")),
             cost_usd=cost_usd,
         )
 

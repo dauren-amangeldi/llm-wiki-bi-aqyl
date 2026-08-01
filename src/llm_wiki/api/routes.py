@@ -992,6 +992,23 @@ async def advisor_endpoint(
                         ],
                         "source": result.source,
                         "caseCount": result.caseCount,
+                        "strategic_insight": result.strategic_insight,
+                        "evidence_strength": result.evidence_strength,
+                        "relevant_case": (
+                            {
+                                "title": result.relevant_case.title,
+                                "applicability": result.relevant_case.applicability,
+                                "description": result.relevant_case.description,
+                                "matches": result.relevant_case.matches,
+                                "differences": result.relevant_case.differences,
+                            }
+                            if result.relevant_case
+                            else None
+                        ),
+                        "transferable": result.transferable,
+                        "non_transferable": result.non_transferable,
+                        "recommended_scenario": result.recommended_scenario,
+                        "proposed_terms": result.proposed_terms,
                         "cost_usd": round(result.cost_usd, 6),
                     }
                 )
