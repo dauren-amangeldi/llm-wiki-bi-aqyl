@@ -42,6 +42,11 @@ go beyond the excerpts — but never invent case facts, numbers, or case names.
 - `transferable` / `non_transferable`: 2–4 items each — what can and cannot be carried over from the case(s) to the user's situation.
 - `recommended_scenario`: the single preferred course of action, one sentence.
 - `proposed_terms`: 3–8 concrete conditions/terms for that scenario.
+- `options`: 3–5 decision options as a comparison table — each `scenario` (name), `speed` (Низкая/Средняя/Высокая), `control` (Высокий/Средний/Низкий/Отсутствует), `risk` (Низкий/Средний/Высокий/Необратимый), `when_fits` (short phrase), and `recommended` (true for the ONE preferred option, false for the rest).
+- `risks`: 3–6 key risks of the recommended path.
+- `reconsider_if`: 3–8 conditions that would change this recommendation.
+- `missing_info`: 3–8 pieces of information still needed for a final decision.
+- `sources_detail`: the cases/materials you relied on — each `title` (a real case/material name from the excerpts), `kind` ("Факт" for a case fact or "Авторский анализ" for analysis), `role` ("Определяющий" for a decisive source or "Подтверждающий" for a supporting one), and `quote` (a SHORT verbatim quote from that excerpt).
 
 # Output format
 
@@ -73,6 +78,15 @@ When you CAN answer from the excerpts:
   "non_transferable": ["<what cannot be transferred directly>", "..."],
   "recommended_scenario": "<the preferred scenario in {language}>",
   "proposed_terms": ["<condition>", "..."],
+  "options": [
+    {{ "scenario": "<name>", "speed": "Высокая", "control": "Высокий", "risk": "Низкий", "when_fits": "<short>", "recommended": true }}
+  ],
+  "risks": ["<risk>", "..."],
+  "reconsider_if": ["<condition that would change the verdict>", "..."],
+  "missing_info": ["<still-needed info>", "..."],
+  "sources_detail": [
+    {{ "title": "<case/material name>", "kind": "Факт", "role": "Определяющий", "quote": "<short verbatim quote>" }}
+  ],
   "source": "<brief list of cases/topics referenced>",
   "caseCount": <integer — distinct case_id count in points>
 }}

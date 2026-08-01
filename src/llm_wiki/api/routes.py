@@ -1009,6 +1009,24 @@ async def advisor_endpoint(
                         "non_transferable": result.non_transferable,
                         "recommended_scenario": result.recommended_scenario,
                         "proposed_terms": result.proposed_terms,
+                        "options": [
+                            {
+                                "scenario": o.scenario,
+                                "speed": o.speed,
+                                "control": o.control,
+                                "risk": o.risk,
+                                "when_fits": o.when_fits,
+                                "recommended": o.recommended,
+                            }
+                            for o in result.options
+                        ],
+                        "risks": result.risks,
+                        "reconsider_if": result.reconsider_if,
+                        "missing_info": result.missing_info,
+                        "sources_detail": [
+                            {"title": s.title, "kind": s.kind, "role": s.role, "quote": s.quote}
+                            for s in result.sources_detail
+                        ],
                         "cost_usd": round(result.cost_usd, 6),
                     }
                 )

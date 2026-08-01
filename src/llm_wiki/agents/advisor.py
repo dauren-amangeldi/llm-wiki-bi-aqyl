@@ -51,6 +51,28 @@ class RelevantCase:
 
 
 @dataclass(frozen=True)
+class DecisionOption:
+    """One row of the options comparison table."""
+
+    scenario: str = ""
+    speed: str = ""
+    control: str = ""
+    risk: str = ""
+    when_fits: str = ""
+    recommended: bool = False
+
+
+@dataclass(frozen=True)
+class SourceDetail:
+    """A referenced case/material with its role tag and a verbatim quote."""
+
+    title: str = ""
+    kind: str = ""  # Факт | Авторский анализ
+    role: str = ""  # Определяющий | Подтверждающий
+    quote: str = ""
+
+
+@dataclass(frozen=True)
 class AdvisorResponse:
     """Structured advisor output matching the frontend contract."""
 
@@ -68,6 +90,11 @@ class AdvisorResponse:
     non_transferable: list[str] = field(default_factory=list)
     recommended_scenario: str = ""
     proposed_terms: list[str] = field(default_factory=list)
+    options: list[DecisionOption] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    reconsider_if: list[str] = field(default_factory=list)
+    missing_info: list[str] = field(default_factory=list)
+    sources_detail: list[SourceDetail] = field(default_factory=list)
     refusal: bool = False
     refusal_message: str = ""
     cost_usd: float = 0.0
@@ -298,6 +325,34 @@ class AdvisorAgent(BaseAgent):
         if evidence not in ("high", "medium", "low"):
             evidence = ""
 
+        options: list[DecisionOption] = []
+        for opt in data.get("options", []) if isinstance(data.get("options"), list) else []:
+            if not isinstance(opt, dict) or not str(opt.get("scenario", "")).strip():
+                continue
+            options.append(
+                DecisionOption(
+                    scenario=str(opt.get("scenario", "")).strip(),
+                    speed=str(opt.get("speed", "")).strip(),
+                    control=str(opt.get("control", "")).strip(),
+                    risk=str(opt.get("risk", "")).strip(),
+                    when_fits=str(opt.get("when_fits", "")).strip(),
+                    recommended=bool(opt.get("recommended", False)),
+                )
+            )
+
+        sources_detail: list[SourceDetail] = []
+        for src in data.get("sources_detail", []) if isinstance(data.get("sources_detail"), list) else []:
+            if not isinstance(src, dict) or not str(src.get("title", "")).strip():
+                continue
+            sources_detail.append(
+                SourceDetail(
+                    title=str(src.get("title", "")).strip(),
+                    kind=str(src.get("kind", "")).strip(),
+                    role=str(src.get("role", "")).strip(),
+                    quote=str(src.get("quote", "")).strip(),
+                )
+            )
+
         return AdvisorResponse(
             title=str(data.get("title", "")).strip(),
             summary=str(data.get("summary", "")).strip(),
@@ -311,6 +366,11 @@ class AdvisorAgent(BaseAgent):
             non_transferable=_slist(data.get("non_transferable")),
             recommended_scenario=str(data.get("recommended_scenario", "")).strip(),
             proposed_terms=_slist(data.get("proposed_terms")),
+            options=options,
+            risks=_slist(data.get("risks")),
+            reconsider_if=_slist(data.get("reconsider_if")),
+            missing_info=_slist(data.get("missing_info")),
+            sources_detail=sources_detail,
             cost_usd=cost_usd,
         )
 
