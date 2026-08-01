@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
+from typing import Any
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, UploadFile, status
+from pydantic import BaseModel, Field
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1041,6 +1044,88 @@ async def advisor_endpoint(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class AdvisorQuestionsRequest(BaseModel):
+    """Situation to classify + get the static clarifying questions for."""
+
+    query: str = Field(min_length=1, max_length=2000)
+    language: str = "ru"
+
+
+@router.post("/advisor/questions", tags=["advisor"])
+async def advisor_questions(
+    body: AdvisorQuestionsRequest,
+    _caller: str = Depends(get_user_key),
+) -> dict[str, Any]:
+    """Classify the decision type and return its fixed clarifying question set."""
+    from llm_wiki.agents.advisor_questions import (
+        DECISION_TYPE_LABELS,
+        classify_decision_type,
+        questions_for,
+    )
+    from llm_wiki.llm.client import LLMClient
+
+    llm = LLMClient()
+    try:
+        decision_type = await classify_decision_type(llm, body.query)
+    finally:
+        await llm.aclose()
+    return {
+        "decision_type": decision_type,
+        "decision_type_label": DECISION_TYPE_LABELS[decision_type],
+        "questions": questions_for(decision_type),
+    }
+
+
+class AdvisorAnswerItem(BaseModel):
+    question: str = ""
+    answer: str = ""
+
+
+class AdvisorUnderstandRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    answers: list[AdvisorAnswerItem] = Field(default_factory=list)
+    language: str = "ru"
+
+
+@router.post("/advisor/understand", tags=["advisor"])
+async def advisor_understand(
+    body: AdvisorUnderstandRequest,
+    _caller: str = Depends(get_user_key),
+) -> dict[str, Any]:
+    """Restate the situation + the user's answers as a short "here's how I
+    understood it" paragraph, for the confirmation step."""
+    import json
+
+    from llm_wiki.llm.client import LLMClient
+
+    qa = "\n".join(
+        f"- {a.question}: {a.answer}" for a in body.answers if a.answer.strip()
+    )
+    prompt = (
+        f"Respond in language: {body.language}. In 2–4 natural sentences, restate what "
+        "you (the advisor) understood about the user's situation, weaving in their "
+        "answers as a coherent summary — do NOT list them as question/answer pairs.\n\n"
+        f"Situation:\n{body.query}\n\nUser's answers:\n{qa or '(none)'}\n\n"
+        'Return JSON: {"understanding": "<2-4 sentences>"}.'
+    )
+    llm = LLMClient()
+    understanding = body.query
+    try:
+        text, _usage = await llm.complete(
+            prompt=prompt,
+            system="You are a precise advisor. Return only valid JSON.",
+            file_id="advisor-understand",
+            agent_type="advisor",
+            response_format="json",
+        )
+        understanding = str(json.loads(text).get("understanding", "")).strip() or body.query
+    except Exception:  # noqa: BLE001
+        understanding = body.query
+    finally:
+        await llm.aclose()
+    return {"understanding": understanding}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
