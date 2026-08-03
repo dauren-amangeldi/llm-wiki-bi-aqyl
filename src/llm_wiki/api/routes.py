@@ -1047,7 +1047,7 @@ async def advisor_endpoint(
 
 
 class AdvisorQuestionsRequest(BaseModel):
-    """Situation to classify + get the static clarifying questions for."""
+    """Situation to generate the clarifying questions for."""
 
     query: str = Field(min_length=1, max_length=2000)
     language: str = "ru"
@@ -1058,23 +1058,28 @@ async def advisor_questions(
     body: AdvisorQuestionsRequest,
     _caller: str = Depends(get_user_key),
 ) -> dict[str, Any]:
-    """Classify the decision type and return its fixed clarifying question set."""
+    """Generate clarifying questions tailored to the situation (+ decision type).
+
+    Questions are produced dynamically per situation; a curated static set is the
+    fallback if generation fails (handled inside ``generate_questions``)."""
     from llm_wiki.agents.advisor_questions import (
         DECISION_TYPE_LABELS,
-        classify_decision_type,
-        questions_for,
+        generate_questions,
     )
     from llm_wiki.llm.client import LLMClient
 
     llm = LLMClient()
     try:
-        decision_type = await classify_decision_type(llm, body.query)
+        result = await generate_questions(llm, body.query, body.language)
     finally:
         await llm.aclose()
+    decision_type = result["decision_type"]
     return {
         "decision_type": decision_type,
-        "decision_type_label": DECISION_TYPE_LABELS[decision_type],
-        "questions": questions_for(decision_type),
+        "decision_type_label": DECISION_TYPE_LABELS.get(
+            decision_type, DECISION_TYPE_LABELS["generic"]
+        ),
+        "questions": result["questions"],
     }
 
 
