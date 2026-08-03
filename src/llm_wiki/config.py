@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     public_base_url: str = Field(
         default="", validation_alias=AliasChoices("PUBLIC_BASE_URL", "FRONTEND_URL")
     )
+    # How long the refresh-token cookie lives (seconds). The SPA silently swaps a
+    # short-lived access token for a new one via /auth/refresh; this only bounds
+    # how long that works without a fresh login. Keycloak still enforces the real
+    # refresh-token / SSO-session lifetime — if it expires sooner, refresh 401s.
+    keycloak_refresh_cookie_max_age_s: int = 43_200  # 12h
 
     @model_validator(mode="after")
     def _assemble_database_url(self) -> "Settings":

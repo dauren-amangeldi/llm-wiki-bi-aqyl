@@ -39,6 +39,27 @@ from llm_wiki.storage.metadata import access_for_email
 logger = structlog.get_logger(__name__)
 
 _STATE_COOKIE = "kc_state"
+# The refresh token lives in an HttpOnly cookie — never in the URL fragment or JS,
+# so a stolen access token (short-lived) can't be turned into a lasting session.
+# Scoped to /api/v1/auth so it's only sent to /auth/refresh and /auth/logout.
+_REFRESH_COOKIE = "kc_refresh"
+_REFRESH_COOKIE_PATH = "/api/v1/auth"
+
+
+def _set_refresh_cookie(resp: RedirectResponse | JSONResponse, token: str, *, secure: bool) -> None:
+    resp.set_cookie(
+        _REFRESH_COOKIE,
+        token,
+        max_age=settings.keycloak_refresh_cookie_max_age_s,
+        httponly=True,
+        samesite="lax",  # blocks cross-site POST → CSRF-safe for /auth/refresh
+        secure=secure,
+        path=_REFRESH_COOKIE_PATH,
+    )
+
+
+def _clear_refresh_cookie(resp: RedirectResponse | JSONResponse) -> None:
+    resp.delete_cookie(_REFRESH_COOKIE, path=_REFRESH_COOKIE_PATH)
 
 
 def _public_base(request: Request) -> str:
@@ -122,11 +143,67 @@ async def auth_callback(request: Request, code: str = "", state: str = "") -> Re
     # the session silently, without its confirmation page). Fragment (#…) stays
     # client-side — the SPA reads it, stores it, and cleans the URL.
     id_token = str(payload.get("id_token", ""))
+    # The refresh token stays server-side in an HttpOnly cookie (see below); the
+    # SPA never sees it and calls /auth/refresh to rotate the access token.
+    refresh_token = str(payload.get("refresh_token", ""))
     frag = f"access_token={access_token}"
     if id_token:
         frag += f"&id_token={id_token}"
-    resp = RedirectResponse(f"{_public_base(request)}/#{frag}", status_code=307)
+    base = _public_base(request)
+    resp = RedirectResponse(f"{base}/#{frag}", status_code=307)
     resp.delete_cookie(_STATE_COOKIE)
+    if refresh_token:
+        _set_refresh_cookie(resp, refresh_token, secure=base.startswith("https"))
+    return resp
+
+
+@router.post("/auth/refresh")
+async def auth_refresh(request: Request) -> JSONResponse:
+    """Swap the HttpOnly refresh cookie for a fresh access token (silent refresh).
+
+    The SPA calls this shortly before its short-lived access token expires (and
+    once reactively on a 401), so users keep a seamless session without a full
+    Keycloak re-login every few minutes. The refresh token never leaves the
+    server side. On an expired/invalid refresh token we return 401 and clear the
+    cookie, and the SPA falls back to a real login."""
+    if not settings.auth_enabled:
+        raise HTTPException(status_code=404, detail="Auth is disabled")
+
+    refresh_token = request.cookies.get(_REFRESH_COOKIE)
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="No refresh token")
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": settings.keycloak_client_id,
+        "client_secret": settings.keycloak_client_secret,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(settings.keycloak_token_url, data=data)
+    except httpx.HTTPError as exc:
+        logger.warning("oidc_refresh_error", error=str(exc))
+        raise HTTPException(status_code=502, detail="Keycloak unreachable") from exc
+
+    if r.status_code != 200:
+        # Refresh token expired/revoked → drop the cookie and make the SPA re-login.
+        logger.info("oidc_refresh_failed", status=r.status_code)
+        resp = JSONResponse({"detail": "Refresh failed"}, status_code=401)
+        _clear_refresh_cookie(resp)
+        return resp
+
+    payload = r.json()
+    resp = JSONResponse(
+        {
+            "access_token": str(payload.get("access_token", "")),
+            "id_token": str(payload.get("id_token", "")),
+        }
+    )
+    # Keycloak rotates the refresh token by default — persist the new one.
+    new_refresh = str(payload.get("refresh_token", ""))
+    if new_refresh:
+        _set_refresh_cookie(resp, new_refresh, secure=_public_base(request).startswith("https"))
     return resp
 
 
@@ -159,6 +236,7 @@ async def auth_logout(request: Request, id_token_hint: str = "") -> RedirectResp
         f"{settings.keycloak_logout_url}?{urlencode(params)}", status_code=307
     )
     resp.delete_cookie(_STATE_COOKIE)
+    _clear_refresh_cookie(resp)
     return resp
 
 
