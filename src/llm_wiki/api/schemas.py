@@ -196,8 +196,11 @@ class AdvisorHistoryTurn(BaseModel):
 class AdvisorRequest(BaseModel):
     """Request body for POST /api/v1/advisor."""
 
-    # 1200 to match the advisor input's client-side cap (SearchHero maxLength).
-    query: str = Field(min_length=3, max_length=1200)
+    # The multi-step flow enriches the query (situation + clarifying answers + the
+    # restated understanding) well past the raw SearchHero input, so the cap is
+    # generous. Its parts are each bounded upstream (situation ≤ 2000), keeping the
+    # real payload ~3–4k; 6000 leaves headroom without inviting abuse.
+    query: str = Field(min_length=3, max_length=6000)
     role: str = Field(default="employee", max_length=64)
     language: str = Field(default="ru", pattern="^(ru|en|kk)$")
     scope: str = Field(default="all", max_length=32)
