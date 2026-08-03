@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # lives in the cards the frontend renders under it. Falls back to a
     # self-contained SVG when generation is unavailable.
     image_model: str = "gpt-image-2"  # richer/denser than gpt-image-1 for infographics
-    image_size: str = "1024x1536"  # portrait — a full-page infographic poster
+    image_size: str = "1536x1024"  # landscape 16:9 — the art-director infographic slide
     image_quality: str = "high"  # gpt-image-1: low|medium|high|auto — the main quality lever
     # Speech-to-text for audio uploads (mp3/ogg/wav/m4a/webm). OpenAI Whisper.
     transcription_model: str = "whisper-1"

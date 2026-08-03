@@ -280,11 +280,20 @@ async def generate_content(
             "sources_count": max(1, len(source_titles)),
             "source_line": " · ".join(source_titles[:3]) or title,
         }
-        # Primary: a generated picture (OpenAI Images, text-free prompt). Fall
-        # back to the self-contained SVG when image generation is unavailable
-        # (no model access, API error) so the artifact always renders.
+        # Primary image brief: the AI art-director (its verbatim system prompt)
+        # reads the source material and returns a ready gpt-image-2 description.
+        # Fall back to the structured template prompt if that call fails, then to
+        # the self-contained SVG if image generation is unavailable — so the
+        # artifact always renders.
         try:
-            image_url = await llm.generate_image(_infographic_image_prompt(data, title))
+            image_prompt = await _infographic_art_director_prompt(llm, content_text, title)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "infographic_art_director_failed", error=str(exc), document_id=document_id
+            )
+            image_prompt = _infographic_image_prompt(data, title)
+        try:
+            image_url = await llm.generate_image(image_prompt)
             return {"image_url": image_url, **fields}
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -393,6 +402,31 @@ def _infographic_art_direction(lang: str) -> str:
         "excessive glow, invented numbers or fabricated charts, watermarks, and any "
         "logo not present in the data."
     )
+
+
+async def _infographic_art_director_prompt(
+    llm: LLMClient, content_text: str, title: str
+) -> str:
+    """Run the AI art-director over the source material to produce a ready
+    gpt-image-2 brief. The art-director's system prompt is used verbatim (read
+    raw, no interpolation); the source content is the "documents" it analyses. Per
+    that prompt, when it cannot generate the image itself it returns one finished
+    image description, which we then hand to gpt-image-2."""
+    system = (llm.PROMPTS_DIR / "artifact_infographic_art_director.md").read_text(
+        encoding="utf-8"
+    )
+    user = f"Заголовок материала: {title}\n\nДокументы (единый источник):\n{content_text}"
+    text, _usage = await llm.complete(
+        prompt=user,
+        system=system,
+        file_id="infographic-art-director",
+        agent_type="artifact",
+        response_format="text",
+    )
+    brief = text.strip()
+    if not brief:
+        raise ArtifactError("Art-director returned an empty image brief.")
+    return brief
 
 
 def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
