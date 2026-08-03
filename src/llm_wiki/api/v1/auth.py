@@ -139,16 +139,17 @@ async def auth_callback(request: Request, code: str = "", state: str = "") -> Re
 
     payload = r.json()
     access_token = str(payload.get("access_token", ""))
-    # The id_token is needed later as the logout id_token_hint (so Keycloak ends
-    # the session silently, without its confirmation page). Fragment (#…) stays
-    # client-side — the SPA reads it, stores it, and cleans the URL.
-    id_token = str(payload.get("id_token", ""))
     # The refresh token stays server-side in an HttpOnly cookie (see below); the
     # SPA never sees it and calls /auth/refresh to rotate the access token.
     refresh_token = str(payload.get("refresh_token", ""))
+    # Keep the callback response headers small: ONLY the access token rides in the
+    # fragment. Carrying the id_token here too, on top of the refresh Set-Cookie,
+    # pushed the response headers past the ingress proxy_buffer_size → nginx
+    # "upstream sent too big header" → 502 on a real login. The id_token only
+    # enabled the silent-logout hint; drop it here — the SPA picks up a fresh
+    # id_token from /auth/refresh (stored as bi_id_token), so silent logout still
+    # works once the first refresh has run; until then Keycloak may show its page.
     frag = f"access_token={access_token}"
-    if id_token:
-        frag += f"&id_token={id_token}"
     base = _public_base(request)
     resp = RedirectResponse(f"{base}/#{frag}", status_code=307)
     resp.delete_cookie(_STATE_COOKIE)
