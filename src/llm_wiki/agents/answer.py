@@ -116,7 +116,21 @@ def best_supporting_quote(body: str, query: str) -> str | None:
     the result is a whitespace-normalised substring of *body*, trimmed to
     ~240 chars. Returns None when *body* is empty.
     """
-    text = re.sub(r"\s+", " ", (body or "").strip())
+    raw = body or ""
+    # Strip the noise the wiki page / LLM context prepends so the quote is a
+    # real body sentence, not frontmatter, a heading, or a "[Source…]" marker.
+    raw = re.sub(r"^\s*---.*?---\s*", "", raw, flags=re.DOTALL)  # YAML frontmatter
+    raw = re.sub(r"^\s*(title|tags|summary|source|author|date|slug)\s*:.*$", "", raw, flags=re.IGNORECASE | re.MULTILINE)
+    raw = re.sub(r"^\s*#{1,6}\s.*$", "", raw, flags=re.MULTILINE)  # markdown headings
+    raw = re.sub(r"\[+\s*Source[^\]]*\]+", "", raw, flags=re.IGNORECASE)
+    # Prose only: keep lines that read like sentences (end with . ! ? …), which
+    # drops a bare leading title line and stray labels before the first period.
+    prose = " ".join(
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and re.search(r"[.!?…]", line)
+    )
+    text = re.sub(r"\s+", " ", (prose or raw).strip())
     if not text:
         return None
     needles = {
@@ -135,6 +149,16 @@ def best_supporting_quote(body: str, query: str) -> str | None:
     best = max(sentences, key=_score)
     if _score(best) == 0:
         best = sentences[0]  # no keyword overlap → fall back to the opening line
+    # Some wiki bodies flatten the title + "## Heading" onto the same line as the
+    # first sentence: trim the quote to start at the relevant part (the earliest
+    # query keyword past a leading title/heading run), dropping that prefix.
+    low = best.lower()
+    positions = [low.find(n) for n in needles if n and n in low]
+    start = min([p for p in positions if p > 0], default=0)
+    if start > 40:
+        # back up to the start of the word so we don't cut mid-token
+        ws = best.rfind(" ", 0, start)
+        best = best[ws + 1 if ws != -1 else start:]
     # Drop leading markdown markers (heading/list/table) from the chosen line.
     best = re.sub(r"^[#>*\-|\s]+", "", best).strip()
     return best[:_QUOTE_MAX_CHARS].strip() or None

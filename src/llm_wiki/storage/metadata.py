@@ -60,6 +60,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
     "CREATE INDEX IF NOT EXISTS ix_cases_owner ON cases (owner)",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS tags json",
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
 )
 
 
@@ -346,6 +347,9 @@ class ChatRecord(Base):
     role: Mapped[str] = mapped_column(String, nullable=False)  # "user" | "assistant"
     text: Mapped[str] = mapped_column(String, nullable=False)
     citations: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # anchor → short supporting quote, so reloaded history keeps the [n] hover
+    # card + reader highlight (only anchors were persisted before).
+    citation_quotes: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     model_name: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -846,6 +850,7 @@ async def append_chat_message(
     role: str,
     text_body: str,
     citations: list[str] | None = None,
+    citation_quotes: dict[str, str] | None = None,
     model_name: str | None = None,
 ) -> ChatRecord:
     """Persist one chat turn and return the saved row."""
@@ -856,6 +861,7 @@ async def append_chat_message(
         role=role,
         text=text_body,
         citations=citations or [],
+        citation_quotes=citation_quotes or {},
         model_name=model_name,
     )
     session.add(record)

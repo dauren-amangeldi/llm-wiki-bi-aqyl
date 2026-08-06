@@ -37,6 +37,7 @@ async def _persist_turn(
         role="assistant",
         text_body=response.answer,
         citations=[c.anchor for c in response.citations],
+        citation_quotes={c.anchor: c.quote for c in response.citations if c.quote},
     )
 
 

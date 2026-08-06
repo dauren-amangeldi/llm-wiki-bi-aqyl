@@ -14,10 +14,12 @@ from llm_wiki.storage.metadata import (
 
 
 class ChatCitation(BaseModel):
-    """Citation anchor pointing to a wiki slug, with its human display title."""
+    """Citation anchor pointing to a wiki slug, with its human display title
+    and a short supporting quote (persisted so reloaded history keeps it)."""
 
     anchor: str
     title: str = ""
+    quote: str | None = None
 
 
 class ChatTurn(BaseModel):
@@ -43,11 +45,12 @@ def _anchor_title(anchor: str) -> str:
 
 
 def _to_turn(record: ChatRecord) -> ChatTurn:
+    quotes = record.citation_quotes or {}
     return ChatTurn(
         role=record.role,
         text=record.text,
         citations=[
-            ChatCitation(anchor=a, title=_anchor_title(a))
+            ChatCitation(anchor=a, title=_anchor_title(a), quote=quotes.get(a))
             for a in (record.citations or [])
         ],
         model_name=record.model_name,
