@@ -51,6 +51,9 @@ class AskBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     language: Literal["ru", "en", "kk"] = "ru"
     mode: Literal["library", "expert", "advisor"] = "expert"
+    # Case ask only: restrict retrieval to this subset of the case's documents
+    # (the panel's source checkboxes). None/empty = use every document.
+    doc_ids: list[str] | None = None
 
 
 class Citation(BaseModel):
@@ -182,6 +185,14 @@ async def ask_case(
         raise HTTPException(404, "Case not found")
 
     doc_ids = list(case.doc_ids or [])
+    # Honour the panel's source selection: keep only the requested docs that
+    # actually belong to this case (guards against pointing at another case's
+    # files). An empty/None selection means "all sources".
+    if body.doc_ids:
+        allowed = set(doc_ids)
+        selected = [d for d in body.doc_ids if d in allowed]
+        if selected:
+            doc_ids = selected
     documents: list[FileRecord] = []
     for did in doc_ids:
         fr = await db.get(FileRecord, did)
