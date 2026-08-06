@@ -53,6 +53,10 @@ class SearchHit:
     similarity: float
     rerank_score: float | None = field(default=None)
     reason: str | None = field(default=None)
+    # A short verbatim passage from the cited page that supports the answer —
+    # used by the frontend to show the quote in the [n] hover card and to
+    # highlight the fragment in the reader. None when no page body was loaded.
+    quote: str | None = field(default=None)
 
 
 class EmbeddingStore:

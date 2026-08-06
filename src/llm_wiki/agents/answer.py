@@ -104,6 +104,41 @@ _STOP_WORDS: frozenset[str] = frozenset({
 
 _PREFIX_LEN: int = 5  # first N chars used for prefix matching of long tokens
 
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+_QUOTE_MAX_CHARS: int = 240
+
+
+def best_supporting_quote(body: str, query: str) -> str | None:
+    """Pick the sentence from *body* most relevant to *query* (keyword overlap).
+
+    Returns a short verbatim passage the frontend shows in the [n] citation
+    hover card and uses to highlight the fragment in the reader. Deterministic;
+    the result is a whitespace-normalised substring of *body*, trimmed to
+    ~240 chars. Returns None when *body* is empty.
+    """
+    text = re.sub(r"\s+", " ", (body or "").strip())
+    if not text:
+        return None
+    needles = {
+        t[:_PREFIX_LEN] if len(t) >= 6 else t
+        for t in re.findall(r"[a-zЀ-ӿ0-9]{3,}", query.lower())
+        if t not in _STOP_WORDS
+    }
+    sentences = [s.strip() for s in _SENT_SPLIT_RE.split(text) if len(s.strip()) >= 30]
+    if not sentences:
+        return text[:_QUOTE_MAX_CHARS].strip() or None
+
+    def _score(sentence: str) -> int:
+        low = sentence.lower()
+        return sum(1 for n in needles if n and n in low)
+
+    best = max(sentences, key=_score)
+    if _score(best) == 0:
+        best = sentences[0]  # no keyword overlap → fall back to the opening line
+    # Drop leading markdown markers (heading/list/table) from the chosen line.
+    best = re.sub(r"^[#>*\-|\s]+", "", best).strip()
+    return best[:_QUOTE_MAX_CHARS].strip() or None
+
 
 @dataclass(frozen=True)
 class AnswerResult:
@@ -305,12 +340,27 @@ class AnswerAgent(BaseAgent):
         parsed = self._parse_response(text, provided_slugs)
         # Resolve each cited slug to its human page title so the frontend shows
         # "Деловой отчёт…" in the citation footer instead of a raw slug/UUID.
+        # Also attach a supporting quote from the page body (for the [n] hover
+        # card + reader highlight on the frontend).
+        body_by_slug = dict(loaded)
         used = [
-            SearchHit(slug=s, title=self._load_page_title(s), section="", similarity=1.0)
+            SearchHit(
+                slug=s,
+                title=self._load_page_title(s),
+                section="",
+                similarity=1.0,
+                quote=best_supporting_quote(body_by_slug.get(s, ""), question),
+            )
             for s in parsed["used_sources"]
         ] or [
-            SearchHit(slug=s, title=self._load_page_title(s), section="", similarity=1.0)
-            for s, _ in loaded[:3]
+            SearchHit(
+                slug=s,
+                title=self._load_page_title(s),
+                section="",
+                similarity=1.0,
+                quote=best_supporting_quote(body, question),
+            )
+            for s, body in loaded[:3]
         ]
 
         confidence: Literal["high", "medium", "low"] = parsed["confidence"]
@@ -415,7 +465,13 @@ class AnswerAgent(BaseAgent):
                 best_by_slug[chunk.slug] = chunk
 
         used_sources: list[SearchHit] = [
-            SearchHit(slug=c.slug, title=c.title, section=c.section, similarity=c.similarity)
+            SearchHit(
+                slug=c.slug,
+                title=c.title,
+                section=c.section,
+                similarity=c.similarity,
+                quote=best_supporting_quote(c.text, question),
+            )
             for slug, c in best_by_slug.items()
             if slug in used_slugs
         ]

@@ -102,6 +102,7 @@ async def list_cases(
             "sensitive": r.sensitive,
             "tags": r.tags or [],
             "owner": r.owner,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
     ]
@@ -134,6 +135,7 @@ async def create_case(
         "doc_ids": case.doc_ids,
         "sensitive": case.sensitive,
         "tags": case.tags,
+        "created_at": case.created_at.isoformat() if case.created_at else None,
     }
 
 

@@ -435,3 +435,43 @@ def test_qa_system_includes_title_without_changing_json_contract() -> None:
     assert "AI Инженер Senior" in sys
     # The JSON-only instruction must survive so the response contract is intact.
     assert "valid JSON" in sys
+
+
+# ---------------------------------------------------------------------------
+# best_supporting_quote — deterministic citation quote extraction (5.2)
+# ---------------------------------------------------------------------------
+
+
+def test_best_supporting_quote_picks_relevant_sentence() -> None:
+    from llm_wiki.agents.answer import best_supporting_quote
+
+    body = (
+        "## Обзор\n"
+        "Компания внедрила децентрализованную модель управления.\n"
+        "Эффект от децентрализации проявился через два квартала на площадках.\n"
+        "Совсем несвязный текст про другое."
+    )
+    quote = best_supporting_quote(body, "Какой эффект от децентрализации?")
+    assert quote is not None
+    assert "эффект" in quote.lower()
+    assert "децентрализации" in quote.lower()
+
+
+def test_best_supporting_quote_falls_back_and_handles_empty() -> None:
+    from llm_wiki.agents.answer import best_supporting_quote
+
+    assert best_supporting_quote("", "любой запрос") is None
+    body = "Первое длинное предложение без совпадений. Второе длинное предложение."
+    # No keyword overlap → the opening sentence is returned, markers stripped.
+    quote = best_supporting_quote(body, "бюджет отчёт финансы")
+    assert quote is not None
+    assert quote.startswith("Первое")
+
+
+def test_best_supporting_quote_trims_to_cap() -> None:
+    from llm_wiki.agents.answer import best_supporting_quote, _QUOTE_MAX_CHARS
+
+    body = "слово " * 200 + "бюджет."
+    quote = best_supporting_quote(body, "бюджет")
+    assert quote is not None
+    assert len(quote) <= _QUOTE_MAX_CHARS
