@@ -27,6 +27,8 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
     async with engine.begin() as conn:
         # pgvector must exist before create_all builds the vector() columns.
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        # pg_trgm powers fuzzy (word_similarity) search in cases/documents/wiki.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.execute(text("DROP TABLE IF EXISTS wiki_fts"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)

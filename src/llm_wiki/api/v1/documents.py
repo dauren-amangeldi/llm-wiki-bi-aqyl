@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import Depends, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key
@@ -145,8 +145,15 @@ async def list_documents(
         FileRecord.status != "ROLLED_BACK",
         or_(FileRecord.sensitive.is_(False), FileRecord.owner == caller),
     )
-    if q:
-        stmt = stmt.where(FileRecord.original_name.ilike(f"%{q}%"))
+    if q and q.strip():
+        term = q.strip()
+        # Substring OR trigram similarity so typos still match (e.g. «маркетнг»).
+        stmt = stmt.where(
+            or_(
+                FileRecord.original_name.ilike(f"%{term}%"),
+                func.word_similarity(term.lower(), func.lower(FileRecord.original_name)) > 0.3,
+            )
+        )
     stmt = stmt.order_by(FileRecord.created_at.desc()).limit(limit).offset(offset)
     rows = (await db.execute(stmt)).scalars().all()
     return [_file_record_to_material(r) for r in rows]

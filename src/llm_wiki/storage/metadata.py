@@ -51,6 +51,8 @@ _DEV_USER_ROLE = "admin"
 # Index names match SQLAlchemy's default (``ix_<table>_<column>``) so a fresh
 # ``create_all`` and this backfill never create a duplicate.
 _COLUMN_MIGRATIONS: tuple[str, ...] = (
+    # Trigram similarity for fuzzy (typo-tolerant) search over titles/names.
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS error text",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS owner varchar",

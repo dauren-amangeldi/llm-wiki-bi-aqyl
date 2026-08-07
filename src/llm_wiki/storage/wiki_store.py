@@ -311,6 +311,19 @@ def keyword_search(q: str, limit: int = 10, caller: str | None = None) -> list[W
             ),
             {"q": term, "limit": limit, **extra},
         ).all()
+    if not rows:
+        # No lexical hit — fall back to trigram similarity on the title so a
+        # typo (e.g. «маркетнг») still finds «Маркетинг…». Snippet is a plain
+        # body prefix (no <mark>); HitSnippet renders it fine.
+        with get_sync_engine().connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT slug, title, left(body, 200) AS snippet FROM wiki_fts "
+                    f"WHERE {clause} AND word_similarity(lower(:q), lower(title)) > 0.3 "
+                    "ORDER BY word_similarity(lower(:q), lower(title)) DESC LIMIT :limit"
+                ),
+                {"q": term, "limit": limit, **extra},
+            ).all()
     return [
         WikiFtsHit(slug=str(r[0]), title=str(r[1]), snippet=str(r[2])) for r in rows
     ]

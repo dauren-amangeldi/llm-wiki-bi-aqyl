@@ -129,7 +129,16 @@ async def list_cases(
     elif category == "private":
         conds.append(and_(CaseRecord.sensitive.is_(True), CaseRecord.owner == caller))
     if q and q.strip():
-        conds.append(CaseRecord.title.ilike(f"%{q.strip()}%"))
+        term = q.strip()
+        # Substring match OR trigram similarity (typo-tolerant, e.g. «маркетнг»).
+        conds.append(
+            or_(
+                CaseRecord.title.ilike(f"%{term}%"),
+                # word_similarity matches the query against the best word/extent
+                # of the title, so a short typo scores high against a long title.
+                func.word_similarity(term.lower(), func.lower(CaseRecord.title)) > 0.3,
+            )
+        )
     where = and_(*conds)
 
     total = await db.scalar(select(func.count()).select_from(CaseRecord).where(where))

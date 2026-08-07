@@ -149,6 +149,18 @@ async def test_list_cases_search_by_title(client: AsyncClient) -> None:
     assert resp.headers["X-Total-Count"] == "1"
 
 
+async def test_list_cases_fuzzy_search_tolerates_typos(client: AsyncClient) -> None:
+    # FIX-12: a typo still finds the case via pg_trgm word_similarity.
+    await client.post("/api/v1/cases", json={"id": "c-mkt", "title": "Маркетинг и позиционирование"})
+    await client.post("/api/v1/cases", json={"id": "c-fin", "title": "Бюджет проекта"})
+
+    hit = (await client.get("/api/v1/cases?q=маркетнг")).json()  # missing и
+    assert [c["id"] for c in hit] == ["c-mkt"]
+
+    # gibberish matches nothing (no false positives)
+    assert (await client.get("/api/v1/cases?q=zzzxyq")).json() == []
+
+
 async def test_list_cases_category_filter(client: AsyncClient) -> None:
     hdr = {"X-User-Email": "alice@bi.group"}
     await client.post(
