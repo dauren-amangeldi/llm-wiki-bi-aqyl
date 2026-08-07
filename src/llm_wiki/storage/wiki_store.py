@@ -52,6 +52,7 @@ __all__ = [
     "extract_page_title",
     "save_page",
     "set_pages_visibility",
+    "set_pages_title",
     "get_page",
     "get_page_title",
     "get_page_meta",
@@ -158,6 +159,31 @@ def set_pages_visibility(
             {"sensitive": sensitive, "owner": owner, "now": now, "slugs": slugs},
         )
     logger.debug("wiki_pages_visibility_set", count=len(slugs), sensitive=sensitive)
+
+
+def set_pages_title(slugs: list[str], title: str) -> None:
+    """Set the stored ``title`` for a set of pages in one statement.
+
+    Used when a source file is renamed: its own wiki page(s) follow so the
+    reader header and citation footer show the new name. The page body's H1 is
+    left untouched — the display title now prefers this stored value (see the
+    wiki API's title resolution), so a rename takes effect without rewriting the
+    body. No-op for an empty slug list or a blank title.
+    """
+    slugs = [s for s in slugs if s]
+    title = (title or "").strip()
+    if not slugs or not title:
+        return
+    now = datetime.now(timezone.utc)
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE wiki_fts SET title = :title, updated_at = :now "
+                "WHERE slug = ANY(:slugs)"
+            ),
+            {"title": title, "now": now, "slugs": slugs},
+        )
+    logger.debug("wiki_pages_title_set", count=len(slugs), title=title)
 
 
 def get_page(slug: str, caller: str | None = None) -> str | None:

@@ -35,8 +35,18 @@ class WikiPageDetail(BaseModel):
     sensitive: bool = False
 
 
-def _extract_title(content: str, slug: str) -> str:
-    """Return the first H1 heading or a humanised slug."""
+def _extract_title(content: str, slug: str, stored_title: str | None = None) -> str:
+    """Display title for a page: the stored wiki title, else the body's first H1,
+    else a humanised slug.
+
+    Preferring the stored ``wiki_fts.title`` keeps uploaded-file pages from
+    surfacing their ``private-<uuid>`` slug as a hash-like name (the slug is an
+    opaque handle, not a title) and lets a source rename take effect without
+    rewriting the page body. The humanised-slug branch is only ever reached for a
+    legacy page that has neither a stored title nor an H1.
+    """
+    if stored_title and stored_title.strip():
+        return stored_title.strip()
     for line in content.splitlines():
         stripped = line.strip()
         if stripped.startswith("# "):
@@ -59,11 +69,12 @@ def _summary(
     updated_at: datetime,
     snippet: str | None = None,
     sensitive: bool = False,
+    stored_title: str | None = None,
 ) -> WikiPageSummary:
     """Build a WikiPageSummary from a slug + content + updated_at."""
     return WikiPageSummary(
         slug=slug,
-        title=_extract_title(content, slug),
+        title=_extract_title(content, slug, stored_title),
         snippet=snippet if snippet is not None else _plain_snippet(content),
         size_chars=len(content),
         updated_at=updated_at.isoformat(),
@@ -103,6 +114,7 @@ async def list_wiki_pages(
                     updated,
                     snippet=hit.snippet,
                     sensitive=bool(meta and meta.sensitive),
+                    stored_title=meta.title if meta else None,
                 )
             )
         return results[offset : offset + limit]
@@ -113,7 +125,13 @@ async def list_wiki_pages(
         if content is None:
             continue
         results.append(
-            _summary(meta.slug, content, meta.updated_at, sensitive=meta.sensitive)
+            _summary(
+                meta.slug,
+                content,
+                meta.updated_at,
+                sensitive=meta.sensitive,
+                stored_title=meta.title,
+            )
         )
     return results[offset : offset + limit]
 
@@ -131,8 +149,8 @@ async def get_wiki_page_detail(
     if content is None:
         raise HTTPException(404, f"Wiki page '{slug}' not found")
 
-    title = _extract_title(content, slug)
     meta = wiki_store.get_page_meta(slug, caller=caller)
+    title = _extract_title(content, slug, meta.title if meta else None)
     updated_at = meta.updated_at if meta else datetime.now(timezone.utc)
 
     backlinks: list[str] = []

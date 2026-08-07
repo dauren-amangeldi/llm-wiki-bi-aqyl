@@ -76,6 +76,22 @@ async def test_get_wiki_page_full(client: AsyncClient) -> None:
     assert "attention" in data["backlinks"]
 
 
+async def test_wiki_title_prefers_stored_title_over_humanised_slug(
+    client: AsyncClient,
+) -> None:
+    """Task 4: an uploaded-file page keyed by an opaque ``private-<uuid>`` slug
+    must surface its stored human title, never a hash-like humanised slug — even
+    when the body has no H1 to fall back on."""
+    wiki_store.save_page(
+        "private-019fb341-57d7-727b", "Квартальный отчёт", "Тело без H1-заголовка.\n"
+    )
+    resp = await client.get("/api/v1/wiki/private-019fb341-57d7-727b/full")
+    assert resp.status_code == 200
+    title = resp.json()["title"]
+    assert title == "Квартальный отчёт"
+    assert "019" not in title  # no raw slug/hash leaked into the title
+
+
 async def test_get_wiki_page_full_not_found(client: AsyncClient) -> None:
     """Unknown slug returns 404."""
     resp = await client.get("/api/v1/wiki/does-not-exist/full")
