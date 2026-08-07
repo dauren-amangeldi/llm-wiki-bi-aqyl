@@ -71,6 +71,42 @@ async def upsert_artifact(
     return record
 
 
+async def create_pending_artifact(
+    session: AsyncSession, *, document_id: str, kind: str
+) -> ArtifactRecord:
+    """Create (or reset to) a ``pending`` artifact for (document, kind).
+
+    Used before enqueuing async generation: the endpoint returns this id right
+    away and the client polls until ``status`` becomes ``ready``/``failed``. On
+    regeneration the existing row is reused (old versions kept, so the reader
+    still shows the previous content while the new one is generated).
+    """
+    record = await find_by_kind(session, document_id, kind)
+    if record is None:
+        record = ArtifactRecord(
+            artifact_id=uuid.uuid4().hex,
+            document_id=document_id,
+            kind=kind,
+            versions=[],
+            status="pending",
+        )
+        session.add(record)
+    else:
+        record.status = "pending"
+        record.error = None
+    await session.commit()
+    return record
+
+
+async def mark_failed(session: AsyncSession, artifact_id: str, error: str) -> None:
+    """Flag an artifact's generation as failed (keeps any prior versions)."""
+    record = await session.get(ArtifactRecord, artifact_id)
+    if record is not None:
+        record.status = "failed"
+        record.error = error[:500]
+        await session.commit()
+
+
 def serialize_detail(record: ArtifactRecord) -> dict[str, Any]:
     """Shape a record for GET /artifacts/{id} (versions = [{language, content}])."""
     versions = [
@@ -78,7 +114,13 @@ def serialize_detail(record: ArtifactRecord) -> dict[str, Any]:
         for v in (record.versions or [])
         if isinstance(v, dict)
     ]
-    return {"artifact_id": record.artifact_id, "kind": record.kind, "versions": versions}
+    return {
+        "artifact_id": record.artifact_id,
+        "kind": record.kind,
+        "status": record.status,
+        "error": record.error,
+        "versions": versions,
+    }
 
 
 def serialize_summary(record: ArtifactRecord) -> dict[str, Any]:

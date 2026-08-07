@@ -66,6 +66,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS tags json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_cases json",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS error text",
 )
 
 
@@ -324,7 +325,11 @@ class ArtifactRecord(Base):
     kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
     # versions: [{"language": "ru", "content": {...}}, ...]
     versions: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # "pending" while a background task generates it, "ready" when done, "failed"
+    # on error (async generation — heavy artifacts run in a Celery worker).
     status: Mapped[str] = mapped_column(String, nullable=False, default="ready")
+    # Human-readable failure reason when status == "failed".
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
