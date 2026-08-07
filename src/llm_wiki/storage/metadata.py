@@ -17,11 +17,13 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    cast,
     create_engine,
     select,
     text,
     update as sa_update,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -61,6 +63,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS ix_cases_owner ON cases (owner)",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS tags json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_cases json",
 )
 
 
@@ -350,6 +353,9 @@ class ChatRecord(Base):
     # anchor → short supporting quote, so reloaded history keeps the [n] hover
     # card + reader highlight (only anchors were persisted before).
     citation_quotes: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    # anchor → {"id", "title"} of the case the cited source belongs to, so the
+    # reloaded answer keeps its "source case" chip next to each citation.
+    citation_cases: Mapped[dict[str, dict]] = mapped_column(JSON, default=dict)
     model_name: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -851,6 +857,7 @@ async def append_chat_message(
     text_body: str,
     citations: list[str] | None = None,
     citation_quotes: dict[str, str] | None = None,
+    citation_cases: dict[str, dict] | None = None,
     model_name: str | None = None,
 ) -> ChatRecord:
     """Persist one chat turn and return the saved row."""
@@ -862,11 +869,35 @@ async def append_chat_message(
         text=text_body,
         citations=citations or [],
         citation_quotes=citation_quotes or {},
+        citation_cases=citation_cases or {},
         model_name=model_name,
     )
     session.add(record)
     await session.commit()
     return record
+
+
+async def case_for_file(
+    session: AsyncSession, file_id: str
+) -> tuple[str, str] | None:
+    """Return ``(case_id, case_title)`` of the case that owns *file_id*, if any.
+
+    A source belongs to a case when its ``file_id`` is in the case's
+    ``doc_ids``; if it's in several, the most recently created case wins. Used to
+    label an answer's citations with their source case (the "source case" chip).
+    JSONB containment keeps this a single indexed-friendly lookup instead of a
+    full case scan.
+    """
+    if not file_id:
+        return None
+    stmt = (
+        select(CaseRecord.id, CaseRecord.title)
+        .where(cast(CaseRecord.doc_ids, JSONB).contains([file_id]))
+        .order_by(CaseRecord.created_at.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).first()
+    return (row[0], row[1]) if row else None
 
 
 async def list_chat_messages(
