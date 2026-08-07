@@ -51,6 +51,7 @@ __all__ = [
     "WikiPageMeta",
     "extract_page_title",
     "save_page",
+    "set_pages_visibility",
     "get_page",
     "get_page_title",
     "get_page_meta",
@@ -133,6 +134,30 @@ def save_page(
             },
         )
     logger.debug("wiki_page_saved", slug=slug, sensitive=sensitive)
+
+
+def set_pages_visibility(
+    slugs: list[str], *, sensitive: bool, owner: str | None
+) -> None:
+    """Flip ``sensitive`` / ``owner`` for a set of pages in one statement.
+
+    Used by the case-publish cascade: a case is the single source of truth for
+    the privacy of its nested materials, so when it is published (or made
+    private) every wiki page it owns follows. No-op for an empty slug list.
+    """
+    slugs = [s for s in slugs if s]
+    if not slugs:
+        return
+    now = datetime.now(timezone.utc)
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE wiki_fts SET sensitive = :sensitive, owner = :owner, "
+                "updated_at = :now WHERE slug = ANY(:slugs)"
+            ),
+            {"sensitive": sensitive, "owner": owner, "now": now, "slugs": slugs},
+        )
+    logger.debug("wiki_pages_visibility_set", count=len(slugs), sensitive=sensitive)
 
 
 def get_page(slug: str, caller: str | None = None) -> str | None:
