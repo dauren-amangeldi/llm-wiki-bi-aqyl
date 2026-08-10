@@ -121,6 +121,35 @@ async def test_advisor_happy_path_returns_structured_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_advisor_resolves_source_slug_from_title() -> None:
+    # FIX-9: a source_detail whose title matches a retrieved chunk gets that
+    # chunk's slug (so the UI can link it); an unmatched title stays slug-less.
+    hits = [_hit(file_id="case-001", slug="lean-project")]  # chunk title "Lean Project"
+    llm = _mock_llm(
+        {
+            "title": "T",
+            "summary": "S",
+            "points": [
+                {"heading": "H", "body": "B", "metric": "12%", "tag": "T", "case_id": "case-001"}
+            ],
+            "sources_detail": [
+                {"title": "Lean Project", "kind": "Факт", "role": "Определяющий", "quote": "q"},
+                {"title": "Неизвестный источник", "kind": "Факт", "role": "Подтверждающий", "quote": "q2"},
+            ],
+            "source": "s",
+            "caseCount": 1,
+        }
+    )
+    agent = AdvisorAgent(llm, _mock_chunk_store(hits))
+
+    result = await agent.advise("q?", language="ru")
+
+    by_title = {s.title: s for s in result.sources_detail}
+    assert by_title["Lean Project"].slug == "lean-project"
+    assert by_title["Неизвестный источник"].slug == ""
+
+
+@pytest.mark.asyncio
 async def test_advisor_refuses_when_similarity_below_threshold() -> None:
     hits = [_hit(similarity=0.12)]
     llm = _mock_llm({"title": "should not run"})

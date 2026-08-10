@@ -149,6 +149,18 @@ async def test_list_cases_search_by_title(client: AsyncClient) -> None:
     assert resp.headers["X-Total-Count"] == "1"
 
 
+async def test_list_cases_fuzzy_search_tolerates_typos(client: AsyncClient) -> None:
+    # FIX-12: a typo still finds the case via pg_trgm word_similarity.
+    await client.post("/api/v1/cases", json={"id": "c-mkt", "title": "Маркетинг и позиционирование"})
+    await client.post("/api/v1/cases", json={"id": "c-fin", "title": "Бюджет проекта"})
+
+    hit = (await client.get("/api/v1/cases?q=маркетнг")).json()  # missing и
+    assert [c["id"] for c in hit] == ["c-mkt"]
+
+    # gibberish matches nothing (no false positives)
+    assert (await client.get("/api/v1/cases?q=zzzxyq")).json() == []
+
+
 async def test_list_cases_category_filter(client: AsyncClient) -> None:
     hdr = {"X-User-Email": "alice@bi.group"}
     await client.post(
@@ -215,6 +227,109 @@ async def test_case_list_exposes_owner(client: AsyncClient) -> None:
     await client.post("/api/v1/cases", json={"id": "c-owner", "title": "C", "doc_ids": []})
     c = next(x for x in (await client.get("/api/v1/cases")).json() if x["id"] == "c-owner")
     assert "owner" in c  # frontend needs it to gate author-only edits
+
+
+async def test_publishing_a_case_cascades_visibility_to_its_materials(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Task 1: a case is the source of truth for its materials' privacy.
+
+    Making a private case public (and back) must propagate to the nested
+    ``FileRecord``, its embedding chunks and its owner-created wiki page —
+    otherwise published content stays invisible to shared search.
+    """
+    from llm_wiki.config import settings
+    from llm_wiki.storage import wiki_store
+    from llm_wiki.storage.metadata import ChunkEmbedding, FileRecord
+
+    hdr = {"X-User-Email": "alice@bi.group"}
+    slug = "private-d-casc"
+    chunk_id = f"{slug}#0000"
+
+    db_session.add(
+        FileRecord(
+            file_id="d-casc", original_name="secret.md", status="DONE",
+            sensitive=True, owner="alice@bi.group", created_pages=[slug],
+        )
+    )
+    db_session.add(
+        ChunkEmbedding(
+            id=chunk_id, slug=slug, file_id="d-casc",
+            sensitive=True, owner="alice@bi.group",
+            embedding=[0.0] * settings.embedding_dimensions,
+        )
+    )
+    await db_session.commit()
+    wiki_store.save_page(slug, "Secret", "body", sensitive=True, owner="alice@bi.group")
+
+    await client.post(
+        "/api/v1/cases",
+        json={"id": "c-casc", "title": "C", "doc_ids": ["d-casc"], "sensitive": True},
+        headers=hdr,
+    )
+
+    # Publish → everything the case owns becomes shared (owner cleared).
+    pub = await client.put(
+        "/api/v1/cases/c-casc",
+        json={"title": "C", "doc_ids": ["d-casc"], "sensitive": False},
+        headers=hdr,
+    )
+    assert pub.status_code == 200
+
+    db_session.expire_all()
+    fr = await db_session.get(FileRecord, "d-casc")
+    ch = await db_session.get(ChunkEmbedding, chunk_id)
+    assert fr is not None and fr.sensitive is False and fr.owner is None
+    assert ch is not None and ch.sensitive is False and ch.owner is None
+    meta = wiki_store.get_page_meta(slug)
+    assert meta is not None and meta.sensitive is False
+
+    # Re-privatise → flips back, owned by the case owner again.
+    priv = await client.put(
+        "/api/v1/cases/c-casc",
+        json={"title": "C", "doc_ids": ["d-casc"], "sensitive": True},
+        headers=hdr,
+    )
+    assert priv.status_code == 200
+
+    db_session.expire_all()
+    fr2 = await db_session.get(FileRecord, "d-casc")
+    assert fr2 is not None and fr2.sensitive is True and fr2.owner == "alice@bi.group"
+    assert wiki_store.get_page_meta(slug) is None or wiki_store.get_page_meta(slug).sensitive is True
+
+
+async def test_uploading_into_a_public_case_makes_the_new_file_public(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Task 1: a file added to an already-public case inherits its visibility,
+    even if it landed private (stale client flag)."""
+    from llm_wiki.storage.metadata import FileRecord
+
+    hdr = {"X-User-Email": "alice@bi.group"}
+    db_session.add(
+        FileRecord(
+            file_id="d-late", original_name="late.md", status="DONE",
+            sensitive=True, owner="alice@bi.group", created_pages=[],
+        )
+    )
+    await db_session.commit()
+
+    await client.post(
+        "/api/v1/cases",
+        json={"id": "c-open", "title": "Open", "doc_ids": [], "sensitive": False},
+        headers=hdr,
+    )
+    # The doc is attached later (its own row is stale-private).
+    r = await client.put(
+        "/api/v1/cases/c-open",
+        json={"title": "Open", "doc_ids": ["d-late"], "sensitive": False},
+        headers=hdr,
+    )
+    assert r.status_code == 200
+
+    db_session.expire_all()
+    fr = await db_session.get(FileRecord, "d-late")
+    assert fr is not None and fr.sensitive is False and fr.owner is None
 
 
 def test_assert_can_edit_only_blocks_a_different_author_under_auth(monkeypatch) -> None:

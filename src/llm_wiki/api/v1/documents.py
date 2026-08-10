@@ -5,11 +5,12 @@ from typing import Literal
 
 from fastapi import Depends, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
+from llm_wiki.storage import wiki_store
 from llm_wiki.storage.metadata import FileRecord
 
 _MOCK_TAG_SUGGESTIONS: list[dict[str, str]] = [
@@ -144,8 +145,15 @@ async def list_documents(
         FileRecord.status != "ROLLED_BACK",
         or_(FileRecord.sensitive.is_(False), FileRecord.owner == caller),
     )
-    if q:
-        stmt = stmt.where(FileRecord.original_name.ilike(f"%{q}%"))
+    if q and q.strip():
+        term = q.strip()
+        # Substring OR trigram similarity so typos still match (e.g. «маркетнг»).
+        stmt = stmt.where(
+            or_(
+                FileRecord.original_name.ilike(f"%{term}%"),
+                func.word_similarity(term.lower(), func.lower(FileRecord.original_name)) > 0.3,
+            )
+        )
     stmt = stmt.order_by(FileRecord.created_at.desc()).limit(limit).offset(offset)
     rows = (await db.execute(stmt)).scalars().all()
     return [_file_record_to_material(r) for r in rows]
@@ -307,3 +315,40 @@ async def uploads_alias(
         owner=owner,
         _rate_check=None,
     )
+
+
+class DocumentPatch(BaseModel):
+    """Editable document fields (currently just the display name)."""
+
+    title: str | None = None
+
+
+@router.patch("/documents/{document_id}")
+async def rename_document(
+    document_id: str,
+    body: DocumentPatch,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> dict[str, bool]:
+    """Rename a source (was a mock that dropped the new name).
+
+    Updates the file's human ``original_name`` (extension preserved) so the
+    sources list and answer citations show the new name, and syncs the title of
+    the wiki page(s) the file created on its own (``created_pages``) so the
+    reader header and citation footer follow. Pages a public file merged into
+    (shared across files) are left untouched. A sensitive file can only be
+    renamed by its owner.
+    """
+    fr = await db.get(FileRecord, document_id)
+    if not fr or (fr.sensitive and fr.owner != caller):
+        raise HTTPException(status_code=404, detail="Document not found")
+    new_name = (body.title or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="title must not be empty")
+
+    ext = Path(fr.original_name).suffix
+    fr.original_name = f"{new_name}{ext}"
+    await db.commit()
+    # Retitle the file's own wiki page(s); merged/shared pages stay as they are.
+    wiki_store.set_pages_title(list(fr.created_pages or []), new_name)
+    return {"ok": True}

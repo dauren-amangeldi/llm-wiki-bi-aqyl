@@ -38,6 +38,11 @@ async def _persist_turn(
         text_body=response.answer,
         citations=[c.anchor for c in response.citations],
         citation_quotes={c.anchor: c.quote for c in response.citations if c.quote},
+        citation_cases={
+            c.anchor: {"id": c.case_id, "title": c.case_title}
+            for c in response.citations
+            if c.case_id
+        },
     )
 
 
@@ -64,6 +69,10 @@ class Citation(BaseModel):
     anchor: str
     title: str = ""
     quote: str | None = None
+    # The case the cited source belongs to — powers the "source case" chip shown
+    # next to the citation (click → open that case). None when it's not in a case.
+    case_id: str | None = None
+    case_title: str | None = None
 
 
 class DocAskResponse(BaseModel):
@@ -125,6 +134,7 @@ async def ask_document(
     from llm_wiki.config import settings
     from llm_wiki.llm.client import LLMClient
     from llm_wiki.llm.embeddings import EmbeddingStore
+    from llm_wiki.storage.metadata import case_for_file
 
     llm = LLMClient()
     try:
@@ -140,9 +150,15 @@ async def ask_document(
     finally:
         await llm.aclose()
 
+    # The document belongs to at most one case — label every citation with it.
+    owning_case = await case_for_file(db, document_id)
+    citations = [Citation(anchor=s.slug, title=s.title, quote=s.quote) for s in result.sources]
+    if owning_case:
+        for c in citations:
+            c.case_id, c.case_title = owning_case
     response = DocAskResponse(
         answer=result.answer,
-        citations=[Citation(anchor=s.slug, title=s.title, quote=s.quote) for s in result.sources],
+        citations=citations,
         follow_ups=[],
         insufficient_evidence=False,
         contact=None,
@@ -244,9 +260,14 @@ async def ask_case(
     finally:
         await llm.aclose()
 
+    # A case answer only retrieves from this case's own documents, so every
+    # citation belongs to this case — label them with it for the source chip.
+    citations = [Citation(anchor=s.slug, title=s.title, quote=s.quote) for s in result.sources]
+    for c in citations:
+        c.case_id, c.case_title = case.id, case.title
     response = DocAskResponse(
         answer=result.answer,
-        citations=[Citation(anchor=s.slug, title=s.title, quote=s.quote) for s in result.sources],
+        citations=citations,
         follow_ups=[],
         insufficient_evidence=not result.sources,
         contact=None,

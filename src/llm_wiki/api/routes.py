@@ -1027,7 +1027,7 @@ async def advisor_endpoint(
                         "reconsider_if": result.reconsider_if,
                         "missing_info": result.missing_info,
                         "sources_detail": [
-                            {"title": s.title, "kind": s.kind, "role": s.role, "quote": s.quote}
+                            {"title": s.title, "kind": s.kind, "role": s.role, "quote": s.quote, "slug": s.slug}
                             for s in result.sources_detail
                         ],
                         "cost_usd": round(result.cost_usd, 6),

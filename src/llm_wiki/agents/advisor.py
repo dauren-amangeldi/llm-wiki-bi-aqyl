@@ -70,6 +70,10 @@ class SourceDetail:
     kind: str = ""  # Факт | Авторский анализ
     role: str = ""  # Определяющий | Подтверждающий
     quote: str = ""
+    # Wiki slug of the excerpt this source refers to (resolved by matching the
+    # model's title back to the retrieved chunks), so the UI can link the source
+    # title to the reader. Empty when it can't be resolved (title stays static).
+    slug: str = ""
 
 
 @dataclass(frozen=True)
@@ -340,16 +344,41 @@ class AdvisorAgent(BaseAgent):
                 )
             )
 
+        # Map a source title back to a retrieved chunk's slug so the UI can link
+        # the source to the reader. Exact (normalised) match first, then a loose
+        # contains-either-way fallback; empty slug ⇒ non-clickable title.
+        def _norm(s: str) -> str:
+            return " ".join(s.lower().split())
+
+        slug_by_title: dict[str, str] = {}
+        for h in hits:
+            key = _norm(h.title or "")
+            if key and key not in slug_by_title:
+                slug_by_title[key] = h.slug
+
+        def _slug_for(src_title: str) -> str:
+            key = _norm(src_title)
+            if not key:
+                return ""
+            if key in slug_by_title:
+                return slug_by_title[key]
+            for htitle, slug in slug_by_title.items():
+                if key in htitle or htitle in key:
+                    return slug
+            return ""
+
         sources_detail: list[SourceDetail] = []
         for src in data.get("sources_detail", []) if isinstance(data.get("sources_detail"), list) else []:
             if not isinstance(src, dict) or not str(src.get("title", "")).strip():
                 continue
+            src_title = str(src.get("title", "")).strip()
             sources_detail.append(
                 SourceDetail(
-                    title=str(src.get("title", "")).strip(),
+                    title=src_title,
                     kind=str(src.get("kind", "")).strip(),
                     role=str(src.get("role", "")).strip(),
                     quote=str(src.get("quote", "")).strip(),
+                    slug=_slug_for(src_title),
                 )
             )
 
