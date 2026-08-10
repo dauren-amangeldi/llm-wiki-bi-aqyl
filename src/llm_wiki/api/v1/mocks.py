@@ -114,12 +114,6 @@ async def remove_tag(document_id: str, tag_id: str) -> dict:
     return {"ok": True}
 
 
-@router.patch("/documents/{document_id}")
-async def update_doc(document_id: str, body: dict) -> dict:
-    """MOCK."""
-    return {"ok": True}
-
-
 @router.delete("/documents/{document_id}")
 async def delete_doc(
     document_id: str,

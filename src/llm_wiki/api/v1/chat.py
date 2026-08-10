@@ -20,6 +20,10 @@ class ChatCitation(BaseModel):
     anchor: str
     title: str = ""
     quote: str | None = None
+    # The source case this citation belongs to (persisted so a reloaded answer
+    # keeps its "source case" chip). None when the source isn't in a case.
+    case_id: str | None = None
+    case_title: str | None = None
 
 
 class ChatTurn(BaseModel):
@@ -46,11 +50,18 @@ def _anchor_title(anchor: str) -> str:
 
 def _to_turn(record: ChatRecord) -> ChatTurn:
     quotes = record.citation_quotes or {}
+    cases = record.citation_cases or {}
     return ChatTurn(
         role=record.role,
         text=record.text,
         citations=[
-            ChatCitation(anchor=a, title=_anchor_title(a), quote=quotes.get(a))
+            ChatCitation(
+                anchor=a,
+                title=_anchor_title(a),
+                quote=quotes.get(a),
+                case_id=(cases.get(a) or {}).get("id"),
+                case_title=(cases.get(a) or {}).get("title"),
+            )
             for a in (record.citations or [])
         ],
         model_name=record.model_name,

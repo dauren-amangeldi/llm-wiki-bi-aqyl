@@ -71,3 +71,40 @@ async def test_get_document_sources(client: AsyncClient) -> None:
     assert resp.status_code == 200
     assert len(resp.json()) == 1
     assert resp.json()[0]["document_id"] == "doc-1"
+
+
+async def test_rename_document_updates_name_and_wiki_title(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Task 4: PATCH /documents/{id} renames the file (was a no-op mock).
+
+    The new name reaches the sources list, the file's own wiki page title (so
+    the reader/citation footer follow) and the stored ``original_name`` — with
+    the original extension preserved.
+    """
+    from llm_wiki.storage.metadata import FileRecord
+
+    r = await client.patch("/api/v1/documents/doc-1", json={"title": "Годовой отчёт"})
+    assert r.status_code == 200
+
+    doc = next(
+        m for m in (await client.get("/api/v1/documents")).json() if m["document_id"] == "doc-1"
+    )
+    assert doc["title"] == "Годовой отчёт"
+
+    page = (await client.get("/api/v1/wiki/sample-page/full")).json()
+    assert page["title"] == "Годовой отчёт"
+
+    db_session.expire_all()
+    fr = await db_session.get(FileRecord, "doc-1")
+    assert fr is not None and fr.original_name == "Годовой отчёт.md"  # extension kept
+
+
+async def test_rename_document_rejects_empty_title(client: AsyncClient) -> None:
+    r = await client.patch("/api/v1/documents/doc-1", json={"title": "   "})
+    assert r.status_code == 400
+
+
+async def test_rename_missing_document_returns_404(client: AsyncClient) -> None:
+    r = await client.patch("/api/v1/documents/does-not-exist", json={"title": "X"})
+    assert r.status_code == 404

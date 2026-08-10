@@ -51,6 +51,8 @@ __all__ = [
     "WikiPageMeta",
     "extract_page_title",
     "save_page",
+    "set_pages_visibility",
+    "set_pages_title",
     "get_page",
     "get_page_title",
     "get_page_meta",
@@ -133,6 +135,55 @@ def save_page(
             },
         )
     logger.debug("wiki_page_saved", slug=slug, sensitive=sensitive)
+
+
+def set_pages_visibility(
+    slugs: list[str], *, sensitive: bool, owner: str | None
+) -> None:
+    """Flip ``sensitive`` / ``owner`` for a set of pages in one statement.
+
+    Used by the case-publish cascade: a case is the single source of truth for
+    the privacy of its nested materials, so when it is published (or made
+    private) every wiki page it owns follows. No-op for an empty slug list.
+    """
+    slugs = [s for s in slugs if s]
+    if not slugs:
+        return
+    now = datetime.now(timezone.utc)
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE wiki_fts SET sensitive = :sensitive, owner = :owner, "
+                "updated_at = :now WHERE slug = ANY(:slugs)"
+            ),
+            {"sensitive": sensitive, "owner": owner, "now": now, "slugs": slugs},
+        )
+    logger.debug("wiki_pages_visibility_set", count=len(slugs), sensitive=sensitive)
+
+
+def set_pages_title(slugs: list[str], title: str) -> None:
+    """Set the stored ``title`` for a set of pages in one statement.
+
+    Used when a source file is renamed: its own wiki page(s) follow so the
+    reader header and citation footer show the new name. The page body's H1 is
+    left untouched — the display title now prefers this stored value (see the
+    wiki API's title resolution), so a rename takes effect without rewriting the
+    body. No-op for an empty slug list or a blank title.
+    """
+    slugs = [s for s in slugs if s]
+    title = (title or "").strip()
+    if not slugs or not title:
+        return
+    now = datetime.now(timezone.utc)
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE wiki_fts SET title = :title, updated_at = :now "
+                "WHERE slug = ANY(:slugs)"
+            ),
+            {"title": title, "now": now, "slugs": slugs},
+        )
+    logger.debug("wiki_pages_title_set", count=len(slugs), title=title)
 
 
 def get_page(slug: str, caller: str | None = None) -> str | None:
@@ -260,6 +311,19 @@ def keyword_search(q: str, limit: int = 10, caller: str | None = None) -> list[W
             ),
             {"q": term, "limit": limit, **extra},
         ).all()
+    if not rows:
+        # No lexical hit — fall back to trigram similarity on the title so a
+        # typo (e.g. «маркетнг») still finds «Маркетинг…». Snippet is a plain
+        # body prefix (no <mark>); HitSnippet renders it fine.
+        with get_sync_engine().connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT slug, title, left(body, 200) AS snippet FROM wiki_fts "
+                    f"WHERE {clause} AND word_similarity(lower(:q), lower(title)) > 0.3 "
+                    "ORDER BY word_similarity(lower(:q), lower(title)) DESC LIMIT :limit"
+                ),
+                {"q": term, "limit": limit, **extra},
+            ).all()
     return [
         WikiFtsHit(slug=str(r[0]), title=str(r[1]), snippet=str(r[2])) for r in rows
     ]

@@ -289,6 +289,54 @@ def run_weekly_audit(
     return {"issues_found": len(issues), "mode": mode, "dry_run": dry_run}
 
 
+@celery_app.task(name="llm_wiki.orchestrator.tasks.generate_artifact")
+def generate_artifact(
+    artifact_id: str, document_id: str, kind: str, language: str
+) -> dict[str, object]:
+    """Generate a heavy studio artifact in the background and store it.
+
+    The API creates a ``pending`` artifact and enqueues this task, then the
+    client polls ``GET /artifacts/{id}`` until ``status`` is ``ready``/``failed``.
+    Moving the slow LLM/image work off the request path means no proxy timeout
+    can drop it mid-generation.
+    """
+    from llm_wiki.logging_config import configure_logging
+
+    configure_logging()
+
+    async def _run() -> dict[str, object]:
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from llm_wiki.agents.artifacts import generate_content
+        from llm_wiki.api.deps import _engine
+        from llm_wiki.llm.client import LLMClient
+        from llm_wiki.storage import artifacts_store
+
+        factory = async_sessionmaker(bind=_engine, expire_on_commit=False)
+        async with factory() as session:
+            llm = LLMClient()
+            try:
+                content = await generate_content(
+                    session, llm, kind=kind, document_id=document_id, language=language
+                )
+            except Exception as exc:  # noqa: BLE001
+                await artifacts_store.mark_failed(session, artifact_id, str(exc))
+                logger.warning(
+                    "generate_artifact_failed", artifact_id=artifact_id, kind=kind, error=str(exc)
+                )
+                return {"artifact_id": artifact_id, "status": "failed"}
+            finally:
+                await llm.aclose()
+            await artifacts_store.upsert_artifact(
+                session, document_id=document_id, kind=kind, language=language, content=content
+            )
+            logger.info("generate_artifact_done", artifact_id=artifact_id, kind=kind)
+            return {"artifact_id": artifact_id, "status": "ready"}
+
+    with asyncio.Runner() as runner:
+        return runner.run(_run())
+
+
 @celery_app.task(name="llm_wiki.orchestrator.tasks.autotag_case")
 def autotag_case(case_id: str, force: bool = False) -> dict[str, object]:
     """Classify a case against the fixed taxonomy and set its tags.

@@ -126,7 +126,35 @@ async def _generate_and_store(
     return record.artifact_id, content
 
 
-@router.post("/studio/generate")
+async def _start_generation(
+    session: AsyncSession, kind: str, document_id: str, language: str
+) -> dict[str, Any]:
+    """Create a pending artifact and enqueue background generation.
+
+    Heavy artifacts (LLM reports, gpt-image-1 infographics) can run for minutes,
+    so we move them off the request path: the client gets an id immediately and
+    polls ``GET /artifacts/{id}`` until ``status`` is ``ready``/``failed``. If the
+    broker is unreachable (e.g. dev without a worker) we fall back to generating
+    synchronously so the feature still works.
+    """
+    record = await artifacts_store.create_pending_artifact(
+        session, document_id=document_id, kind=kind
+    )
+    try:
+        from llm_wiki.orchestrator.tasks import generate_artifact
+
+        generate_artifact.delay(record.artifact_id, document_id, kind, language)
+    except Exception:  # noqa: BLE001 — broker down: generate inline as a fallback
+        try:
+            await _generate_and_store(session, kind, document_id, language)
+        except ArtifactError as exc:
+            await artifacts_store.mark_failed(session, record.artifact_id, str(exc))
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"artifact_id": record.artifact_id, "kind": kind, "status": "ready"}
+    return {"artifact_id": record.artifact_id, "kind": kind, "status": "pending"}
+
+
+@router.post("/studio/generate", status_code=202)
 async def studio_generate(
     body: dict[str, Any],
     session: AsyncSession = Depends(get_db),
@@ -139,11 +167,7 @@ async def studio_generate(
         raise HTTPException(status_code=400, detail=f"Unsupported kind for /studio/generate: {kind!r}")
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
-    try:
-        artifact_id, content = await _generate_and_store(session, kind, document_id, language)
-    except ArtifactError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"artifact_id": artifact_id, "kind": kind, "content": content}
+    return await _start_generation(session, kind, document_id, language)
 
 
 @router.post("/cards/generate")
@@ -164,7 +188,7 @@ async def cards_generate(
     return {"artifact_id": artifact_id, "kind": "card"}
 
 
-@router.post("/images/generate")
+@router.post("/images/generate", status_code=202)
 async def images_generate(
     body: dict[str, Any],
     session: AsyncSession = Depends(get_db),
@@ -174,10 +198,6 @@ async def images_generate(
     language = str(body.get("language") or "ru")
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
-    try:
-        artifact_id, content = await _generate_and_store(session, "infographic", document_id, language)
-    except ArtifactError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # Return the whole content: `image_url` (generated picture) OR `svg` (fallback)
-    # plus the structured fields the frontend renders as info cards.
-    return {"artifact_id": artifact_id, "kind": "infographic", **content}
+    # gpt-image-1 generation is the slowest artifact — always run it async and
+    # let the client poll GET /artifacts/{id} for the content.
+    return await _start_generation(session, "infographic", document_id, language)
