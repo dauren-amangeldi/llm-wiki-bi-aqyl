@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 from collections.abc import AsyncGenerator
 
 import structlog
@@ -61,7 +63,7 @@ async def get_twin_roster(db: AsyncSession = Depends(get_db)) -> dict[str, objec
                 "id": p.id, "name": p.name, "inspiration": p.inspiration,
                 "real_name": p.real_name, "track": p.track,
                 "pinned": bool(p.pinned), "lens": p.lens, "avatar_init": p.avatar_init,
-                "color": p.color,
+                "color": p.color, "description": p.description,
             }
             for p in personas
         ],
@@ -274,6 +276,12 @@ async def twin_chat_endpoint(
                     bubbles, cite, reply_to, ask = ["Не удалось получить ответ."], "", "", ""
 
                 for i, bubble in enumerate(bubbles):
+                    if i > 0:
+                        # Second bubble of the same persona: show «печатает…»
+                        # again and pause briefly, so the chat reads like a
+                        # person typing two messages in a row, not a dump.
+                        yield _sse_line({"event": "typing", "persona_id": pid})
+                        await asyncio.sleep(random.uniform(0.9, 1.7))
                     content: dict[str, object] = {
                         "text": bubble,
                         # reply_to on the first bubble (drives the «· Ответ:» label),
@@ -291,6 +299,10 @@ async def twin_chat_endpoint(
                     })
                     transcript += f"\n{real_name_by_id.get(pid, pid)}: {bubble}"
                     seq += 1
+                # Небольшая пауза перед следующим участником — вдобавок к
+                # естественной задержке генерации его реплики.
+                if queue:
+                    await asyncio.sleep(random.uniform(0.5, 1.1))
 
                 if (
                     ask

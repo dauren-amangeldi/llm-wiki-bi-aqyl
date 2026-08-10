@@ -68,6 +68,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_cases json",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS error text",
     "ALTER TABLE twin_personas ADD COLUMN IF NOT EXISTS color varchar NOT NULL DEFAULT ''",
+    "ALTER TABLE twin_personas ADD COLUMN IF NOT EXISTS description varchar NOT NULL DEFAULT ''",
 )
 
 
@@ -973,6 +974,8 @@ class TwinPersona(Base):
     avatar_init: Mapped[str] = mapped_column(String, nullable=False)
     # Persona accent hex (bubble border/tint, avatar ring, session-row accent).
     color: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # One-sentence philosophy line shown on the gallery card (mock design).
+    description: Mapped[str] = mapped_column(String, nullable=False, default="")
     active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -1027,9 +1030,9 @@ class TwinMessage(Base):
 
 _DEFAULT_TWIN_PRESET_SEEDS: list[dict[str, object]] = [
     {"id": "preset-tech-transform", "name": "Технотрансформация", "persona_ids": ["musk", "huang", "nadella"]},
-    {"id": "preset-should-build", "name": "Стоит ли строить", "persona_ids": ["zell", "bren", "musk"]},
-    {"id": "preset-how-to-build", "name": "Каким строить", "persona_ids": ["hines", "alabbar", "huang"]},
-    {"id": "preset-sell-adopt", "name": "Как продать / внедрить", "persona_ids": ["corcoran", "miller", "nadella"]},
+    {"id": "preset-should-build", "name": "Стоит ли строить", "persona_ids": ["buffett", "rakhimbayev", "musk"]},
+    {"id": "preset-how-to-build", "name": "Каким строить", "persona_ids": ["rakhimbayev", "jobs", "huang"]},
+    {"id": "preset-sell-adopt", "name": "Как продать / внедрить", "persona_ids": ["bezos", "altman", "nadella"]},
 ]
 
 
@@ -1064,8 +1067,10 @@ async def seed_twin_personas(session: AsyncSession) -> int:
     from llm_wiki.storage.persona_files import load_persona_files
 
     inserted = 0
+    seeded_ids: set[str] = set()
     for row in load_persona_files():
         persona_id = str(row["id"])
+        seeded_ids.add(persona_id)
         pinned_int = int(bool(row["pinned"]))
         existing = await get_twin_persona(session, persona_id)
         if existing is None:
@@ -1082,6 +1087,7 @@ async def seed_twin_personas(session: AsyncSession) -> int:
                     domain_weights=row["domain_weights"],  # type: ignore[arg-type]
                     avatar_init=str(row["avatar_init"]),
                     color=str(row.get("color", "")),
+                    description=str(row.get("description", "")),
                 )
             )
             inserted += 1
@@ -1096,10 +1102,24 @@ async def seed_twin_personas(session: AsyncSession) -> int:
             existing.domain_weights = row["domain_weights"]  # type: ignore[assignment]
             existing.avatar_init = str(row["avatar_init"])
             existing.color = str(row.get("color", ""))
+            existing.description = str(row.get("description", ""))
+            existing.active = 1
 
+    # A persona whose seed file was removed is retired: deactivate it so it
+    # leaves the roster but stays resolvable for old sessions' transcripts.
+    all_rows = await session.execute(select(TwinPersona))
+    for persona in all_rows.scalars().all():
+        if persona.id not in seeded_ids and persona.active:
+            persona.active = 0
+
+    # Upsert (was insert-if-absent): the default triads reference persona ids,
+    # so retiring a persona must also refresh the stored preset line-ups.
     for preset_row in _DEFAULT_TWIN_PRESET_SEEDS:
         preset_id = str(preset_row["id"])
-        if await session.get(TwinPreset, preset_id) is not None:
+        existing_preset = await session.get(TwinPreset, preset_id)
+        if existing_preset is not None:
+            existing_preset.name = str(preset_row["name"])
+            existing_preset.persona_ids = preset_row["persona_ids"]  # type: ignore[assignment]
             continue
         session.add(
             TwinPreset(
