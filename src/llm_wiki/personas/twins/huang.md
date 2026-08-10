@@ -7,6 +7,7 @@ track = "tech"
 pinned = true
 lens = "Симуляция, BIM, digital twin"
 avatar_init = "JH"
+color = "#c026d3"
 
 [domain_weights]
 tech = 0.9

@@ -7,6 +7,7 @@ track = "tech"
 pinned = true
 lens = "Adoption, культура, платформа"
 avatar_init = "SN"
+color = "#5954f3"
 
 [domain_weights]
 tech = 0.8

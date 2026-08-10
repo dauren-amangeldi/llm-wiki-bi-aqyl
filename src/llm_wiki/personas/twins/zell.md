@@ -7,6 +7,7 @@ track = "dev"
 pinned = false
 lens = "Тайминг, ликвидность, «стоит ли»"
 avatar_init = "SZ"
+color = "#0e7490"
 
 [domain_weights]
 tech = 0.1

@@ -7,6 +7,7 @@ track = "tech"
 pinned = true
 lens = "Что изменит AI за 1-2 года"
 avatar_init = "SA"
+color = "#ce3452"
 
 [domain_weights]
 tech = 0.95

@@ -7,6 +7,7 @@ track = "dev"
 pinned = false
 lens = "Лендмарк, бренд, эмерджинг-рынок"
 avatar_init = "MA"
+color = "#c13892"
 
 [domain_weights]
 tech = 0.2

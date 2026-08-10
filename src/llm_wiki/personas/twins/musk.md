@@ -7,6 +7,7 @@ track = "tech"
 pinned = true
 lens = "Радикальная себестоимость, автоматизация"
 avatar_init = "EM"
+color = "#a75d00"
 
 [domain_weights]
 tech = 0.9

@@ -7,6 +7,7 @@ track = "dev"
 pinned = false
 lens = "Терпеливая стоимость, master-plan"
 avatar_init = "DB"
+color = "#047857"
 
 [domain_weights]
 tech = 0.1

@@ -7,6 +7,7 @@ track = "dev"
 pinned = false
 lens = "Поток, юнит-экономика, скорость"
 avatar_init = "SM"
+color = "#7c3aed"
 
 [domain_weights]
 tech = 0.3

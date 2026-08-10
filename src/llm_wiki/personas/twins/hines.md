@@ -7,6 +7,7 @@ track = "dev"
 pinned = false
 lens = "Продукт на десятилетия"
 avatar_init = "GH"
+color = "#c34700"
 
 [domain_weights]
 tech = 0.2

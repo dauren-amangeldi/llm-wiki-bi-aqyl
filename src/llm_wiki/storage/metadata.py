@@ -67,6 +67,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_cases json",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS error text",
+    "ALTER TABLE twin_personas ADD COLUMN IF NOT EXISTS color varchar NOT NULL DEFAULT ''",
 )
 
 
@@ -970,6 +971,8 @@ class TwinPersona(Base):
     system_prompt: Mapped[str] = mapped_column(String, nullable=False)
     domain_weights: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
     avatar_init: Mapped[str] = mapped_column(String, nullable=False)
+    # Persona accent hex (bubble border/tint, avatar ring, session-row accent).
+    color: Mapped[str] = mapped_column(String, nullable=False, default="")
     active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -1078,6 +1081,7 @@ async def seed_twin_personas(session: AsyncSession) -> int:
                     system_prompt=str(row["system_prompt"]),
                     domain_weights=row["domain_weights"],  # type: ignore[arg-type]
                     avatar_init=str(row["avatar_init"]),
+                    color=str(row.get("color", "")),
                 )
             )
             inserted += 1
@@ -1091,6 +1095,7 @@ async def seed_twin_personas(session: AsyncSession) -> int:
             existing.system_prompt = str(row["system_prompt"])
             existing.domain_weights = row["domain_weights"]  # type: ignore[assignment]
             existing.avatar_init = str(row["avatar_init"])
+            existing.color = str(row.get("color", ""))
 
     for preset_row in _DEFAULT_TWIN_PRESET_SEEDS:
         preset_id = str(preset_row["id"])
@@ -1167,16 +1172,45 @@ async def list_twin_sessions(session: AsyncSession, case_id: str) -> list[TwinSe
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def set_twin_session_outcome(
-    session: AsyncSession, session_id: str, outcome: str, note: str = ""
-) -> bool:
-    """Record whether a council's verdict held up. False if the session is unknown."""
+async def delete_twin_session(session: AsyncSession, session_id: str) -> bool:
+    """Delete a council session and its whole transcript. False if unknown."""
     row = await session.get(TwinSession, session_id)
     if not row:
         return False
-    row.outcome = outcome
-    row.outcome_note = note
-    row.outcome_at = datetime.now(timezone.utc)
+    await session.execute(
+        TwinMessage.__table__.delete().where(TwinMessage.session_id == session_id)
+    )
+    await session.delete(row)
+    await session.commit()
+    return True
+
+
+async def update_twin_session_personas(
+    session: AsyncSession, session_id: str, persona_ids: list[str]
+) -> bool:
+    """Change a session's council line-up («Изменить состав»). False if unknown."""
+    row = await session.get(TwinSession, session_id)
+    if not row:
+        return False
+    row.persona_ids = persona_ids
+    await session.commit()
+    return True
+
+
+async def set_twin_message_reactions(
+    session: AsyncSession, session_id: str, seq: int, reactions: list[str]
+) -> bool:
+    """Persist the user's emoji reactions on one persona message. False if unknown."""
+    result = await session.execute(
+        select(TwinMessage).where(
+            TwinMessage.session_id == session_id, TwinMessage.seq == seq
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return False
+    # Reassign so SQLAlchemy tracks the JSON change.
+    row.content = {**(row.content or {}), "reactions": reactions}
     await session.commit()
     return True
 

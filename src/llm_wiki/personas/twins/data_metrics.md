@@ -7,6 +7,7 @@ track = "tech"
 pinned = true
 lens = "Метрики, отказ от нарратива без цифр"
 avatar_init = "DM"
+color = "#2563eb"
 
 [domain_weights]
 tech = 0.85

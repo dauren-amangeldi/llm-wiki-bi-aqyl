@@ -7,6 +7,7 @@ track = "dev"
 pinned = false
 lens = "Спрос, позиционирование"
 avatar_init = "BC"
+color = "#0f766e"
 
 [domain_weights]
 tech = 0.15
