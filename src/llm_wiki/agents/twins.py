@@ -85,89 +85,31 @@ class TwinPersonaData:
     lens: str
     system_prompt: str
     domain_weights: dict[str, float]
+    real_name: str = ""
 
 
-_VERDICT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "questions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "persona_id": {"type": "string"},
-                },
-                "required": ["text", "persona_id"],
-                "additionalProperties": False,
-            },
-        },
-        "consensus": {"type": "string"},
-        "disagreement": {"type": "string"},
-        "next_step": {"type": "string"},
-        "domain_distribution": {
-            "type": "object",
-            "properties": {
-                "tech": {"type": "number"},
-                "real_estate": {"type": "number"},
-                "finance": {"type": "number"},
-            },
-            "required": ["tech", "real_estate", "finance"],
-            "additionalProperties": False,
-        },
-    },
-    "required": ["questions", "consensus", "disagreement", "next_step", "domain_distribution"],
-    "additionalProperties": False,
-}
+def _chat_reply_schema(other_persona_ids: list[str]) -> dict[str, Any]:
+    """Reply schema: 1-2 short messenger-style bubbles + optional handoff.
 
-_VERDICT_SYSTEM_PROMPT = "Ты синтезируешь честный вердикт совета AI-персон, не сглаживая разногласия."
-
-
-def _compute_decisive_voice(
-    persona_ids: list[str],
-    domain_weights: dict[str, dict[str, float]],
-    domain_distribution: dict[str, float],
-) -> tuple[str, bool]:
-    """Return (decisive persona_id, is_close_split) from weights × domain shares.
-
-    ``is_close_split`` is True when the top two scores differ by less than
-    0.15 — surfaced to the caller as an honest split instead of a false tie-break.
+    ``ask`` lets the persona address a colleague (empty string = nobody) — the
+    endpoint then generates that colleague's reply in the same turn (capped).
     """
-    scores = {
-        pid: sum(
-            domain_weights.get(pid, {}).get(domain, 0.0) * share
-            for domain, share in domain_distribution.items()
-        )
-        for pid in persona_ids
+    return {
+        "type": "object",
+        "properties": {
+            "messages": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 2,
+            },
+            "cite": {"type": "string"},
+            "reply_to": {"type": "string"},
+            "ask": {"type": "string", "enum": ["", *other_persona_ids]},
+        },
+        "required": ["messages", "cite", "reply_to", "ask"],
+        "additionalProperties": False,
     }
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-    decisive_id, top_score = ranked[0]
-    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
-    is_close_split = (top_score - second_score) < 0.15
-    return decisive_id, is_close_split
-
-
-@dataclass(frozen=True)
-class VerdictResult:
-    questions: list[dict[str, str]]
-    consensus: str
-    disagreement: str
-    next_step: str
-    domain_distribution: dict[str, float]
-    decisive_voice: str
-    consensus_reached_early: bool
-    is_close_split: bool
-
-
-_CHAT_REPLY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "text": {"type": "string"},
-        "cite": {"type": "string"},
-    },
-    "required": ["text", "cite"],
-    "additionalProperties": False,
-}
 
 _ROUTER_SYSTEM_PROMPT = "Ты нейтральный маршрутизатор AI-совета Twins. Не отвечай от лица персон."
 
@@ -190,19 +132,25 @@ def _route_schema(persona_ids: list[str]) -> dict[str, Any]:
 @dataclass(frozen=True)
 class ChatReplyResult:
     persona_id: str
-    text: str
+    messages: list[str]
     cite: str
+    reply_to: str
+    ask: str
+
+
+def _participants_block(personas: list[TwinPersonaData]) -> str:
+    return "\n".join(f"- {p.real_name or p.id} ({p.id}) — {p.lens}" for p in personas)
 
 
 class TwinsAgent(BaseAgent):
-    """Routes chat turns to personas, generates each persona's reply in sequence,
-    and produces an on-demand verdict summarizing the chat so far."""
+    """Routes chat turns to personas and generates each persona's short
+    messenger-style reply in sequence (personas can hand off to each other)."""
 
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
 
     async def run(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("call route_message / respond_as_persona / run_chat_verdict")
+        raise NotImplementedError("call route_message / respond_as_persona")
 
     async def route_message(
         self,
@@ -213,7 +161,9 @@ class TwinsAgent(BaseAgent):
     ) -> list[str]:
         """Decide which 0-3 personas should respond to the latest message, in order."""
         persona_ids = [p.id for p in personas]
-        personas_block = "\n".join(f"- {p.id}: {p.lens}" for p in personas)
+        personas_block = "\n".join(
+            f"- {p.id}: {p.real_name or p.id} — {p.lens}" for p in personas
+        )
         prompt = self._llm.load_prompt(
             "twins_route", language=language, personas_block=personas_block,
             chat_transcript=chat_transcript,
@@ -233,14 +183,20 @@ class TwinsAgent(BaseAgent):
     async def respond_as_persona(
         self,
         persona: TwinPersonaData,
+        participants: list[TwinPersonaData],
         case_context: str,
         chat_transcript: str,
         language: str,
         file_id: str = "twins",
     ) -> ChatReplyResult:
-        """Generate one persona's reply, seeing any replies already added this turn."""
+        """Generate one persona's short reply, seeing any replies already added
+        this turn. The persona knows who else is in the chat and may address a
+        colleague via ``ask`` (the endpoint continues the chain, capped)."""
+        others = [p for p in participants if p.id != persona.id]
         prompt = self._llm.load_prompt(
             "twins_chat_reply", language=language, persona_lens=persona.lens,
+            persona_name=persona.real_name or persona.id,
+            participants_block=_participants_block(participants),
             case_context=case_context, chat_transcript=chat_transcript,
         )
         text, _usage = await self._llm.complete(
@@ -248,54 +204,16 @@ class TwinsAgent(BaseAgent):
             system=persona.system_prompt,
             file_id=file_id,
             agent_type="twins",
-            json_schema=_CHAT_REPLY_SCHEMA,
+            json_schema=_chat_reply_schema([p.id for p in others]),
             schema_name="twins_chat_reply",
         )
         data = json.loads(text)
-        return ChatReplyResult(persona_id=persona.id, text=data["text"], cite=data["cite"])
-
-    async def run_chat_verdict(
-        self,
-        personas: list[TwinPersonaData],
-        case_context: str,
-        chat_transcript: str,
-        language: str,
-        file_id: str = "twins",
-    ) -> VerdictResult:
-        """Summarize a free-form chat on demand ("Подвести итог").
-
-        Reuses the same schema/prompt as the old scripted verdict round —
-        it only ever needed `case_context` + a transcript string, so a
-        chat-formatted transcript works unchanged. `consensus_reached_early`
-        doesn't map onto free-form chat (that flag came from the old
-        cross-exam forced-disagreement heuristic) — always False here.
-        """
-        prompt = self._llm.load_prompt(
-            "twins_verdict", language=language, case_context=case_context,
-            transcript=chat_transcript,
-        )
-        text, _usage = await self._llm.complete(
-            prompt=prompt,
-            system=_VERDICT_SYSTEM_PROMPT,
-            file_id=file_id,
-            agent_type="twins",
-            json_schema=_VERDICT_SCHEMA,
-            schema_name="twins_verdict",
-        )
-        data = json.loads(text)
-
-        domain_weights = {p.id: p.domain_weights for p in personas}
-        decisive_id, is_close_split = _compute_decisive_voice(
-            [p.id for p in personas], domain_weights, data["domain_distribution"]
-        )
-        return VerdictResult(
-            questions=data["questions"],
-            consensus=data["consensus"],
-            disagreement=data["disagreement"],
-            next_step=data["next_step"],
-            domain_distribution=data["domain_distribution"],
-            decisive_voice=decisive_id,
-            consensus_reached_early=False,
-            is_close_split=is_close_split,
+        messages = [str(m).strip() for m in data["messages"] if str(m).strip()]
+        return ChatReplyResult(
+            persona_id=persona.id,
+            messages=messages or ["…"],
+            cite=str(data.get("cite", "")),
+            reply_to=str(data.get("reply_to", "")),
+            ask=str(data.get("ask", "")),
         )
 

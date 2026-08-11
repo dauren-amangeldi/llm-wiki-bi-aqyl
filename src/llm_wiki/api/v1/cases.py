@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.config import settings
-from llm_wiki.storage.metadata import CaseRecord
+from llm_wiki.storage import wiki_store
+from llm_wiki.storage.metadata import CaseRecord, ChunkEmbedding, FileRecord
 from llm_wiki.taxonomy import CASE_TAGS, clean_tags
 
 
@@ -39,6 +40,8 @@ class CaseBody(BaseModel):
     sensitive: bool = False
     # Fixed-taxonomy tags; unknown tags are dropped server-side (see clean_tags).
     tags: list[str] = []
+    # Источник опыта: внутренний опыт BI или мировой. Двигает фильтр на главной.
+    scope: Literal["internal", "external"] = "internal"
 
 
 def _dispatch_autotag(case_id: str) -> None:
@@ -51,6 +54,50 @@ def _dispatch_autotag(case_id: str) -> None:
         autotag_case.delay(case_id)
     except Exception:  # noqa: BLE001
         pass
+
+
+async def _cascade_case_visibility(
+    db: AsyncSession, doc_ids: list[str], *, sensitive: bool, owner: str | None
+) -> None:
+    """Propagate a case's visibility to every material that belongs to it.
+
+    A case is the single source of truth for the privacy of its nested files,
+    their wiki pages and their embedding chunks. Every time a case is saved we
+    re-assert that membership so two long-standing bugs can't happen:
+
+    * publishing a case that was created **private** left its files / wiki /
+      chunks private, so they never entered the shared search;
+    * a file uploaded into an already-**public** case stayed private.
+
+    Both are fixed by flipping ``(sensitive, owner)`` on each doc's
+    ``FileRecord``, its embedding chunks (what shared Q&A retrieval filters on)
+    and the wiki page(s) the file created *on its own*. Pages a public file
+    merged into (``updated_pages``) are shared across many files and are left
+    untouched — only ``created_pages`` (e.g. the ``private-{file_id}`` page) are
+    flipped. Public content has ``owner = NULL``; private content is owned by the
+    case owner. The caller commits the async work; the wiki store commits itself.
+    """
+    if not doc_ids:
+        return
+    new_owner = owner if sensitive else None
+
+    await db.execute(
+        sa_update(FileRecord)
+        .where(FileRecord.file_id.in_(doc_ids))
+        .values(sensitive=sensitive, owner=new_owner)
+    )
+    await db.execute(
+        sa_update(ChunkEmbedding)
+        .where(ChunkEmbedding.file_id.in_(doc_ids))
+        .values(sensitive=sensitive, owner=new_owner)
+    )
+    rows = (
+        await db.execute(
+            select(FileRecord.created_pages).where(FileRecord.file_id.in_(doc_ids))
+        )
+    ).all()
+    slugs = sorted({s for (pages,) in rows for s in (pages or [])})
+    wiki_store.set_pages_visibility(slugs, sensitive=sensitive, owner=new_owner)
 
 
 @router.get("/cases")
@@ -84,7 +131,16 @@ async def list_cases(
     elif category == "private":
         conds.append(and_(CaseRecord.sensitive.is_(True), CaseRecord.owner == caller))
     if q and q.strip():
-        conds.append(CaseRecord.title.ilike(f"%{q.strip()}%"))
+        term = q.strip()
+        # Substring match OR trigram similarity (typo-tolerant, e.g. «маркетнг»).
+        conds.append(
+            or_(
+                CaseRecord.title.ilike(f"%{term}%"),
+                # word_similarity matches the query against the best word/extent
+                # of the title, so a short typo scores high against a long title.
+                func.word_similarity(term.lower(), func.lower(CaseRecord.title)) > 0.3,
+            )
+        )
     where = and_(*conds)
 
     total = await db.scalar(select(func.count()).select_from(CaseRecord).where(where))
@@ -102,6 +158,7 @@ async def list_cases(
             "sensitive": r.sensitive,
             "tags": r.tags or [],
             "owner": r.owner,
+            "scope": r.scope or "internal",
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
@@ -122,11 +179,16 @@ async def create_case(
         doc_ids=body.doc_ids,
         tags=clean_tags(body.tags),
         sensitive=body.sensitive,
+        scope=body.scope,
         owner=owner if owner != "anon" else None,
         created_at=now,
         updated_at=now,
     )
     db.add(case)
+    # If the case is created already holding docs, align their visibility too.
+    await _cascade_case_visibility(
+        db, case.doc_ids, sensitive=case.sensitive, owner=case.owner
+    )
     await db.commit()
     _dispatch_autotag(case.id)
     return {
@@ -135,6 +197,8 @@ async def create_case(
         "doc_ids": case.doc_ids,
         "sensitive": case.sensitive,
         "tags": case.tags,
+        "owner": case.owner,
+        "scope": case.scope,
         "created_at": case.created_at.isoformat() if case.created_at else None,
     }
 
@@ -159,8 +223,15 @@ async def update_case(
             doc_ids=body.doc_ids,
             tags=clean_tags(body.tags),
             sensitive=body.sensitive,
+            scope=body.scope,
             updated_at=datetime.now(timezone.utc),
         )
+    )
+    # The case is the source of truth for its materials' privacy: re-assert it
+    # over the (possibly newly-added) doc set so publishing propagates and new
+    # uploads inherit the case's status. owner stays as stored (unchanged here).
+    await _cascade_case_visibility(
+        db, body.doc_ids, sensitive=body.sensitive, owner=row.owner
     )
     await db.commit()
     _dispatch_autotag(case_id)

@@ -17,11 +17,13 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    cast,
     create_engine,
     select,
     text,
     update as sa_update,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -49,6 +51,8 @@ _DEV_USER_ROLE = "admin"
 # Index names match SQLAlchemy's default (``ix_<table>_<column>``) so a fresh
 # ``create_all`` and this backfill never create a duplicate.
 _COLUMN_MIGRATIONS: tuple[str, ...] = (
+    # Trigram similarity for fuzzy (typo-tolerant) search over titles/names.
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS error text",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS owner varchar",
@@ -58,9 +62,14 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS ix_chunk_embeddings_owner ON chunk_embeddings (owner)",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS scope varchar NOT NULL DEFAULT 'internal'",
     "CREATE INDEX IF NOT EXISTS ix_cases_owner ON cases (owner)",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS tags json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_cases json",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS error text",
+    "ALTER TABLE twin_personas ADD COLUMN IF NOT EXISTS color varchar NOT NULL DEFAULT ''",
+    "ALTER TABLE twin_personas ADD COLUMN IF NOT EXISTS description varchar NOT NULL DEFAULT ''",
 )
 
 
@@ -291,6 +300,9 @@ class CaseRecord(Base):
     # — indexed but never surfaced in the shared wiki/search for other users.
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Источник опыта: internal (внутренний опыт BI) | external (мировой опыт).
+    # Выбирается автором при создании кейса; двигает фильтр на главной.
+    scope: Mapped[str] = mapped_column(String, nullable=False, default="internal")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -319,7 +331,11 @@ class ArtifactRecord(Base):
     kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
     # versions: [{"language": "ru", "content": {...}}, ...]
     versions: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # "pending" while a background task generates it, "ready" when done, "failed"
+    # on error (async generation — heavy artifacts run in a Celery worker).
     status: Mapped[str] = mapped_column(String, nullable=False, default="ready")
+    # Human-readable failure reason when status == "failed".
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -350,6 +366,9 @@ class ChatRecord(Base):
     # anchor → short supporting quote, so reloaded history keeps the [n] hover
     # card + reader highlight (only anchors were persisted before).
     citation_quotes: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    # anchor → {"id", "title"} of the case the cited source belongs to, so the
+    # reloaded answer keeps its "source case" chip next to each citation.
+    citation_cases: Mapped[dict[str, dict]] = mapped_column(JSON, default=dict)
     model_name: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -851,6 +870,7 @@ async def append_chat_message(
     text_body: str,
     citations: list[str] | None = None,
     citation_quotes: dict[str, str] | None = None,
+    citation_cases: dict[str, dict] | None = None,
     model_name: str | None = None,
 ) -> ChatRecord:
     """Persist one chat turn and return the saved row."""
@@ -862,11 +882,35 @@ async def append_chat_message(
         text=text_body,
         citations=citations or [],
         citation_quotes=citation_quotes or {},
+        citation_cases=citation_cases or {},
         model_name=model_name,
     )
     session.add(record)
     await session.commit()
     return record
+
+
+async def case_for_file(
+    session: AsyncSession, file_id: str
+) -> tuple[str, str] | None:
+    """Return ``(case_id, case_title)`` of the case that owns *file_id*, if any.
+
+    A source belongs to a case when its ``file_id`` is in the case's
+    ``doc_ids``; if it's in several, the most recently created case wins. Used to
+    label an answer's citations with their source case (the "source case" chip).
+    JSONB containment keeps this a single indexed-friendly lookup instead of a
+    full case scan.
+    """
+    if not file_id:
+        return None
+    stmt = (
+        select(CaseRecord.id, CaseRecord.title)
+        .where(cast(CaseRecord.doc_ids, JSONB).contains([file_id]))
+        .order_by(CaseRecord.created_at.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).first()
+    return (row[0], row[1]) if row else None
 
 
 async def list_chat_messages(
@@ -932,6 +976,10 @@ class TwinPersona(Base):
     system_prompt: Mapped[str] = mapped_column(String, nullable=False)
     domain_weights: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
     avatar_init: Mapped[str] = mapped_column(String, nullable=False)
+    # Persona accent hex (bubble border/tint, avatar ring, session-row accent).
+    color: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # One-sentence philosophy line shown on the gallery card (mock design).
+    description: Mapped[str] = mapped_column(String, nullable=False, default="")
     active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -986,9 +1034,9 @@ class TwinMessage(Base):
 
 _DEFAULT_TWIN_PRESET_SEEDS: list[dict[str, object]] = [
     {"id": "preset-tech-transform", "name": "Технотрансформация", "persona_ids": ["musk", "huang", "nadella"]},
-    {"id": "preset-should-build", "name": "Стоит ли строить", "persona_ids": ["zell", "bren", "musk"]},
-    {"id": "preset-how-to-build", "name": "Каким строить", "persona_ids": ["hines", "alabbar", "huang"]},
-    {"id": "preset-sell-adopt", "name": "Как продать / внедрить", "persona_ids": ["corcoran", "miller", "nadella"]},
+    {"id": "preset-should-build", "name": "Стоит ли строить", "persona_ids": ["buffett", "rakhimbayev", "musk"]},
+    {"id": "preset-how-to-build", "name": "Каким строить", "persona_ids": ["rakhimbayev", "jobs", "huang"]},
+    {"id": "preset-sell-adopt", "name": "Как продать / внедрить", "persona_ids": ["bezos", "altman", "nadella"]},
 ]
 
 
@@ -1023,8 +1071,10 @@ async def seed_twin_personas(session: AsyncSession) -> int:
     from llm_wiki.storage.persona_files import load_persona_files
 
     inserted = 0
+    seeded_ids: set[str] = set()
     for row in load_persona_files():
         persona_id = str(row["id"])
+        seeded_ids.add(persona_id)
         pinned_int = int(bool(row["pinned"]))
         existing = await get_twin_persona(session, persona_id)
         if existing is None:
@@ -1040,6 +1090,8 @@ async def seed_twin_personas(session: AsyncSession) -> int:
                     system_prompt=str(row["system_prompt"]),
                     domain_weights=row["domain_weights"],  # type: ignore[arg-type]
                     avatar_init=str(row["avatar_init"]),
+                    color=str(row.get("color", "")),
+                    description=str(row.get("description", "")),
                 )
             )
             inserted += 1
@@ -1053,10 +1105,25 @@ async def seed_twin_personas(session: AsyncSession) -> int:
             existing.system_prompt = str(row["system_prompt"])
             existing.domain_weights = row["domain_weights"]  # type: ignore[assignment]
             existing.avatar_init = str(row["avatar_init"])
+            existing.color = str(row.get("color", ""))
+            existing.description = str(row.get("description", ""))
+            existing.active = 1
 
+    # A persona whose seed file was removed is retired: deactivate it so it
+    # leaves the roster but stays resolvable for old sessions' transcripts.
+    all_rows = await session.execute(select(TwinPersona))
+    for persona in all_rows.scalars().all():
+        if persona.id not in seeded_ids and persona.active:
+            persona.active = 0
+
+    # Upsert (was insert-if-absent): the default triads reference persona ids,
+    # so retiring a persona must also refresh the stored preset line-ups.
     for preset_row in _DEFAULT_TWIN_PRESET_SEEDS:
         preset_id = str(preset_row["id"])
-        if await session.get(TwinPreset, preset_id) is not None:
+        existing_preset = await session.get(TwinPreset, preset_id)
+        if existing_preset is not None:
+            existing_preset.name = str(preset_row["name"])
+            existing_preset.persona_ids = preset_row["persona_ids"]  # type: ignore[assignment]
             continue
         session.add(
             TwinPreset(
@@ -1129,16 +1196,45 @@ async def list_twin_sessions(session: AsyncSession, case_id: str) -> list[TwinSe
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def set_twin_session_outcome(
-    session: AsyncSession, session_id: str, outcome: str, note: str = ""
-) -> bool:
-    """Record whether a council's verdict held up. False if the session is unknown."""
+async def delete_twin_session(session: AsyncSession, session_id: str) -> bool:
+    """Delete a council session and its whole transcript. False if unknown."""
     row = await session.get(TwinSession, session_id)
     if not row:
         return False
-    row.outcome = outcome
-    row.outcome_note = note
-    row.outcome_at = datetime.now(timezone.utc)
+    await session.execute(
+        TwinMessage.__table__.delete().where(TwinMessage.session_id == session_id)
+    )
+    await session.delete(row)
+    await session.commit()
+    return True
+
+
+async def update_twin_session_personas(
+    session: AsyncSession, session_id: str, persona_ids: list[str]
+) -> bool:
+    """Change a session's council line-up («Изменить состав»). False if unknown."""
+    row = await session.get(TwinSession, session_id)
+    if not row:
+        return False
+    row.persona_ids = persona_ids
+    await session.commit()
+    return True
+
+
+async def set_twin_message_reactions(
+    session: AsyncSession, session_id: str, seq: int, reactions: list[str]
+) -> bool:
+    """Persist the user's emoji reactions on one persona message. False if unknown."""
+    result = await session.execute(
+        select(TwinMessage).where(
+            TwinMessage.session_id == session_id, TwinMessage.seq == seq
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return False
+    # Reassign so SQLAlchemy tracks the JSON change.
+    row.content = {**(row.content or {}), "reactions": reactions}
     await session.commit()
     return True
 

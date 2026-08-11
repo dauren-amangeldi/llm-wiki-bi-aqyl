@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 from collections.abc import AsyncGenerator
-from typing import Literal
 
 import structlog
 from fastapi import Depends, HTTPException, Query
@@ -22,13 +23,15 @@ from llm_wiki.storage.metadata import (
     TwinSession,
     append_twin_message,
     create_twin_session,
+    delete_twin_session,
     get_twin_persona,
     get_twin_session_messages,
     list_twin_personas,
     list_twin_presets,
     list_twin_sessions,
-    set_twin_session_outcome,
+    set_twin_message_reactions,
     suggest_twin_personas,
+    update_twin_session_personas,
 )
 
 
@@ -45,6 +48,7 @@ def _to_persona_data(persona: TwinPersona) -> TwinPersonaData:
         lens=persona.lens,
         system_prompt=persona.system_prompt,
         domain_weights=persona.domain_weights,
+        real_name=persona.real_name,
     )
 
 
@@ -59,6 +63,7 @@ async def get_twin_roster(db: AsyncSession = Depends(get_db)) -> dict[str, objec
                 "id": p.id, "name": p.name, "inspiration": p.inspiration,
                 "real_name": p.real_name, "track": p.track,
                 "pinned": bool(p.pinned), "lens": p.lens, "avatar_init": p.avatar_init,
+                "color": p.color, "description": p.description,
             }
             for p in personas
         ],
@@ -78,23 +83,16 @@ async def suggest_council(
     return {"suggestion": await suggest_twin_personas(db, case_id)}
 
 
-class OutcomeRequest(BaseModel):
-    outcome: Literal["confirmed", "refuted"]
-    note: str = Field(default="", max_length=1000)
-
-
 @router.get("/twin/sessions")
 async def get_twin_sessions(
     case_id: str = Query(...), db: AsyncSession = Depends(get_db)
 ) -> list[dict[str, object]]:
-    """Past councils of a case with their outcome-journal state, newest first."""
+    """Past councils of a case, newest first."""
     return [
         {
             "id": s.id,
             "persona_ids": s.persona_ids,
             "created_at": s.created_at.isoformat(),
-            "outcome": s.outcome,
-            "outcome_note": s.outcome_note,
         }
         for s in await list_twin_sessions(db, case_id)
     ]
@@ -112,18 +110,50 @@ async def get_twin_session_transcript(
             "persona_id": m.persona_id,
             "seq": m.seq,
             "content": m.content,
+            "created_at": m.created_at.isoformat() if m.created_at else "",
         }
         for m in await get_twin_session_messages(db, session_id)
     ]
 
 
-@router.patch("/twin/sessions/{session_id}/outcome")
-async def patch_twin_session_outcome(
-    session_id: str, body: OutcomeRequest, db: AsyncSession = Depends(get_db)
+@router.delete("/twin/sessions/{session_id}")
+async def delete_twin_session_endpoint(
+    session_id: str, db: AsyncSession = Depends(get_db)
 ) -> dict[str, bool]:
-    """Record whether the council's verdict held up in reality."""
-    if not await set_twin_session_outcome(db, session_id, body.outcome, body.note):
+    """Delete a council session and its whole transcript."""
+    if not await delete_twin_session(db, session_id):
         raise HTTPException(status_code=404, detail="twin session not found")
+    return {"ok": True}
+
+
+class SessionPersonasRequest(BaseModel):
+    persona_ids: list[str] = Field(min_length=1, max_length=3)
+
+
+@router.patch("/twin/sessions/{session_id}/personas")
+async def patch_twin_session_personas(
+    session_id: str, body: SessionPersonasRequest, db: AsyncSession = Depends(get_db)
+) -> dict[str, bool]:
+    """Change the council line-up of an existing session («Изменить состав»)."""
+    for pid in body.persona_ids:
+        if await get_twin_persona(db, pid) is None:
+            raise HTTPException(status_code=404, detail=f"Unknown persona: {pid}")
+    if not await update_twin_session_personas(db, session_id, body.persona_ids):
+        raise HTTPException(status_code=404, detail="twin session not found")
+    return {"ok": True}
+
+
+class ReactionsRequest(BaseModel):
+    reactions: list[str] = Field(max_length=8)
+
+
+@router.patch("/twin/sessions/{session_id}/messages/{seq}/reactions")
+async def patch_twin_message_reactions(
+    session_id: str, seq: int, body: ReactionsRequest, db: AsyncSession = Depends(get_db)
+) -> dict[str, bool]:
+    """Persist the user's emoji reactions on one message of the transcript."""
+    if not await set_twin_message_reactions(db, session_id, seq, body.reactions):
+        raise HTTPException(status_code=404, detail="twin message not found")
     return {"ok": True}
 
 
@@ -131,8 +161,11 @@ class TwinChatRequest(BaseModel):
     session_id: str | None = None
     case_id: str
     persona_ids: list[str] = Field(min_length=1, max_length=3)
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(default="", max_length=4000)
     language: str = "ru"
+    # Opening round (right after «Начать совет»): no user message — every
+    # persona briefly introduces their take on the case, messenger-style.
+    opening: bool = False
 
 
 @router.post(
@@ -147,9 +180,16 @@ async def twin_chat_endpoint(
     user_key: str = Depends(get_user_key),
 ) -> StreamingResponse:
     """One chat turn: persist the user's message, route it to 0-3 personas,
-    generate each persona's reply in sequence (each sees the ones just
-    generated this turn), stream them, persist them.
+    generate each persona's short messenger-style reply in sequence (each sees
+    the ones just generated this turn), stream them, persist them.
+
+    A persona may hand off to a colleague (``ask``) — that colleague replies in
+    the same turn, capped at 2 extra replies so a debate can't ping-pong
+    forever. ``opening=true`` skips the user message and routing: every persona
+    introduces their take on the case (the round right after «Начать совет»).
     """
+    if not body.opening and not body.message.strip():
+        raise HTTPException(400, "message is required unless opening=true")
     personas_rows: list[TwinPersona] = []
     for persona_id in body.persona_ids:
         persona = await get_twin_persona(db, persona_id)
@@ -188,38 +228,91 @@ async def twin_chat_endpoint(
             agent = TwinsAgent(llm)
             existing = await get_twin_session_messages(db, session_row.id)
             seq = (existing[-1].seq + 1) if existing else 0
+            transcript = build_chat_transcript(existing, real_name_by_id)
 
-            user_row = await append_twin_message(
-                db, session_id=session_row.id, role="user", persona_id=None,
-                seq=seq, content={"text": body.message},
-            )
-            seq += 1
-            transcript = build_chat_transcript(existing + [user_row], real_name_by_id)
-
-            try:
-                responder_ids = await agent.route_message(personas, transcript, body.language)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("twins_route_failed_fallback_first_persona", error=str(exc))
-                responder_ids = [personas[0].id]
+            if body.opening:
+                # Opening round: no user message, no routing — everyone speaks.
+                transcript += (
+                    "\nМодератор: Совет по кейсу создан. Каждый участник кратко"
+                    " представляет свою стартовую позицию по кейсу — 1-2 коротких"
+                    " сообщения, как в групповом чате."
+                )
+                responder_ids = [p.id for p in personas]
+            else:
+                user_row = await append_twin_message(
+                    db, session_id=session_row.id, role="user", persona_id=None,
+                    seq=seq, content={"text": body.message},
+                )
+                seq += 1
+                transcript = build_chat_transcript(existing + [user_row], real_name_by_id)
+                try:
+                    responder_ids = await agent.route_message(personas, transcript, body.language)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("twins_route_failed_fallback_first_persona", error=str(exc))
+                    responder_ids = [personas[0].id]
 
             personas_by_id = {p.id: p for p in personas}
-            for pid in responder_ids:
+            # Persona→persona handoff: a reply's `ask` queues that colleague's
+            # answer in the same turn, capped so a debate can't loop forever.
+            max_extra = 2
+            extra_used = 0
+            queue = [pid for pid in responder_ids if pid in personas_by_id]
+            while queue:
+                pid = queue.pop(0)
                 persona = personas_by_id.get(pid)
                 if persona is None:
                     continue
                 yield _sse_line({"event": "typing", "persona_id": pid})
                 try:
-                    reply = await agent.respond_as_persona(persona, case_context, transcript, body.language)
-                    content = {"text": reply.text, "cite": reply.cite}
+                    reply = await agent.respond_as_persona(
+                        persona, personas, case_context, transcript, body.language
+                    )
+                    bubbles = reply.messages
+                    cite = reply.cite
+                    reply_to = reply.reply_to
+                    ask = reply.ask
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("twins_persona_reply_failed", persona_id=pid, error=str(exc))
-                    content = {"text": "Не удалось получить ответ.", "cite": ""}
-                await append_twin_message(
-                    db, session_id=session_row.id, role="persona", persona_id=pid, seq=seq, content=content,
-                )
-                yield _sse_line({"event": "message", "persona_id": pid, "seq": seq, "content": content})
-                transcript += f"\n{real_name_by_id.get(pid, pid)}: {content['text']}"
-                seq += 1
+                    bubbles, cite, reply_to, ask = ["Не удалось получить ответ."], "", "", ""
+
+                for i, bubble in enumerate(bubbles):
+                    if i > 0:
+                        # Second bubble of the same persona: show «печатает…»
+                        # again and pause briefly, so the chat reads like a
+                        # person typing two messages in a row, not a dump.
+                        yield _sse_line({"event": "typing", "persona_id": pid})
+                        await asyncio.sleep(random.uniform(0.9, 1.7))
+                    content: dict[str, object] = {
+                        "text": bubble,
+                        # reply_to on the first bubble (drives the «· Ответ:» label),
+                        # cite on the last one (the supporting reference).
+                        "reply_to": reply_to if i == 0 else "",
+                        "cite": cite if i == len(bubbles) - 1 else "",
+                    }
+                    row = await append_twin_message(
+                        db, session_id=session_row.id, role="persona",
+                        persona_id=pid, seq=seq, content=content,
+                    )
+                    yield _sse_line({
+                        "event": "message", "persona_id": pid, "seq": seq, "content": content,
+                        "at": row.created_at.isoformat() if row.created_at else "",
+                    })
+                    transcript += f"\n{real_name_by_id.get(pid, pid)}: {bubble}"
+                    seq += 1
+                # Небольшая пауза перед следующим участником — вдобавок к
+                # естественной задержке генерации его реплики.
+                if queue:
+                    await asyncio.sleep(random.uniform(0.5, 1.1))
+
+                if (
+                    ask
+                    and ask != pid
+                    and ask in personas_by_id
+                    and ask not in queue
+                    and extra_used < max_extra
+                ):
+                    queue.append(ask)
+                    extra_used += 1
 
             yield _sse_line({"done": True, "session_id": session_row.id})
         except Exception as exc:  # noqa: BLE001
@@ -234,63 +327,3 @@ async def twin_chat_endpoint(
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-
-class SummarizeRequest(BaseModel):
-    language: str = "ru"
-
-
-@router.post("/twin/sessions/{session_id}/summarize")
-async def summarize_twin_session(
-    session_id: str,
-    body: SummarizeRequest = SummarizeRequest(),
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, object]:
-    """Generate an on-demand verdict ("Подвести итог") from the chat so far."""
-    session_row = await db.get(TwinSession, session_id)
-    if session_row is None:
-        raise HTTPException(404, "Unknown session_id")
-
-    messages = await get_twin_session_messages(db, session_id)
-    if not messages:
-        raise HTTPException(400, "Chat has no messages yet")
-
-    personas_rows: list[TwinPersona] = []
-    for pid in session_row.persona_ids:
-        persona = await get_twin_persona(db, pid)
-        if persona is not None:
-            personas_rows.append(persona)
-    personas = [_to_persona_data(p) for p in personas_rows]
-    real_name_by_id = {p.id: p.real_name for p in personas_rows}
-    transcript = build_chat_transcript(messages, real_name_by_id)
-
-    case = await db.get(CaseRecord, session_row.case_id)
-    documents: list[FileRecord] = []
-    if case is not None:
-        for doc_id in case.doc_ids or []:
-            fr = await db.get(FileRecord, doc_id)
-            if fr is not None:
-                documents.append(fr)
-    case_context = load_case_context(documents)
-
-    from llm_wiki.llm.client import LLMClient
-
-    llm = LLMClient()
-    try:
-        agent = TwinsAgent(llm)
-        verdict = await agent.run_chat_verdict(personas, case_context, transcript, body.language)
-    finally:
-        await llm.aclose()
-
-    verdict_content = {
-        "questions": verdict.questions, "consensus": verdict.consensus,
-        "disagreement": verdict.disagreement, "next_step": verdict.next_step,
-        "domain_distribution": verdict.domain_distribution,
-        "decisive_voice": verdict.decisive_voice,
-        "consensus_reached_early": verdict.consensus_reached_early,
-        "is_close_split": verdict.is_close_split,
-    }
-    await append_twin_message(
-        db, session_id=session_id, role="verdict", persona_id=None,
-        seq=messages[-1].seq + 1, content=verdict_content,
-    )
-    return verdict_content
