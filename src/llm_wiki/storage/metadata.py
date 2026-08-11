@@ -62,6 +62,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS ix_chunk_embeddings_owner ON chunk_embeddings (owner)",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS scope varchar NOT NULL DEFAULT 'internal'",
     "CREATE INDEX IF NOT EXISTS ix_cases_owner ON cases (owner)",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS tags json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
@@ -299,6 +300,9 @@ class CaseRecord(Base):
     # — indexed but never surfaced in the shared wiki/search for other users.
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Источник опыта: internal (внутренний опыт BI) | external (мировой опыт).
+    # Выбирается автором при создании кейса; двигает фильтр на главной.
+    scope: Mapped[str] = mapped_column(String, nullable=False, default="internal")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

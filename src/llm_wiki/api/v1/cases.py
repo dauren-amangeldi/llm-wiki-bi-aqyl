@@ -40,6 +40,8 @@ class CaseBody(BaseModel):
     sensitive: bool = False
     # Fixed-taxonomy tags; unknown tags are dropped server-side (see clean_tags).
     tags: list[str] = []
+    # Источник опыта: внутренний опыт BI или мировой. Двигает фильтр на главной.
+    scope: Literal["internal", "external"] = "internal"
 
 
 def _dispatch_autotag(case_id: str) -> None:
@@ -156,6 +158,7 @@ async def list_cases(
             "sensitive": r.sensitive,
             "tags": r.tags or [],
             "owner": r.owner,
+            "scope": r.scope or "internal",
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
@@ -176,6 +179,7 @@ async def create_case(
         doc_ids=body.doc_ids,
         tags=clean_tags(body.tags),
         sensitive=body.sensitive,
+        scope=body.scope,
         owner=owner if owner != "anon" else None,
         created_at=now,
         updated_at=now,
@@ -193,6 +197,8 @@ async def create_case(
         "doc_ids": case.doc_ids,
         "sensitive": case.sensitive,
         "tags": case.tags,
+        "owner": case.owner,
+        "scope": case.scope,
         "created_at": case.created_at.isoformat() if case.created_at else None,
     }
 
@@ -217,6 +223,7 @@ async def update_case(
             doc_ids=body.doc_ids,
             tags=clean_tags(body.tags),
             sensitive=body.sensitive,
+            scope=body.scope,
             updated_at=datetime.now(timezone.utc),
         )
     )
