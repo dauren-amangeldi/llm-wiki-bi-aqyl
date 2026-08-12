@@ -332,26 +332,64 @@ async def test_uploading_into_a_public_case_makes_the_new_file_public(
     assert fr is not None and fr.sensitive is False and fr.owner is None
 
 
-def test_assert_can_edit_only_blocks_a_different_author_under_auth(monkeypatch) -> None:
-    # item 4: a public case is author-only — but only enforced with real auth.
+def test_assert_can_edit_blocks_a_different_author_always() -> None:
+    # Б1: author-only is enforced ALWAYS (demo included) — in demo the caller
+    # identity comes from the X-User-Email header, so attribution works there.
     import pytest
     from fastapi import HTTPException
 
     from llm_wiki.api.v1 import cases
-    from llm_wiki.config import settings
     from llm_wiki.storage.metadata import CaseRecord
 
     owned = CaseRecord(owner="alice@bi.group")
     ownerless = CaseRecord(owner=None)
 
-    # auth OFF (demo): never blocks, even a different caller
-    monkeypatch.setattr(settings, "auth_enabled", False)
-    cases._assert_can_edit(owned, "bob@bi.group")
-
-    # auth ON: block a different author, allow the author and ownerless cases
-    monkeypatch.setattr(settings, "auth_enabled", True)
     with pytest.raises(HTTPException) as exc:
         cases._assert_can_edit(owned, "bob@bi.group")
     assert exc.value.status_code == 403
-    cases._assert_can_edit(owned, "alice@bi.group")
-    cases._assert_can_edit(ownerless, "bob@bi.group")
+    cases._assert_can_edit(owned, "alice@bi.group")  # author is fine
+    cases._assert_can_edit(ownerless, "bob@bi.group")  # legacy ownerless stays open
+
+
+# ── Ownership matrix (Б1/Б2): любые мутации кейса — только автор ─────────────
+
+
+async def test_foreign_case_mutations_are_forbidden(client: AsyncClient) -> None:
+    """Rename / privacy flip / delete / unlink чужого кейса → 403, даже в demo."""
+    alice = {"X-User-Email": "alice@bi.group"}
+    bob = {"X-User-Email": "bob@bi.group"}
+    await client.post(
+        "/api/v1/cases",
+        json={"id": "c-own", "title": "Alice case", "doc_ids": ["d1"], "sensitive": False},
+        headers=alice,
+    )
+
+    rename = {"id": "c-own", "title": "Renamed by Bob", "doc_ids": ["d1"], "sensitive": False}
+    assert (await client.put("/api/v1/cases/c-own", json=rename, headers=bob)).status_code == 403
+
+    flip = {"id": "c-own", "title": "Alice case", "doc_ids": ["d1"], "sensitive": True}
+    assert (await client.put("/api/v1/cases/c-own", json=flip, headers=bob)).status_code == 403
+
+    assert (await client.delete("/api/v1/cases/c-own", headers=bob)).status_code == 403
+    assert (
+        await client.delete("/api/v1/cases/c-own/documents/d1", headers=bob)
+    ).status_code == 403
+
+    # Автору всё можно.
+    ok = {"id": "c-own", "title": "Renamed by Alice", "doc_ids": ["d1"], "sensitive": False}
+    assert (await client.put("/api/v1/cases/c-own", json=ok, headers=alice)).status_code == 200
+    assert (await client.delete("/api/v1/cases/c-own", headers=alice)).status_code == 200
+
+
+async def test_case_created_without_header_is_owned_by_anon(client: AsyncClient) -> None:
+    """Б2: owner проставляется всегда — даже анонимный клиент не создаёт
+    «ничьих» кейсов, которые мог бы править кто угодно."""
+    await client.post("/api/v1/cases", json={"id": "c-anon", "title": "A", "doc_ids": []})
+    c = next(x for x in (await client.get("/api/v1/cases")).json() if x["id"] == "c-anon")
+    assert c["owner"] == "anon"
+    r = await client.put(
+        "/api/v1/cases/c-anon",
+        json={"id": "c-anon", "title": "Hijack", "doc_ids": []},
+        headers={"X-User-Email": "bob@bi.group"},
+    )
+    assert r.status_code == 403

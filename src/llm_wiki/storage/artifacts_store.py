@@ -6,9 +6,11 @@ One row per (document_id, kind); regenerating replaces that language's version.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.storage.metadata import ArtifactRecord
@@ -59,20 +61,39 @@ async def upsert_artifact(
             status="ready",
         )
         session.add(record)
-    else:
-        others = [
-            v
-            for v in (record.versions or [])
-            if isinstance(v, dict) and v.get("language") != language
-        ]
-        record.versions = [*others, version]
-        record.status = "ready"
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Lost a concurrent-insert race on uq_artifacts_document_kind —
+            # reuse the winner's row instead of failing the whole generation.
+            await session.rollback()
+            record = await find_by_kind(session, document_id, kind)
+            if record is None:  # pragma: no cover — winner vanished mid-race
+                raise
+            others = [
+                v
+                for v in (record.versions or [])
+                if isinstance(v, dict) and v.get("language") != language
+            ]
+            record.versions = [*others, version]
+            record.status = "ready"
+            record.finished_at = datetime.now(timezone.utc)
+            await session.commit()
+        return record
+    others = [
+        v
+        for v in (record.versions or [])
+        if isinstance(v, dict) and v.get("language") != language
+    ]
+    record.versions = [*others, version]
+    record.status = "ready"
+    record.finished_at = datetime.now(timezone.utc)
     await session.commit()
     return record
 
 
 async def create_pending_artifact(
-    session: AsyncSession, *, document_id: str, kind: str
+    session: AsyncSession, *, document_id: str, kind: str, requested_by: str | None = None
 ) -> ArtifactRecord:
     """Create (or reset to) a ``pending`` artifact for (document, kind).
 
@@ -89,13 +110,41 @@ async def create_pending_artifact(
             kind=kind,
             versions=[],
             status="pending",
+            requested_by=requested_by,
+            started_at=None,
+            finished_at=None,
         )
         session.add(record)
-    else:
-        record.status = "pending"
-        record.error = None
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Concurrent create for the same (document, kind): reuse the row.
+            await session.rollback()
+            record = await find_by_kind(session, document_id, kind)
+            if record is None:  # pragma: no cover — winner vanished mid-race
+                raise
+            record.status = "pending"
+            record.error = None
+            record.requested_by = requested_by
+            record.started_at = None
+            record.finished_at = None
+            await session.commit()
+        return record
+    record.status = "pending"
+    record.error = None
+    record.requested_by = requested_by
+    record.started_at = None
+    record.finished_at = None
     await session.commit()
     return record
+
+
+async def mark_started(session: AsyncSession, artifact_id: str) -> None:
+    """Stamp the moment a worker actually began generating (ops monitoring)."""
+    record = await session.get(ArtifactRecord, artifact_id)
+    if record is not None:
+        record.started_at = datetime.now(timezone.utc)
+        await session.commit()
 
 
 async def mark_failed(session: AsyncSession, artifact_id: str, error: str) -> None:
@@ -104,6 +153,7 @@ async def mark_failed(session: AsyncSession, artifact_id: str, error: str) -> No
     if record is not None:
         record.status = "failed"
         record.error = error[:500]
+        record.finished_at = datetime.now(timezone.utc)
         await session.commit()
 
 
