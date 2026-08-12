@@ -7,6 +7,7 @@ Provider is selected by the LLM_PROVIDER env var — never hardcode a provider.
 import asyncio
 import json
 import time
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,27 @@ _NON_RETRYABLE_OPENAI: tuple[type[Exception], ...] = (
     openai.NotFoundError,
     openai.UnprocessableEntityError,
 )
+
+# Cap on CONCURRENT provider calls per event loop («повар не страдает»): however
+# many requests/tasks fan out, at most settings.llm_max_concurrency calls are in
+# flight at once — the rest queue here instead of storming the provider (429s).
+# Semaphores are loop-bound, so keep one per loop (API process has one loop;
+# each prefork worker task runs its own) — a module global would break across
+# asyncio.Runner instances.
+_LOOP_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _llm_semaphore() -> asyncio.Semaphore:
+    from llm_wiki.config import settings
+
+    loop = asyncio.get_running_loop()
+    sem = _LOOP_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(max(1, settings.llm_max_concurrency))
+        _LOOP_SEMAPHORES[loop] = sem
+    return sem
 
 
 @dataclass
@@ -342,9 +364,12 @@ class LLMClient:
 
         for attempt in range(self._MAX_RETRIES):
             try:
-                text, input_tokens, output_tokens, cached = await self._call_provider(
-                    prompt, system, response_format, json_schema, schema_name
-                )
+                # Global (per-loop) cap on concurrent provider calls — held only
+                # for the call itself, released before backoff sleeps.
+                async with _llm_semaphore():
+                    text, input_tokens, output_tokens, cached = await self._call_provider(
+                        prompt, system, response_format, json_schema, schema_name
+                    )
                 duration_ms = int((time.monotonic() - start) * 1000)
                 cost = self._compute_cost(self._model, input_tokens, output_tokens)
                 usage = LLMUsage(

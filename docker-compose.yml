@@ -33,6 +33,9 @@ services:
       --reload
     restart: unless-stopped
 
+  # Two dedicated workers so file ingestion can never block artifact
+  # generation (they used to share one queue with concurrency=1 — one big PDF
+  # froze every «Сгенерировать» button in the product).
   worker:
     <<: *app-env
     build:
@@ -49,7 +52,30 @@ services:
     command: >
       uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
       --loglevel=info
-      --concurrency=1
+      -Q ingest
+      --concurrency=${WORKER_INGEST_CONCURRENCY:-2}
+      -n ingest@%h
+    restart: unless-stopped
+
+  worker-artifacts:
+    <<: *app-env
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - app_data:/app/data
+      - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: >
+      uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
+      --loglevel=info
+      -Q artifacts,light
+      --concurrency=${WORKER_ARTIFACTS_CONCURRENCY:-3}
+      -n artifacts@%h
     restart: unless-stopped
 
   beat:

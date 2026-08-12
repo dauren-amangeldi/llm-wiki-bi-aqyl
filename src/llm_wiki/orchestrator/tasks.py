@@ -33,7 +33,23 @@ celery_app.conf.update(
     # structlog writes straight to the real stderr (see logging_config) and the
     # failure reason + traceback are shipped as-is.
     worker_redirect_stdouts=False,
-    worker_concurrency=1,  # MVP: single worker to avoid index.md race conditions
+    # Concurrency is set per-worker on the CLI (see docker-compose):
+    #   worker-ingest    -Q ingest          --concurrency=2  (CPU-bound parsing)
+    #   worker-artifacts -Q artifacts,light --concurrency=3  (LLM-bound, user waits)
+    # The old worker_concurrency=1 guarded index.md file races — index.md is
+    # gone (the knowledge map lives in Postgres now), so the guard is obsolete.
+    # Route heavy user-facing work to separate queues so a 5-minute file
+    # ingestion can never block artifact generation (and vice versa).
+    task_routes={
+        "llm_wiki.orchestrator.tasks.process_file": {"queue": "ingest"},
+        "llm_wiki.orchestrator.tasks.generate_artifact": {"queue": "artifacts"},
+        "llm_wiki.orchestrator.tasks.autotag_case": {"queue": "light"},
+        "llm_wiki.orchestrator.tasks.backfill_case_tags": {"queue": "light"},
+        "llm_wiki.orchestrator.tasks.run_weekly_audit": {"queue": "light"},
+    },
+    # Anything unrouted (new tasks) lands in "light" — visible immediately,
+    # can't silently starve behind ingestion.
+    task_default_queue="light",
     # At-least-once delivery: ack only AFTER the task finishes, and re-queue if
     # the worker dies mid-task (OOM / SIGKILL / eviction). Combined with the
     # persisted state_history the pipeline resumes instead of duplicating work.
@@ -70,6 +86,10 @@ _PERMANENT_ERRORS: tuple[type[Exception], ...] = (
     acks_late=True,
     reject_on_worker_lost=True,
     name="llm_wiki.orchestrator.tasks.process_file",
+    # A single file (big PDF + OCR + wiki generation) can legitimately take
+    # minutes; anything past 25 min counts as hung.
+    soft_time_limit=1500,
+    time_limit=1800,
 )
 def process_file_task(self: Any, file_id: str) -> None:
     """Celery task: run the ingestion pipeline for a single file.
@@ -165,7 +185,11 @@ def process_file_task(self: Any, file_id: str) -> None:
         structlog.contextvars.clear_contextvars()
 
 
-@celery_app.task(name="llm_wiki.orchestrator.tasks.run_weekly_audit")
+@celery_app.task(
+    name="llm_wiki.orchestrator.tasks.run_weekly_audit",
+    soft_time_limit=900,
+    time_limit=960,
+)
 def run_weekly_audit(
     mode: str = "batch",
     dry_run: bool = False,
@@ -289,7 +313,12 @@ def run_weekly_audit(
     return {"issues_found": len(issues), "mode": mode, "dry_run": dry_run}
 
 
-@celery_app.task(name="llm_wiki.orchestrator.tasks.generate_artifact")
+@celery_app.task(
+    name="llm_wiki.orchestrator.tasks.generate_artifact",
+    # Podcast TTS / gpt-image infographics run for minutes; 10 min is the cap.
+    soft_time_limit=600,
+    time_limit=660,
+)
 def generate_artifact(
     artifact_id: str, document_id: str, kind: str, language: str
 ) -> dict[str, object]:
@@ -314,6 +343,8 @@ def generate_artifact(
 
         factory = async_sessionmaker(bind=_engine, expire_on_commit=False)
         async with factory() as session:
+            # Ops monitoring: реальный момент старта генерации воркером.
+            await artifacts_store.mark_started(session, artifact_id)
             llm = LLMClient()
             try:
                 content = await generate_content(
@@ -337,7 +368,11 @@ def generate_artifact(
         return runner.run(_run())
 
 
-@celery_app.task(name="llm_wiki.orchestrator.tasks.autotag_case")
+@celery_app.task(
+    name="llm_wiki.orchestrator.tasks.autotag_case",
+    soft_time_limit=120,
+    time_limit=180,
+)
 def autotag_case(case_id: str, force: bool = False) -> dict[str, object]:
     """Classify a case against the fixed taxonomy and set its tags.
 
@@ -380,7 +415,11 @@ def autotag_case(case_id: str, force: bool = False) -> dict[str, object]:
         return runner.run(_run())
 
 
-@celery_app.task(name="llm_wiki.orchestrator.tasks.backfill_case_tags")
+@celery_app.task(
+    name="llm_wiki.orchestrator.tasks.backfill_case_tags",
+    soft_time_limit=600,
+    time_limit=660,
+)
 def backfill_case_tags(force: bool = False) -> dict[str, object]:
     """One-off backfill: queue auto-tagging for every case with no tags yet (or
     all cases when ``force``). Each becomes its own ``autotag_case`` task so the

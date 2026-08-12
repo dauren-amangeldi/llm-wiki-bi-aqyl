@@ -127,7 +127,8 @@ async def _generate_and_store(
 
 
 async def _start_generation(
-    session: AsyncSession, kind: str, document_id: str, language: str
+    session: AsyncSession, kind: str, document_id: str, language: str,
+    requested_by: str | None = None,
 ) -> dict[str, Any]:
     """Create a pending artifact and enqueue background generation.
 
@@ -138,7 +139,7 @@ async def _start_generation(
     synchronously so the feature still works.
     """
     record = await artifacts_store.create_pending_artifact(
-        session, document_id=document_id, kind=kind
+        session, document_id=document_id, kind=kind, requested_by=requested_by
     )
     try:
         from llm_wiki.orchestrator.tasks import generate_artifact
@@ -158,7 +159,7 @@ async def _start_generation(
 async def studio_generate(
     body: dict[str, Any],
     session: AsyncSession = Depends(get_db),
-    _caller: str = Depends(get_user_key),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, Any]:
     kind = str(body.get("kind") or "")
     document_id = str(body.get("document_id") or "")
@@ -167,7 +168,7 @@ async def studio_generate(
         raise HTTPException(status_code=400, detail=f"Unsupported kind for /studio/generate: {kind!r}")
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
-    return await _start_generation(session, kind, document_id, language)
+    return await _start_generation(session, kind, document_id, language, requested_by=caller)
 
 
 @router.post("/cards/generate")
@@ -192,7 +193,7 @@ async def cards_generate(
 async def images_generate(
     body: dict[str, Any],
     session: AsyncSession = Depends(get_db),
-    _caller: str = Depends(get_user_key),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, Any]:
     document_id = str(body.get("document_id") or "")
     language = str(body.get("language") or "ru")
@@ -200,4 +201,4 @@ async def images_generate(
         raise HTTPException(status_code=400, detail="document_id is required")
     # gpt-image-1 generation is the slowest artifact — always run it async and
     # let the client poll GET /artifacts/{id} for the content.
-    return await _start_generation(session, "infographic", document_id, language)
+    return await _start_generation(session, "infographic", document_id, language, requested_by=caller)

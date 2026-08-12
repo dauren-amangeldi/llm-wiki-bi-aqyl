@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
-from llm_wiki.config import settings
 from llm_wiki.storage import wiki_store
 from llm_wiki.storage.metadata import CaseRecord, ChunkEmbedding, FileRecord
 from llm_wiki.taxonomy import CASE_TAGS, clean_tags
@@ -19,11 +18,13 @@ from llm_wiki.taxonomy import CASE_TAGS, clean_tags
 def _assert_can_edit(row: CaseRecord, caller: str) -> None:
     """A case (public or private) may only be modified by its author.
 
-    A public case is shared and immutable for everyone else; a private case is
-    already owner-scoped. Enforced ONLY with real auth on — in demo mode the
-    caller identity/owner aren't reliable, so we don't block local editing.
+    ANY mutation — rename, tags, doc membership, privacy flip, delete — is
+    author-only. Enforced ALWAYS (demo mode included): in demo the caller comes
+    from the X-User-Email header the frontend consistently sends, so ownership
+    attribution works there too. Legacy rows with owner=NULL predate ownership
+    and stay editable by anyone (prod data gets owners on creation — Б2).
     """
-    if settings.auth_enabled and row.owner and row.owner != caller:
+    if row.owner and row.owner != caller:
         raise HTTPException(status_code=403, detail="Only the case author can modify this case")
 
 
@@ -180,7 +181,10 @@ async def create_case(
         tags=clean_tags(body.tags),
         sensitive=body.sensitive,
         scope=body.scope,
-        owner=owner if owner != "anon" else None,
+        # Always attribute the author — "anon" included (clients without the
+        # X-User-Email header). owner=NULL would leave the case editable by
+        # everyone forever (see _assert_can_edit).
+        owner=owner,
         created_at=now,
         updated_at=now,
     )
