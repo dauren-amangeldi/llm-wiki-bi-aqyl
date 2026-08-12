@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", repr=False)
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     llm_timeout_s: float = 60.0  # HTTP timeout for LLM + embedding API calls
+    # Max CONCURRENT LLM calls per process/event loop (see _llm_semaphore).
+    # Bounds provider load however many workers/requests fan out.
+    llm_max_concurrency: int = 4
+    # Token for GET /api/v1/ops/generations (Grafana JSON datasource sends it
+    # as X-Ops-Token). Empty → the endpoint is open only while auth is off
+    # (local/demo); with auth on it returns 403 until a token is configured.
+    ops_token: str = Field(default="", repr=False)
 
     # --- Infrastructure ---
     redis_url: str = "redis://redis:6379/0"

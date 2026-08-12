@@ -25,6 +25,7 @@ Refusal modes (no LLM call — saves money):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -406,9 +407,12 @@ class AnswerAgent(BaseAgent):
         """RAG pipeline using the ``chunks`` collection (full page bodies)."""
         assert self._chunk_store is not None  # guarded by caller
 
-        # Stage 1: chunk retrieval
+        # Stage 1: chunk retrieval. The store is sync (sync OpenAI embed + sync
+        # pgvector engine) — run it in a thread so the network round-trip does
+        # not freeze the whole uvicorn event loop for every other request.
         try:
-            chunk_hits = self._chunk_store.query(
+            chunk_hits = await asyncio.to_thread(
+                self._chunk_store.query,
                 question,
                 top_k=settings.chunk_retrieval_top_k,
                 usage_file_id=file_id,
@@ -529,9 +533,11 @@ class AnswerAgent(BaseAgent):
         self, question: str, top_k: int, file_id: str
     ) -> AnswerResult:
         """Original RAG pipeline using the ``headings`` collection (page titles)."""
-        # Stage 1: embedding retrieval
+        # Stage 1: embedding retrieval (sync store → thread, keep the loop free)
         try:
-            candidates = self._store.query(question, top_k=top_k, file_id=file_id)
+            candidates = await asyncio.to_thread(
+                self._store.query, question, top_k=top_k, file_id=file_id
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("ask_embedding_failed", error=str(exc))
             candidates = []
