@@ -6,6 +6,7 @@ No FastAPI, Celery, or direct file I/O.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -149,8 +150,10 @@ class AdvisorAgent(BaseAgent):
             ``AdvisorResponse`` — either populated insights or a refusal payload.
         """
         try:
-            hits = self._chunk_store.query(
-                query, top_k=ADVISOR_TOP_K, usage_file_id=file_id
+            # Sync store (sync embed + sync engine) → thread, keep the event
+            # loop free for other requests while the network round-trip runs.
+            hits = await asyncio.to_thread(
+                self._chunk_store.query, query, top_k=ADVISOR_TOP_K, usage_file_id=file_id
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("advisor_chunk_query_failed", error=str(exc))

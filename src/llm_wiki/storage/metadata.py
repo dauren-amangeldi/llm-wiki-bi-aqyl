@@ -63,6 +63,18 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS scope varchar NOT NULL DEFAULT 'internal'",
+    # One row per (document, kind) is the store's contract — enforce it so two
+    # concurrent generations can't insert duplicates (check-then-insert race
+    # became real once artifact workers run in parallel). Dedupe first: keep an
+    # arbitrary survivor (dupes are already an anomaly), then add the index.
+    "DELETE FROM artifacts a USING artifacts b"
+    " WHERE a.document_id = b.document_id AND a.kind = b.kind AND a.ctid < b.ctid",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_artifacts_document_kind"
+    " ON artifacts (document_id, kind)",
+    # Ops monitoring: who requested a generation and when it actually ran.
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS requested_by varchar",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS started_at timestamptz",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS finished_at timestamptz",
     "CREATE INDEX IF NOT EXISTS ix_cases_owner ON cases (owner)",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS tags json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
@@ -345,6 +357,11 @@ class ArtifactRecord(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+    # Ops monitoring (генерации в Grafana): кто запросил и когда реально
+    # началась/закончилась работа воркера. NULL для legacy-строк.
+    requested_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ChatRecord(Base):

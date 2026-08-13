@@ -1,4 +1,4 @@
-# Staging/prod-like profile — built image (no src mount, no --reload), 2 API
+# Staging/prod-like profile — built image (no src mount, no --reload), 4 API
 # workers. Config still comes from .env (inherited from the base file).
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
@@ -8,11 +8,15 @@ services:
     command: >
       uv run uvicorn llm_wiki.main:app
       --host 0.0.0.0 --port 8000
-      --workers 2
+      --workers ${UVICORN_WORKERS:-4}
     volumes:
       - app_data:/app/data   # no ./src mount — use the built image
 
   worker:
+    volumes:
+      - app_data:/app/data
+
+  worker-artifacts:
     volumes:
       - app_data:/app/data
 
