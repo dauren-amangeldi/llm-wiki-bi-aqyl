@@ -7,6 +7,7 @@ import openai
 import structlog
 from celery import Celery
 from celery.schedules import crontab
+from kombu import Queue
 
 from llm_wiki.config import settings
 
@@ -50,6 +51,26 @@ celery_app.conf.update(
     # Anything unrouted (new tasks) lands in "light" — visible immediately,
     # can't silently starve behind ingestion.
     task_default_queue="light",
+    # Declare ALL queues so a worker started WITHOUT -Q (e.g. the k8s worker
+    # deployment, whose command ops manages separately) consumes every queue by
+    # default — otherwise the queue split silently strands ingest/artifacts
+    # tasks in Redis until the manifest learns about -Q. Workers WITH an
+    # explicit -Q (docker-compose worker / worker-artifacts) are unaffected and
+    # keep their isolation.
+    # Explicit exchange/routing_key per queue — identical to what
+    # task_create_missing_queues auto-declared before this list existed
+    # (a bare Queue("x") would inherit the default "light" exchange and all
+    # three queues would collapse onto one binding).
+    task_queues=(
+        Queue("ingest", exchange="ingest", routing_key="ingest"),
+        Queue("artifacts", exchange="artifacts", routing_key="artifacts"),
+        Queue("light", exchange="light", routing_key="light"),
+        # Legacy drain: tasks enqueued BEFORE the queue split landed on an env
+        # (e.g. a file uploaded minutes before the deploy) sit in the old
+        # default "celery" queue — keep consuming it so that tail completes
+        # instead of spinning forever. Harmless once drained (stays empty).
+        Queue("celery", exchange="celery", routing_key="celery"),
+    ),
     # At-least-once delivery: ack only AFTER the task finishes, and re-queue if
     # the worker dies mid-task (OOM / SIGKILL / eviction). Combined with the
     # persisted state_history the pipeline resumes instead of duplicating work.

@@ -73,7 +73,7 @@ services:
     command: >
       uv run celery -A llm_wiki.orchestrator.tasks.celery_app worker
       --loglevel=info
-      -Q artifacts,light
+      -Q artifacts,light,celery
       --concurrency=${WORKER_ARTIFACTS_CONCURRENCY:-3}
       -n artifacts@%h
     restart: unless-stopped
