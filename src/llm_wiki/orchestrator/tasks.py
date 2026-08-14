@@ -65,6 +65,11 @@ celery_app.conf.update(
         Queue("ingest", exchange="ingest", routing_key="ingest"),
         Queue("artifacts", exchange="artifacts", routing_key="artifacts"),
         Queue("light", exchange="light", routing_key="light"),
+        # Legacy drain: tasks enqueued BEFORE the queue split landed on an env
+        # (e.g. a file uploaded minutes before the deploy) sit in the old
+        # default "celery" queue — keep consuming it so that tail completes
+        # instead of spinning forever. Harmless once drained (stays empty).
+        Queue("celery", exchange="celery", routing_key="celery"),
     ),
     # At-least-once delivery: ack only AFTER the task finishes, and re-queue if
     # the worker dies mid-task (OOM / SIGKILL / eviction). Combined with the
