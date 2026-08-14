@@ -70,7 +70,7 @@ variables:
 
 .rules:production:template: &rules_production_definition
   rules:
-    - if: $CI_COMMIT_BRANCH == "master" 
+    - if: $CI_COMMIT_BRANCH == "main" 
 
 
 sonarqube:testing:
