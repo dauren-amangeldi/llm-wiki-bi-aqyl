@@ -419,18 +419,26 @@ def autotag_case(case_id: str, force: bool = False) -> dict[str, object]:
             case = await session.get(CaseRecord, case_id)
             if case is None:
                 return {"case_id": case_id, "status": "not_found"}
-            if case.tags and not force:
+            if case.tags and case.description and not force:
                 return {"case_id": case_id, "status": "already_tagged", "tags": case.tags}
             content = await gather_case_text(case, session)
             llm = LLMClient()
             try:
-                tags = await classify_case_tags(case.title, content, llm, file_id=f"case-{case_id}")
+                tags, description = await classify_case_tags(
+                    case.title, content, llm, file_id=f"case-{case_id}"
+                )
             finally:
                 await llm.aclose()
-            case.tags = tags
+            # Не затираем ручные правки: теги — только если их не было (или
+            # force); описание — если пустое (сбрасывается при смене состава).
+            if force or not case.tags:
+                case.tags = tags
+            if force or not case.description:
+                case.description = description
             await session.commit()
-            logger.info("autotag_case_done", case_id=case_id, tags=tags)
-            return {"case_id": case_id, "status": "tagged", "tags": tags}
+            logger.info("autotag_case_done", case_id=case_id, tags=case.tags,
+                        description_len=len(case.description))
+            return {"case_id": case_id, "status": "tagged", "tags": case.tags}
 
     with asyncio.Runner() as runner:
         return runner.run(_run())

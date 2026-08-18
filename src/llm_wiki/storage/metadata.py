@@ -63,6 +63,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS scope varchar NOT NULL DEFAULT 'internal'",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS description varchar NOT NULL DEFAULT ''",
     # One row per (document, kind) is the store's contract — enforce it so two
     # concurrent generations can't insert duplicates (check-then-insert race
     # became real once artifact workers run in parallel). Dedupe first: keep an
@@ -315,6 +316,9 @@ class CaseRecord(Base):
     # Источник опыта: internal (внутренний опыт BI) | external (мировой опыт).
     # Выбирается автором при создании кейса; двигает фильтр на главной.
     scope: Mapped[str] = mapped_column(String, nullable=False, default="internal")
+    # Короткое LLM-описание кейса (2–3 предложения из материалов) — карточка на
+    # главной. Пусто, пока autotag-таск не сгенерил (или материалов нет).
+    description: Mapped[str] = mapped_column(String, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
