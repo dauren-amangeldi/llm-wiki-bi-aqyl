@@ -24,6 +24,9 @@ env/
 .env.staging.local
 .env.local
 .env
+# Any environment file variant (prod creds etc.) — never in git
+.env.*
+!.env.example
 
 # Data directories — gitignored, mounted as Docker volumes
 data/raw/
