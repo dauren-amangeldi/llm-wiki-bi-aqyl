@@ -24,12 +24,26 @@ from starlette.responses import JSONResponse, Response
 _logger = structlog.get_logger(__name__)
 
 # Paths reachable without a token even when auth is enabled: liveness/readiness
-# probes, API docs, and the OIDC login handshake itself (which is how a caller
-# obtains a token in the first place).
+# probes (incl. the BI-standard aliases /health-ams and /readiness — k8s probes
+# and AMS poll them without any credentials, a 401 here reads as "app down"),
+# API docs, and the OIDC login handshake itself (which is how a caller obtains
+# a token in the first place).
 _OPEN_EXACT = frozenset(
-    {"/", "/health", "/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
+    {
+        "/",
+        "/health",
+        "/healthz",
+        "/health-ams",
+        "/readyz",
+        "/readiness",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
 )
-_OPEN_PREFIXES = ("/api/v1/auth/",)
+# /api/v1/ops/ carries its own X-Ops-Token gate (see api/v1/ops.py) — Grafana
+# polls it headlessly and can't do the Keycloak handshake.
+_OPEN_PREFIXES = ("/api/v1/auth/", "/api/v1/ops/")
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
