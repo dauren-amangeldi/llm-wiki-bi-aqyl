@@ -113,6 +113,9 @@ app.include_router(v1_router, prefix="/api/v1")
 @app.get("/health", tags=["system"])
 @app.get("/healthz", tags=["system"])
 @app.get("/health-ams", tags=["system"])
+@app.get("/api/health", tags=["system"])
+@app.get("/api/healthz", tags=["system"])
+@app.get("/api/health-ams", tags=["system"])
 async def health_check() -> JSONResponse:
     """Liveness probe — returns 200 when the process is up. No dependency checks.
 
@@ -159,6 +162,8 @@ async def _check_object_store() -> None:
 
 @app.get("/readyz", tags=["system"])
 @app.get("/readiness", tags=["system"])
+@app.get("/api/readyz", tags=["system"])
+@app.get("/api/readiness", tags=["system"])
 async def readiness() -> JSONResponse:
     """Readiness probe — 200 only when all backing services are reachable.
 
