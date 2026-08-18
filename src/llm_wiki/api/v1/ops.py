@@ -16,12 +16,14 @@ datasource, заголовок ``X-Ops-Token``) — своей ops-страни�
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import Depends, Header, HTTPException, Query
-from sqlalchemy import select
+from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
@@ -151,4 +153,151 @@ async def list_generations(
         "queues": _queue_depths(),
         "items": items[:limit],
         "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── Реальное состояние Celery + аварийная чистка очередей ────────────────────
+
+
+def _celery_snapshot() -> dict[str, Any]:
+    """Живой опрос воркеров (не логи и не БД): что реально выполняется (active),
+    что взято с брокера, но ждёт слота (reserved), и что отложено (scheduled).
+    Пустой dict воркеров = ни один воркер не ответил за таймаут."""
+    from llm_wiki.orchestrator.tasks import celery_app
+
+    insp = celery_app.control.inspect(timeout=3.0)
+
+    def _short(tasks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        out = []
+        for t in tasks or []:
+            out.append(
+                {
+                    "id": t.get("id"),
+                    "task": (t.get("name") or "").rsplit(".", 1)[-1],
+                    "args": str(t.get("args") or "")[:120],
+                    "queue": ((t.get("delivery_info") or {}).get("routing_key")),
+                    "started_at": t.get("time_start"),
+                }
+            )
+        return out
+
+    active = insp.active() or {}
+    reserved = insp.reserved() or {}
+    scheduled = insp.scheduled() or {}
+    workers = sorted({*active, *reserved, *scheduled})
+    return {
+        "workers": {
+            w: {
+                "active": _short(active.get(w)),
+                "reserved": _short(reserved.get(w)),
+                "scheduled_count": len(scheduled.get(w) or []),
+            }
+            for w in workers
+        },
+    }
+
+
+@router.get("/ops/celery")
+async def celery_state(
+    _access: None = Depends(_require_ops_access),
+) -> dict[str, Any]:
+    """Что происходит ВНУТРИ Celery прямо сейчас (по каждому воркеру).
+
+    Дополняет /ops/generations: там очередь (Redis LLEN) и результат (БД), здесь
+    — задачи, уже взятые воркерами. Вместе — полная картина конвейера.
+    """
+    snapshot = await asyncio.to_thread(_celery_snapshot)
+    snapshot["queues"] = _queue_depths()
+    snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
+    return snapshot
+
+
+class PurgeRequest(BaseModel):
+    """Что чистим. Пустой queues = все четыре."""
+
+    queues: list[Literal["ingest", "artifacts", "light", "celery"]] | None = None
+    # Ещё и снять задачи, которые УЖЕ выполняются (revoke terminate) — по
+    # умолчанию нет: обычно достаточно вычистить хвост очереди.
+    terminate: bool = False
+
+
+@router.post("/ops/queues/purge")
+async def purge_queues(
+    body: PurgeRequest,
+    session: AsyncSession = Depends(get_db),
+    _access: None = Depends(_require_ops_access),
+) -> dict[str, Any]:
+    """Аварийная чистка застрявших генераций (Celery иногда «залипает»).
+
+    1. Удаляет сообщения из выбранных очередей брокера (queue_purge).
+    2. При ``terminate`` — снимает и уже выполняющиеся задачи (revoke).
+    3. Помечает зависшие pending-артефакты и «вечно обрабатывающиеся» файлы
+       как failed с понятной причиной — карточки в UI перестают крутиться,
+       пользователь может запустить генерацию заново.
+    """
+    from sqlalchemy import update as sa_update
+
+    from llm_wiki.orchestrator.tasks import celery_app
+    from llm_wiki.storage.metadata import ArtifactRecord, FileRecord
+
+    queues = body.queues or ["ingest", "artifacts", "light", "celery"]
+
+    def _purge() -> dict[str, int]:
+        purged: dict[str, int] = {q: 0 for q in queues}
+        try:
+            with celery_app.connection_for_write() as conn:
+                for q in queues:
+                    try:
+                        purged[q] = int(conn.default_channel.queue_purge(q) or 0)
+                    except Exception:  # noqa: BLE001 — очереди могло не быть
+                        purged[q] = 0
+        except Exception as exc:  # noqa: BLE001 — брокер лёг: чистить нечего,
+            # но пометка зависших записей в БД ниже всё равно отработает.
+            logger.warning("ops_purge_broker_unreachable", error=str(exc))
+        return purged
+
+    purged = await asyncio.to_thread(_purge)
+
+    revoked: list[str] = []
+    if body.terminate:
+        def _revoke() -> list[str]:
+            insp = celery_app.control.inspect(timeout=3.0)
+            ids = [
+                t.get("id")
+                for tasks in (insp.active() or {}).values()
+                for t in tasks or []
+                if t.get("id")
+            ]
+            for tid in ids:
+                celery_app.control.revoke(tid, terminate=True)
+            return ids
+
+        revoked = await asyncio.to_thread(_revoke)
+
+    note = "Отменено оператором (очистка очередей)"
+    art = await session.execute(
+        sa_update(ArtifactRecord)
+        .where(ArtifactRecord.status == "pending")
+        .values(status="failed", error=note, finished_at=datetime.now(timezone.utc))
+    )
+    files = await session.execute(
+        sa_update(FileRecord)
+        .where(func.lower(FileRecord.status).in_(list(_FILE_ACTIVE)))
+        .values(status="FAILED", error=note)
+    )
+    await session.commit()
+
+    logger.warning(
+        "ops_queues_purged",
+        queues=queues,
+        purged=purged,
+        revoked=len(revoked),
+        artifacts_failed=art.rowcount,
+        files_failed=files.rowcount,
+    )
+    return {
+        "purged": purged,
+        "revoked": revoked,
+        "artifacts_marked_failed": art.rowcount,
+        "files_marked_failed": files.rowcount,
     }
