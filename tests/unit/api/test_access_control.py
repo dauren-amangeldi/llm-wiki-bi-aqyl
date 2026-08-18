@@ -99,8 +99,16 @@ def _build_app() -> FastAPI:
         return {"open": True}
 
     @app.get("/healthz")
+    @app.get("/health-ams")
+    @app.get("/readiness")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/v1/ops/generations")
+    async def ops_stub() -> dict[str, bool]:
+        # Реальный роут защищён собственным X-Ops-Token; здесь важно одно —
+        # Keycloak-гейт его НЕ трогает (Grafana не умеет OIDC-хендшейк).
+        return {"ops": True}
 
     return app
 
@@ -132,6 +140,21 @@ async def test_gate_open_auth_path_needs_no_token(gate_client: AsyncClient) -> N
 
 async def test_gate_health_probe_open(gate_client: AsyncClient) -> None:
     r = await gate_client.get("/healthz")
+    assert r.status_code == 200
+
+
+async def test_gate_bi_standard_probes_open(gate_client: AsyncClient) -> None:
+    # Стандарт BI: health / readiness / health-ams опрашиваются k8s и AMS без
+    # каких-либо кредов — 401 здесь читается как «приложение лежит».
+    for path in ("/health-ams", "/readiness"):
+        r = await gate_client.get(path)
+        assert r.status_code == 200, f"{path} must be open, got {r.status_code}"
+
+
+async def test_gate_ops_prefix_bypasses_keycloak(gate_client: AsyncClient) -> None:
+    # /api/v1/ops/* несёт собственный X-Ops-Token-гейт — Keycloak-гейт его
+    # пропускает (иначе Grafana никогда не достучится).
+    r = await gate_client.get("/api/v1/ops/generations")
     assert r.status_code == 200
 
 
