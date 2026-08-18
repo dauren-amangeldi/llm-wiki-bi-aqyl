@@ -28,6 +28,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Configure structured JSON logging before anything else runs.
     configure_logging()
 
+    # Deploy diagnostics: did the environment (Vault → pod) actually arrive?
+    # Lengths and hosts only — NEVER secret values. One glance at this line in
+    # Kibana answers "is the Keycloak secret / DB user / Redis URL wired up".
+    logger.info(
+        "startup_config",
+        auth_enabled=settings.auth_enabled,
+        keycloak_url=settings.keycloak_url,
+        keycloak_client_id=settings.keycloak_client_id,
+        keycloak_client_secret_len=len(settings.keycloak_client_secret),
+        public_base_url=settings.public_base_url,
+        postgres_host=settings.postgres_host or "(from DATABASE_URL)",
+        postgres_user=settings.postgres_user,
+        postgres_db=settings.postgres_db,
+        redis=settings.redis_url.rsplit("@", 1)[-1],  # host part only, no creds
+        storage_backend=settings.storage_backend,
+        s3_endpoint=settings.s3_endpoint,
+        s3_access_key_set=bool(settings.s3_access_key),
+        s3_secret_key_len=len(settings.s3_secret_key),
+        openai_api_key_len=len(settings.openai_api_key),
+        ops_token_set=bool(settings.ops_token),
+    )
+
     # Ensure local data directories exist (no-op effect for S3-backed raw/wiki).
     ensure_dirs(settings.raw_dir, settings.wiki_dir)
 
