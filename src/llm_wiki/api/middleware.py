@@ -36,6 +36,13 @@ _OPEN_EXACT = frozenset(
         "/health-ams",
         "/readyz",
         "/readiness",
+        # Те же пробы под /api/ — так их видно через фронт-nginx/ingress
+        # (проксируется только /api), и пробу можно вешать на публичный URL.
+        "/api/health",
+        "/api/healthz",
+        "/api/health-ams",
+        "/api/readyz",
+        "/api/readiness",
         "/docs",
         "/redoc",
         "/openapi.json",

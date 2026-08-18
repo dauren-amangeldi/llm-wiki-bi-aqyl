@@ -83,11 +83,31 @@ async def suggest_council(
     return {"suggestion": await suggest_twin_personas(db, case_id)}
 
 
+# Демо-идентичности: их советы — общая витрина, видны всем и редактируемы
+# всеми (локальный/демо-режим). Всё остальное — строго личное (Д3).
+_DEMO_OWNERS = frozenset({"demo@bi.group", "demo", "anon"})
+
+
+def _visible_to(caller: str, created_by: str | None) -> bool:
+    return created_by is None or created_by in _DEMO_OWNERS or created_by == caller
+
+
+async def _require_session_access(
+    db: AsyncSession, session_id: str, caller: str
+) -> None:
+    """404 незнакомую/чужую сессию (не 403 — не палим существование чужих)."""
+    row = await db.get(TwinSession, session_id)
+    if row is None or not _visible_to(caller, row.created_by):
+        raise HTTPException(status_code=404, detail="twin session not found")
+
+
 @router.get("/twin/sessions")
 async def get_twin_sessions(
-    case_id: str = Query(...), db: AsyncSession = Depends(get_db)
+    case_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> list[dict[str, object]]:
-    """Past councils of a case, newest first."""
+    """Past councils of a case — ONLY the caller's own (demo ones stay shared)."""
     return [
         {
             "id": s.id,
@@ -95,15 +115,19 @@ async def get_twin_sessions(
             "created_at": s.created_at.isoformat(),
         }
         for s in await list_twin_sessions(db, case_id)
+        if _visible_to(caller, s.created_by)
     ]
 
 
 @router.get("/twin/sessions/{session_id}/messages")
 async def get_twin_session_transcript(
-    session_id: str, db: AsyncSession = Depends(get_db)
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> list[dict[str, object]]:
     """Return a session's persisted transcript (user / persona / verdict rows in
     order), so reopening a past council reloads the full conversation."""
+    await _require_session_access(db, session_id, caller)
     return [
         {
             "role": m.role,
@@ -118,9 +142,12 @@ async def get_twin_session_transcript(
 
 @router.delete("/twin/sessions/{session_id}")
 async def delete_twin_session_endpoint(
-    session_id: str, db: AsyncSession = Depends(get_db)
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, bool]:
-    """Delete a council session and its whole transcript."""
+    """Delete a council session and its whole transcript (owner/demo only)."""
+    await _require_session_access(db, session_id, caller)
     if not await delete_twin_session(db, session_id):
         raise HTTPException(status_code=404, detail="twin session not found")
     return {"ok": True}
@@ -132,9 +159,13 @@ class SessionPersonasRequest(BaseModel):
 
 @router.patch("/twin/sessions/{session_id}/personas")
 async def patch_twin_session_personas(
-    session_id: str, body: SessionPersonasRequest, db: AsyncSession = Depends(get_db)
+    session_id: str,
+    body: SessionPersonasRequest,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, bool]:
     """Change the council line-up of an existing session («Изменить состав»)."""
+    await _require_session_access(db, session_id, caller)
     for pid in body.persona_ids:
         if await get_twin_persona(db, pid) is None:
             raise HTTPException(status_code=404, detail=f"Unknown persona: {pid}")
@@ -149,9 +180,14 @@ class ReactionsRequest(BaseModel):
 
 @router.patch("/twin/sessions/{session_id}/messages/{seq}/reactions")
 async def patch_twin_message_reactions(
-    session_id: str, seq: int, body: ReactionsRequest, db: AsyncSession = Depends(get_db)
+    session_id: str,
+    seq: int,
+    body: ReactionsRequest,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, bool]:
     """Persist the user's emoji reactions on one message of the transcript."""
+    await _require_session_access(db, session_id, caller)
     if not await set_twin_message_reactions(db, session_id, seq, body.reactions):
         raise HTTPException(status_code=404, detail="twin message not found")
     return {"ok": True}

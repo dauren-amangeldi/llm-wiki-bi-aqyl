@@ -101,6 +101,9 @@ def _build_app() -> FastAPI:
     @app.get("/healthz")
     @app.get("/health-ams")
     @app.get("/readiness")
+    @app.get("/api/healthz")
+    @app.get("/api/health-ams")
+    @app.get("/api/readiness")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
@@ -146,7 +149,7 @@ async def test_gate_health_probe_open(gate_client: AsyncClient) -> None:
 async def test_gate_bi_standard_probes_open(gate_client: AsyncClient) -> None:
     # Стандарт BI: health / readiness / health-ams опрашиваются k8s и AMS без
     # каких-либо кредов — 401 здесь читается как «приложение лежит».
-    for path in ("/health-ams", "/readiness"):
+    for path in ("/health-ams", "/readiness", "/api/healthz", "/api/health-ams", "/api/readiness"):
         r = await gate_client.get(path)
         assert r.status_code == 200, f"{path} must be open, got {r.status_code}"
 

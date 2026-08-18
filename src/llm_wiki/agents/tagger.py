@@ -25,8 +25,11 @@ logger = structlog.get_logger(__name__)
 # Structured output — OpenAI enforces the schema so the payload is valid JSON.
 _TAGS_SCHEMA = {
     "type": "object",
-    "properties": {"tags": {"type": "array", "items": {"type": "string"}}},
-    "required": ["tags"],
+    "properties": {
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "description": {"type": "string"},
+    },
+    "required": ["tags", "description"],
     "additionalProperties": False,
 }
 _TAXONOMY_BLOCK = "\n".join(f"- {name}: {desc}" for name, desc in CASE_TAGS)
@@ -62,10 +65,12 @@ async def gather_case_text(case: "CaseRecord", session: "AsyncSession") -> str:
 
 async def classify_case_tags(
     title: str, content: str, llm: LLMClient, *, file_id: str = "tagger"
-) -> list[str]:
-    """Return the relevant taxonomy tags for a case. Cleaned (unknown tags
-    dropped). Never raises — returns [] on any failure, so auto-tagging can't
-    break case creation or the backfill."""
+) -> tuple[list[str], str]:
+    """Return (taxonomy tags, short case description) in one LLM call.
+
+    Tags are cleaned (unknown dropped); description is 2–3 business sentences
+    («у кейсов одинаковое описание» — карточки показывали мок). Never raises —
+    ([], "") on any failure, so auto-tagging can't break case creation."""
     try:
         prompt = llm.load_prompt(
             "case_tags",
@@ -83,7 +88,8 @@ async def classify_case_tags(
             schema_name="case_tags",
         )
         parsed = json.loads(text)
-        return clean_tags(parsed.get("tags", []))
+        description = str(parsed.get("description") or "").strip()[:600]
+        return clean_tags(parsed.get("tags", [])), description
     except Exception as exc:  # noqa: BLE001
         logger.warning("autotag_classify_failed", file_id=file_id, error=str(exc))
-        return []
+        return [], ""

@@ -160,6 +160,7 @@ async def list_cases(
             "tags": r.tags or [],
             "owner": r.owner,
             "scope": r.scope or "internal",
+            "description": r.description or "",
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
@@ -203,6 +204,7 @@ async def create_case(
         "tags": case.tags,
         "owner": case.owner,
         "scope": case.scope,
+        "description": case.description or "",
         "created_at": case.created_at.isoformat() if case.created_at else None,
     }
 
@@ -219,6 +221,9 @@ async def update_case(
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
     _assert_can_edit(row, caller)
+    # Состав материалов изменился → LLM-описание устарело: сбрасываем, а
+    # _dispatch_autotag ниже перегенерит его по новому составу.
+    docs_changed = set(body.doc_ids) != set(row.doc_ids or [])
     await db.execute(
         sa_update(CaseRecord)
         .where(CaseRecord.id == case_id)
@@ -228,6 +233,7 @@ async def update_case(
             tags=clean_tags(body.tags),
             sensitive=body.sensitive,
             scope=body.scope,
+            **({"description": ""} if docs_changed else {}),
             updated_at=datetime.now(timezone.utc),
         )
     )

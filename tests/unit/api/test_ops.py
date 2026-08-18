@@ -110,3 +110,33 @@ async def test_ops_generations_requires_token_when_configured(
         assert ok.status_code == 200
     finally:
         settings.ops_token = old
+
+
+async def test_purge_marks_stuck_generations_failed(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """POST /ops/queues/purge: pending-артефакты и активные файлы → failed с
+    понятной причиной (даже когда брокер недоступен, как в тестах)."""
+    db_session.add(
+        ArtifactRecord(
+            artifact_id="a-stuck", document_id="doc-9", kind="report",
+            versions=[], status="pending",
+        )
+    )
+    db_session.add(
+        FileRecord(file_id="f-stuck", original_name="stuck.pdf", status="PROCESSING")
+    )
+    await db_session.commit()
+
+    resp = await client.post("/api/v1/ops/queues/purge", json={})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["artifacts_marked_failed"] >= 1
+    assert data["files_marked_failed"] >= 1
+    assert set(data["purged"].keys()) == {"ingest", "artifacts", "light", "celery"}
+
+    db_session.expire_all()
+    art = await db_session.get(ArtifactRecord, "a-stuck")
+    fr = await db_session.get(FileRecord, "f-stuck")
+    assert art is not None and art.status == "failed" and "Отменено" in (art.error or "")
+    assert fr is not None and fr.status == "FAILED"
