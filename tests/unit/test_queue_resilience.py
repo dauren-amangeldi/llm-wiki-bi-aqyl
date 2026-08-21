@@ -37,6 +37,25 @@ def _point_settings_at_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Конфигурация очередей
+# ---------------------------------------------------------------------------
+
+
+def test_queue_priority_puts_user_facing_first() -> None:
+    """Прод-воркер без -Q слушает все очереди; при queue_order_strategy=
+    priority порядок task_queues = строгий приоритет (BRPOP берёт первую
+    непустую). Артефакты и light обязаны стоять раньше ingest — иначе
+    генерации снова встанут за завалом PDF."""
+    from llm_wiki.orchestrator.tasks import celery_app
+
+    opts = celery_app.conf.broker_transport_options
+    assert opts.get("queue_order_strategy") == "priority"
+    names = [q.name for q in celery_app.conf.task_queues]
+    assert names.index("artifacts") < names.index("ingest")
+    assert names.index("light") < names.index("ingest")
+
+
+# ---------------------------------------------------------------------------
 # Janitor
 # ---------------------------------------------------------------------------
 

@@ -62,10 +62,11 @@ celery_app.conf.update(
     # task_create_missing_queues auto-declared before this list existed
     # (a bare Queue("x") would inherit the default "light" exchange and all
     # three queues would collapse onto one binding).
+    # ORDER MATTERS (queue_order_strategy=priority): user-facing first.
     task_queues=(
-        Queue("ingest", exchange="ingest", routing_key="ingest"),
         Queue("artifacts", exchange="artifacts", routing_key="artifacts"),
         Queue("light", exchange="light", routing_key="light"),
+        Queue("ingest", exchange="ingest", routing_key="ingest"),
         # Legacy drain: tasks enqueued BEFORE the queue split landed on an env
         # (e.g. a file uploaded minutes before the deploy) sit in the old
         # default "celery" queue — keep consuming it so that tail completes
@@ -88,7 +89,16 @@ celery_app.conf.update(
     # Redis re-delivers an un-acked message after this many seconds. Must exceed
     # the longest possible pipeline run so a slow (not dead) task is not
     # re-queued while still processing.
-    broker_transport_options={"visibility_timeout": 3600},
+    # queue_order_strategy=priority: a worker consuming SEVERAL queues (the
+    # prod deployment has no -Q) polls them in task_queues order — Redis BRPOP
+    # pops the first non-empty list. Artifacts/light therefore jump ahead of an
+    # ingest backlog: a user watching the «генерируется…» spinner never waits
+    # behind 30 queued PDFs. Ops declined split worker deployments (replicas
+    # only), so this ordering is what keeps user-facing latency sane.
+    broker_transport_options={
+        "visibility_timeout": 3600,
+        "queue_order_strategy": "priority",
+    },
     # Nobody reads Celery results (the API polls Postgres) — don't write them
     # to Redis at all. During the 2026-08-20 incident the result backend was
     # one more thing filling Redis while the queue looped.
