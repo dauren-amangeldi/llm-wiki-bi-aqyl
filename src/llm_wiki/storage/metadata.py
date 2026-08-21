@@ -64,6 +64,7 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS owner varchar",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS scope varchar NOT NULL DEFAULT 'internal'",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS description varchar NOT NULL DEFAULT ''",
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS ingest_attempts integer NOT NULL DEFAULT 0",
     # One row per (document, kind) is the store's contract — enforce it so two
     # concurrent generations can't insert duplicates (check-then-insert race
     # became real once artifact workers run in parallel). Dedupe first: keep an
@@ -279,6 +280,10 @@ class FileRecord(Base):
     # Human-readable failure reason, set when status becomes FAILED. Surfaced in
     # GET /files/{id} and the status stream so the cause is visible without logs.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Broker delivery counter (poison-pill cap): incremented on every task
+    # delivery incl. crash re-deliveries that bypass max_retries; the ingest
+    # task refuses the file after INGEST_MAX_DELIVERIES. Reset on clean finish.
+    ingest_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
     # Access control (sensitive files): indexed but owner-scoped — excluded from
     # the shared wiki/search and only retrievable by their owner.
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
