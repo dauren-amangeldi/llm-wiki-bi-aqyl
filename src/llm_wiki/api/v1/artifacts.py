@@ -126,6 +126,14 @@ async def _generate_and_store(
     return record.artifact_id, content
 
 
+# A pending artifact younger than this is considered a LIVE generation —
+# repeat clicks return the same id instead of enqueuing another heavy task.
+# Above the worker deadline (480 s) so a running generation is never doubled;
+# expired/queued-and-lost rows age past it and become regenerable (the janitor
+# usually fails them sooner).
+_PENDING_DEDUP_WINDOW_S = 600
+
+
 async def _start_generation(
     session: AsyncSession, kind: str, document_id: str, language: str,
     requested_by: str | None = None,
@@ -137,14 +145,41 @@ async def _start_generation(
     polls ``GET /artifacts/{id}`` until ``status`` is ``ready``/``failed``. If the
     broker is unreachable (e.g. dev without a worker) we fall back to generating
     synchronously so the feature still works.
+
+    Dedup: during the 2026-08-20 incident stuck «pending» rows made users spam
+    the generate button, each click enqueuing another multi-minute LLM task.
+    A fresh pending row now short-circuits to the same artifact id.
     """
+    from datetime import datetime, timedelta, timezone
+
+    existing = await artifacts_store.find_by_kind(session, document_id, kind)
+    if existing is not None and existing.status == "pending":
+        ts = existing.updated_at or existing.created_at
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts is not None and datetime.now(timezone.utc) - ts < timedelta(
+            seconds=_PENDING_DEDUP_WINDOW_S
+        ):
+            return {
+                "artifact_id": existing.artifact_id,
+                "kind": kind,
+                "status": "pending",
+            }
+
     record = await artifacts_store.create_pending_artifact(
         session, document_id=document_id, kind=kind, requested_by=requested_by
     )
     try:
         from llm_wiki.orchestrator.tasks import generate_artifact
 
-        generate_artifact.delay(record.artifact_id, document_id, kind, language)
+        # expires: a message not picked up within 30 min is dropped by the
+        # worker — after an outage the queue drains instantly instead of
+        # burning LLM budget on generations nobody is waiting for anymore
+        # (the janitor has already failed their rows).
+        generate_artifact.apply_async(
+            args=(record.artifact_id, document_id, kind, language),
+            expires=1800,
+        )
     except Exception:  # noqa: BLE001 — broker down: generate inline as a fallback
         try:
             await _generate_and_store(session, kind, document_id, language)
