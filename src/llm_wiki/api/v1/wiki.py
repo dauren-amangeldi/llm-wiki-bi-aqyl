@@ -21,6 +21,11 @@ class WikiPageSummary(BaseModel):
     updated_at: str
     backlinks_count: int
     sensitive: bool = False
+    # BUG-19 (дубли): кейс, которому принадлежит страница, и сколько ЕЩЁ его
+    # страниц схлопнуто под этим хитом («ещё N страниц этого кейса»).
+    case_id: str | None = None
+    case_title: str | None = None
+    collapsed_count: int = 0
 
 
 class WikiPageDetail(BaseModel):
@@ -63,6 +68,39 @@ def _plain_snippet(content: str, length: int = 200) -> str:
     return text[:length] + ("…" if len(text) > length else "")
 
 
+async def _slug_to_case_map() -> dict[str, tuple[str, str]]:
+    """slug вики-страницы → (case_id, case_title) через files.created_pages и
+    cases.doc_ids. Объёмы малы (сотни строк без тел) — два простых SELECT'а;
+    при росте до десятков тысяч заменить на junction-таблицу."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from llm_wiki.api.deps import _engine
+    from llm_wiki.storage.metadata import CaseRecord, FileRecord
+
+    factory = async_sessionmaker(bind=_engine, expire_on_commit=False)
+    async with factory() as session:
+        files = (
+            await session.execute(select(FileRecord.file_id, FileRecord.created_pages))
+        ).all()
+        cases = (
+            await session.execute(select(CaseRecord.id, CaseRecord.title, CaseRecord.doc_ids))
+        ).all()
+    file_to_case: dict[str, tuple[str, str]] = {}
+    for cid, ctitle, doc_ids in cases:
+        for fid in doc_ids or []:
+            file_to_case.setdefault(fid, (cid, ctitle))
+    slug_case: dict[str, tuple[str, str]] = {}
+    for fid, created in files:
+        case = file_to_case.get(fid)
+        if case is None:
+            continue
+        for slug in created or []:
+            if slug:
+                slug_case.setdefault(slug, case)
+    return slug_case
+
+
 def _summary(
     slug: str,
     content: str,
@@ -101,22 +139,34 @@ async def list_wiki_pages(
     term = (q or "").strip()
     if term:
         results: list[WikiPageSummary] = []
-        for hit in wiki_store.keyword_search(term, limit=limit + offset, caller=caller):
+        # BUG-19 (дубли): один кейс всплывал 4–5 раз отдельными страницами.
+        # Восстанавливаем цепочку slug → файл (created_pages) → кейс (doc_ids)
+        # и схлопываем: первый (самый релевантный) хит кейса остаётся, у него
+        # счётчик «ещё N страниц»; безкейсовые страницы идут как есть.
+        slug_case = await _slug_to_case_map()
+        seen_case_idx: dict[str, int] = {}
+        for hit in wiki_store.keyword_search(term, limit=(limit + offset) * 3, caller=caller):
             content = wiki_store.get_page(hit.slug, caller=caller)
             if content is None:
                 continue
+            case = slug_case.get(hit.slug)
+            if case is not None and case[0] in seen_case_idx:
+                results[seen_case_idx[case[0]]].collapsed_count += 1
+                continue
             meta = wiki_store.get_page_meta(hit.slug, caller=caller)
             updated = meta.updated_at if meta else datetime.now(timezone.utc)
-            results.append(
-                _summary(
-                    hit.slug,
-                    content,
-                    updated,
-                    snippet=hit.snippet,
-                    sensitive=bool(meta and meta.sensitive),
-                    stored_title=meta.title if meta else None,
-                )
+            summary = _summary(
+                hit.slug,
+                content,
+                updated,
+                snippet=hit.snippet,
+                sensitive=bool(meta and meta.sensitive),
+                stored_title=meta.title if meta else None,
             )
+            if case is not None:
+                summary.case_id, summary.case_title = case
+                seen_case_idx[case[0]] = len(results)
+            results.append(summary)
         return results[offset : offset + limit]
 
     results = []
