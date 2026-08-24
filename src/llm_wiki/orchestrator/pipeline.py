@@ -148,6 +148,12 @@ async def process_file(file_id: str) -> None:
             if "WRITTEN" not in completed:
                 logger.info("pipeline_step_start", file_id=file_id, step="WRITTEN")
                 writer = WriterAgent(llm)
+                from pathlib import Path as _Path
+
+                # BUG-17: настоящее имя материала для цитат в вики-страницах.
+                source_display_name = (
+                    record.display_name or _Path(record.original_name).stem
+                )
                 created_pages: list[str] = []
                 updated_pages: list[str] = []
                 # Автонейминг материала: первый LLM-заголовок из этого прогона.
@@ -161,7 +167,7 @@ async def process_file(file_id: str) -> None:
                     # graph — no heading index, no backlinks — and its slug is
                     # namespaced by file_id so it can't collide with a public page.
                     private_slug = f"private-{file_id}"
-                    page = await writer.create_page(file_text, file_id)
+                    page = await writer.create_page(file_text, file_id, source_name=source_display_name)
                     generated_title = generated_title or page.title
                     _save_wiki_page(
                         page, slug=private_slug, sensitive=True, owner=record.owner
@@ -178,7 +184,7 @@ async def process_file(file_id: str) -> None:
                     created_pages.append(private_slug)
                 elif not search_results:
                     # Scenario A — brand-new topic
-                    page = await writer.create_page(file_text, file_id)
+                    page = await writer.create_page(file_text, file_id, source_name=source_display_name)
                     generated_title = generated_title or page.title
                     _save_wiki_page(page)
                     sync_chunks_for_page(
@@ -206,7 +212,7 @@ async def process_file(file_id: str) -> None:
                         previous_outgoing_by_slug: dict[str, list[str]] = {
                             p.slug: extract_outgoing_links(p.content) for p in existing
                         }
-                        pages_out = await writer.update_pages(file_text, existing, file_id)
+                        pages_out = await writer.update_pages(file_text, existing, file_id, source_name=source_display_name)
                         if pages_out:
                             generated_title = generated_title or pages_out[0].title
                         for p in pages_out:
@@ -228,7 +234,7 @@ async def process_file(file_id: str) -> None:
                             )
                     else:
                         # Search found headings but files are absent — create new
-                        page = await writer.create_page(file_text, file_id)
+                        page = await writer.create_page(file_text, file_id, source_name=source_display_name)
                         generated_title = generated_title or page.title
                         _save_wiki_page(page)
                         sync_chunks_for_page(

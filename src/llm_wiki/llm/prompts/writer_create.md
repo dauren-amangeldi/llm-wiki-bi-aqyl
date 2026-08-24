@@ -10,7 +10,7 @@ wiki page from a source document.
 Если входной файл на другом языке — переведи содержимое на {language}.
 Имена собственные, термины и аббревиатуры оставляй как есть (в скобках можно дать перевод).
 
-## Source Document
+## Source Document: «{source_name}»
 
 {raw_content}
 
@@ -34,7 +34,7 @@ Rules:
   - `summary`: one sentence describing the page, in {language}
 - After the frontmatter, start with `# Title` followed by the full page content
 - Use ## for top-level sections, ### for subsections
-- Cite the source document where claims are made
+- Cite the source document where claims are made. Write citations as «[Источник: {source_name}]» — use the material's REAL name given above, NEVER the literal words "Source Document".
 - Do NOT add [[backlinks]] yet — those are added by a separate step
 - Content must be factually grounded in the source document
 - Do not invent information not present in the source
