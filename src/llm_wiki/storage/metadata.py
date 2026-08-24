@@ -1024,6 +1024,26 @@ class TwinPreset(Base):
     persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class MaterialNote(Base):
+    """Личная заметка пользователя к материалу/кейсу (BUG-24).
+
+    Раньше «Мои заметки» жили только в localStorage браузера — терялись при
+    смене устройства и не переживали чистку. Ключ — (owner, doc_id): заметка
+    приватна для автора; doc_id — материал ИЛИ кейс (case-*).
+    """
+
+    __tablename__ = "material_notes"
+
+    owner: Mapped[str] = mapped_column(String, primary_key=True)
+    doc_id: Mapped[str] = mapped_column(String, primary_key=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class AdvisorConsultation(Base):
     """Персистентная консультация AI-советника (BUG-03).
 
