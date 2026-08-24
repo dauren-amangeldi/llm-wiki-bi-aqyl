@@ -71,12 +71,13 @@ async def test_report_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_report_clamps_out_of_range_pct(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = json.dumps({
         "summary": "s", "key_insight": "k", "risks": [], "recommendations": [],
-        "relevance_pct": 250, "citation_coverage_pct": -10,
+        "relevance_pct": 250, "citation_coverage_pct": -10,  # мусор от LLM
         "effect_horizon": "1–3 мес", "source_language": "EN",
     })
     out = await _gen("report", resp, monkeypatch)
-    assert out["relevance_pct"] == 100
-    assert out["citation_coverage_pct"] == 0
+    # BUG-26: псевдометрики удалены — даже если LLM их прислал, в выдачу не идут.
+    assert "relevance_pct" not in out
+    assert "citation_coverage_pct" not in out
 
 
 async def test_test_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,7 +114,7 @@ async def test_cards_clamps_badges(monkeypatch: pytest.MonkeyPatch) -> None:
         "action_minutes": 100000, "relevance_pct": -5, "source_language": "EN",
     })
     out = await _gen("card", resp, monkeypatch)
-    assert out["relevance_pct"] == 0
+    assert "relevance_pct" not in out  # BUG-26
     assert out["action_minutes"] == 480
     assert len(out["steps"]) == 6
 
@@ -153,7 +154,7 @@ async def test_infographic_returns_generated_image_and_fields(monkeypatch: pytes
     assert out["key_insight"].startswith("Уровень 3–4")
     assert [s["value"] for s in out["stats"]] == ["20 млн $", "35%", "4"]
     assert out["implementation_path"] == ["Assess", "Map", "Control", "Optimize"]
-    assert out["relevance_pct"] == 94
+    assert "relevance_pct" not in out  # BUG-26
     assert out["sources_count"] == 1  # from the mocked _load_bodies
     assert out["source_line"] == "Страница-источник"
 
@@ -163,9 +164,10 @@ async def test_infographic_falls_back_to_svg_when_image_fails(monkeypatch: pytes
     # Fallback path: the self-contained SVG still renders with the same fields.
     assert "image_url" not in out
     assert out["svg"].startswith("<svg")
-    assert "ГЛАВНЫЙ ИНСАЙТ" in out["svg"] and "94%" in out["svg"]
+    assert "ГЛАВНЫЙ ИНСАЙТ" in out["svg"]
+    assert "94%" not in out["svg"]  # BUG-26: плитки «Релевантность» в SVG нет
     assert "УПРАВЛЕНИЕ РИСКАМИ" in out["svg"]  # eyebrow uppercased
-    assert out["relevance_pct"] == 94
+    assert "relevance_pct" not in out
     assert out["sources_count"] == 1
 
 

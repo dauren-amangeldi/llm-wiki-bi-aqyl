@@ -52,8 +52,6 @@ _REPORT_SCHEMA = _obj(
         "key_insight": {"type": "string"},
         "risks": {"type": "array", "items": {"type": "string"}},
         "recommendations": {"type": "array", "items": {"type": "string"}},
-        "relevance_pct": {"type": "integer"},
-        "citation_coverage_pct": {"type": "integer"},
         "effect_horizon": {"type": "string"},
         "source_language": {"type": "string"},
     },
@@ -62,8 +60,6 @@ _REPORT_SCHEMA = _obj(
         "key_insight",
         "risks",
         "recommendations",
-        "relevance_pct",
-        "citation_coverage_pct",
         "effect_horizon",
         "source_language",
     ],
@@ -82,7 +78,6 @@ _CARDS_SCHEMA = _obj(
         "risk": {"type": "string"},
         "action": {"type": "string"},
         "action_minutes": {"type": "integer"},
-        "relevance_pct": {"type": "integer"},
         "source_language": {"type": "string"},
     },
     [
@@ -92,7 +87,6 @@ _CARDS_SCHEMA = _obj(
         "risk",
         "action",
         "action_minutes",
-        "relevance_pct",
         "source_language",
     ],
 )
@@ -150,12 +144,11 @@ _INFOGRAPHIC_SCHEMA = _obj(
             ),
         },
         "implementation_path": {"type": "array", "items": {"type": "string"}},
-        "relevance_pct": {"type": "integer"},
         "source_language": {"type": "string"},
     },
     [
         "eyebrow", "headline", "key_insight", "stats",
-        "implementation_path", "relevance_pct", "source_language",
+        "implementation_path", "source_language",
     ],
 )
 
@@ -275,7 +268,6 @@ async def generate_content(
                 if isinstance(s, dict)
             ][:3],
             "implementation_path": [str(s) for s in (data.get("implementation_path") or [])],
-            "relevance_pct": _clamp_pct(data.get("relevance_pct")),
             "source_language": str(data.get("source_language") or ""),
             "sources_count": max(1, len(source_titles)),
             "source_line": " · ".join(source_titles[:3]) or title,
@@ -317,7 +309,8 @@ def _clamp_pct(value: Any) -> int:
 
 def _finalize_cards(data: dict[str, Any]) -> dict[str, Any]:
     """Sanity clamps for the card deck (badges must stay renderable)."""
-    data["relevance_pct"] = _clamp_pct(data.get("relevance_pct"))
+    # BUG-26: псевдометрика — даже если модель её прислала, в выдачу не идёт.
+    data.pop("relevance_pct", None)
     try:
         minutes = int(data.get("action_minutes"))
     except (TypeError, ValueError):
@@ -329,10 +322,11 @@ def _finalize_cards(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _finalize_report(data: dict[str, Any], source_titles: list[str]) -> dict[str, Any]:
-    """Programmatic report fields: real sources, clamped %, reading time."""
+    """Programmatic report fields: real sources, honest reading time."""
+    # BUG-26: выдуманные проценты не проходят в выдачу.
+    data.pop("relevance_pct", None)
+    data.pop("citation_coverage_pct", None)
     data["sources"] = source_titles
-    data["relevance_pct"] = _clamp_pct(data.get("relevance_pct"))
-    data["citation_coverage_pct"] = _clamp_pct(data.get("citation_coverage_pct"))
     text_parts = [
         str(data.get("summary") or ""),
         str(data.get("key_insight") or ""),
@@ -519,7 +513,6 @@ def _render_infographic_svg(
     eyebrow = html.escape(str(data.get("eyebrow") or "").upper()[:40])
     insight = str(data.get("key_insight") or "")
     path_steps = [str(s).strip() for s in (data.get("implementation_path") or []) if str(s).strip()][:6]
-    relevance = _clamp_pct(data.get("relevance_pct"))
     lang = html.escape(str(data.get("source_language") or "").upper()[:4] or "—")
     sources_count = max(1, len(source_titles))
     steps_count = len(path_steps)
@@ -548,8 +541,9 @@ def _render_infographic_svg(
     p.append(f'<text x="52" y="{h - 40}" fill="{_IG_MUTED}" font-size="13">{source_line}</text>')
 
     # ── Right column: 2×2 stat cards ──
+    # BUG-26: «Релевантность %» убрана — LLM её выдумывал (88→92 на том же
+    # тексте). Остались только честно вычисляемые значения.
     cards = [
-        (f"{relevance}%", "Релевантность"),
         (str(sources_count), "Источников"),
         (str(steps_count), "Шагов внедрения"),
         (lang, "Язык оригинала"),
