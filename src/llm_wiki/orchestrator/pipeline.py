@@ -315,6 +315,11 @@ async def process_file(file_id: str) -> None:
             # ----------------------------------------------------------------
             await _transition(session, file_id, "DONE")
             await update_file_status(session, file_id, "DONE")
+            # Б1: событие в ленту уведомлений (+ «Кейс обработан», если это был
+            # последний материал кейса). Best-effort внутри — не роняет пайплайн.
+            from llm_wiki.storage import notifications as notif
+
+            await notif.notify_file_done(session, file_id)
             logger.info("pipeline_done", file_id=file_id)
 
         except Exception as exc:
@@ -322,6 +327,11 @@ async def process_file(file_id: str) -> None:
             # Persist the reason so it is visible in the API / status stream / UI,
             # not only in the logs.
             await update_file_status(session, file_id, "FAILED", error=str(exc))
+            # Б1: «Ошибка» в ленту сразу (ретрай, если он будет, перепишет ту же
+            # строку в «Готово» — upsert по entity).
+            from llm_wiki.storage import notifications as notif
+
+            await notif.notify_file_failed(session, file_id, str(exc))
             raise
         finally:
             # Always close the SDK client within the active event loop so that

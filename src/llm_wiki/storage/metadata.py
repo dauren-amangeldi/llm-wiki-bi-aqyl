@@ -1082,6 +1082,71 @@ class MaterialNote(Base):
     )
 
 
+class NotificationRecord(Base):
+    """Событие ленты уведомлений (Б1): терминальные исходы генераций и
+    социальные события (смена приватности кейса).
+
+    «В работе» здесь НЕ хранится — живые строки панель получает из статусов
+    ``files``/``artifacts`` на момент запроса (один источник правды, рассинхрон
+    невозможен). Генерационные события обновляются IN-PLACE: одна строка на
+    ``(section, entity_id, family)``, так что успешный повтор превращает
+    «Ошибка» в «Готово», а не наслаивает шум. ``recipient=NULL`` — событие
+    видно всем (broadcast); иначе — только адресату.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recipient: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Кто совершил действие (социальные события: «X сделал кейс общим»).
+    actor: Mapped[str | None] = mapped_column(String, nullable=True)
+    section: Mapped[str] = mapped_column(String, nullable=False)  # cases|materials|artifacts
+    family: Mapped[str] = mapped_column(String, nullable=False)  # generation|privacy
+    event: Mapped[str] = mapped_column(String, nullable=False)  # done|failed|published|privated
+    entity_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Имя сущности на момент события (материал переименуют — история честная).
+    title: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # Причина ошибки и т.п. — человекочитаемый хвост строки.
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Контекст клика: {case_id?, document_id?, kind?} — куда вести из строки.
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_notifications_entity_family",
+            "section",
+            "entity_id",
+            "family",
+            unique=True,
+        ),
+    )
+
+
+class NotificationRead(Base):
+    """Отметка «прочитано» — на сервере, не в localStorage (переживает смену
+    устройства; счётчик на колокольчике одинаков во всех вкладках). Broadcast-
+    события общие для всех, поэтому чтение — отдельная строка на пользователя."""
+
+    __tablename__ = "notification_reads"
+
+    notification_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_key: Mapped[str] = mapped_column(String, primary_key=True)
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class AdvisorConsultation(Base):
     """Персистентная консультация AI-советника (BUG-03).
 

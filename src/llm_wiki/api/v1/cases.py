@@ -227,6 +227,7 @@ async def update_case(
     # Состав материалов изменился → LLM-описание устарело: сбрасываем, а
     # _dispatch_autotag ниже перегенерит его по новому составу.
     docs_changed = set(body.doc_ids) != set(row.doc_ids or [])
+    privacy_changed = bool(row.sensitive) != bool(body.sensitive)
     await db.execute(
         sa_update(CaseRecord)
         .where(CaseRecord.id == case_id)
@@ -247,6 +248,18 @@ async def update_case(
         db, body.doc_ids, sensitive=body.sensitive, owner=row.owner
     )
     await db.commit()
+    # Б1: смена приватности — социальное событие в ленту («X сделал кейс
+    # общим»), broadcast. Best-effort внутри — не роняет сохранение.
+    if privacy_changed:
+        from llm_wiki.storage import notifications as notif
+
+        await notif.notify_case_privacy(
+            db,
+            case_id=case_id,
+            title=body.title.strip() or row.title,
+            published=not body.sensitive,
+            actor=caller,
+        )
     _dispatch_autotag(case_id)
     return {"ok": True}
 
@@ -339,6 +352,32 @@ async def delete_case(
             and_(ChatRecord.scope_type == "case", ChatRecord.scope_id == case_id)
         )
     )
+    # Уведомления удалённых сущностей — призраки (клик ведёт в никуда): чистим
+    # события кейса и его осиротевших материалов/артефактов той же транзакцией.
+    from llm_wiki.storage.metadata import NotificationRead, NotificationRecord
+
+    gone_ids = [case_id, *orphaned]
+    stale_notif_ids = (
+        await db.scalars(
+            select(NotificationRecord.id).where(
+                or_(
+                    NotificationRecord.entity_id.in_(gone_ids),
+                    text("meta->>'document_id' = ANY(:gone)").bindparams(gone=gone_ids),
+                )
+            )
+        )
+    ).all()
+    if stale_notif_ids:
+        await db.execute(
+            sa_delete(NotificationRead).where(
+                NotificationRead.notification_id.in_(stale_notif_ids)
+            )
+        )
+        await db.execute(
+            sa_delete(NotificationRecord).where(
+                NotificationRecord.id.in_(stale_notif_ids)
+            )
+        )
     await db.delete(row)
     await db.commit()
 
