@@ -141,3 +141,5 @@ async def test_absent_field_means_all_documents(
         )
     assert resp.status_code == 200
     assert sorted(captured["documents"]) == sorted(file_ids)
+    # Цитата несёт физический файл-источник страницы (page-0 создана f-src-0).
+    assert resp.json()["citations"][0]["file_name"] == "doc0"

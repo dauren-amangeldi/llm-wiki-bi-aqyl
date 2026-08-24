@@ -150,6 +150,8 @@ async def process_file(file_id: str) -> None:
                 writer = WriterAgent(llm)
                 created_pages: list[str] = []
                 updated_pages: list[str] = []
+                # Автонейминг материала: первый LLM-заголовок из этого прогона.
+                generated_title: str | None = None
 
                 if record.sensitive:
                     # Private file — create a private, owner-only wiki page. The
@@ -160,6 +162,7 @@ async def process_file(file_id: str) -> None:
                     # namespaced by file_id so it can't collide with a public page.
                     private_slug = f"private-{file_id}"
                     page = await writer.create_page(file_text, file_id)
+                    generated_title = generated_title or page.title
                     _save_wiki_page(
                         page, slug=private_slug, sensitive=True, owner=record.owner
                     )
@@ -176,6 +179,7 @@ async def process_file(file_id: str) -> None:
                 elif not search_results:
                     # Scenario A — brand-new topic
                     page = await writer.create_page(file_text, file_id)
+                    generated_title = generated_title or page.title
                     _save_wiki_page(page)
                     sync_chunks_for_page(
                         chunk_store=chunk_store,
@@ -203,6 +207,8 @@ async def process_file(file_id: str) -> None:
                             p.slug: extract_outgoing_links(p.content) for p in existing
                         }
                         pages_out = await writer.update_pages(file_text, existing, file_id)
+                        if pages_out:
+                            generated_title = generated_title or pages_out[0].title
                         for p in pages_out:
                             _save_wiki_page(p)
                             sync_chunks_for_page(
@@ -223,6 +229,7 @@ async def process_file(file_id: str) -> None:
                     else:
                         # Search found headings but files are absent — create new
                         page = await writer.create_page(file_text, file_id)
+                        generated_title = generated_title or page.title
                         _save_wiki_page(page)
                         sync_chunks_for_page(
                             chunk_store=chunk_store,
@@ -244,10 +251,22 @@ async def process_file(file_id: str) -> None:
                 # Persist page lists to DB
                 from sqlalchemy import update as sa_update
 
+                # Автонейминг: LLM-заголовок страницы становится человеческим
+                # названием материала. coalesce — ручное переименование
+                # (display_name уже задан) пайплайн не затирает.
+                from sqlalchemy import func as sa_func
+
                 await session.execute(
                     sa_update(FileRecord)
                     .where(FileRecord.file_id == file_id)
-                    .values(created_pages=created_pages, updated_pages=updated_pages)
+                    .values(
+                        created_pages=created_pages,
+                        updated_pages=updated_pages,
+                        display_name=sa_func.coalesce(
+                            FileRecord.display_name,
+                            (generated_title or "").strip() or None,
+                        ),
+                    )
                 )
                 await session.commit()
                 await _transition(session, file_id, "WRITTEN")

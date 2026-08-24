@@ -65,6 +65,13 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS scope varchar NOT NULL DEFAULT 'internal'",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS description varchar NOT NULL DEFAULT ''",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS ingest_attempts integer NOT NULL DEFAULT 0",
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS display_name varchar",
+    # Бэкфилл автонейминга: у уже обработанных файлов display_name берётся из
+    # заголовка их вики-страницы. Идемпотентно (только NULL) — ручные
+    # переименования не затираются.
+    "UPDATE files f SET display_name = w.title FROM wiki_fts w"
+    " WHERE f.display_name IS NULL AND w.title IS NOT NULL AND w.title <> ''"
+    " AND f.created_pages::jsonb ? w.slug",
     # One row per (document, kind) is the store's contract — enforce it so two
     # concurrent generations can't insert duplicates (check-then-insert race
     # became real once artifact workers run in parallel). Dedupe first: keep an
@@ -284,6 +291,10 @@ class FileRecord(Base):
     # delivery incl. crash re-deliveries that bypass max_retries; the ingest
     # task refuses the file after INGEST_MAX_DELIVERIES. Reset on clean finish.
     ingest_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    # Человеческое название материала (автонейминг): LLM-заголовок вики-страницы
+    # («audio_2026-04-07…» → «Выход BI Group на рынок Грузии»). original_name
+    # остаётся честным именем файла для скачивания. NULL → показываем stem.
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     # Access control (sensitive files): indexed but owner-scoped — excluded from
     # the shared wiki/search and only retrievable by their owner.
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -76,6 +76,11 @@ class Citation(BaseModel):
     # next to the citation (click → open that case). None when it's not in a case.
     case_id: str | None = None
     case_title: str | None = None
+    # Физический файл-источник страницы (ревизия: «обе цитаты называются
+    # одинаково — не видно, какой это файл: конспект? аудио?»). Только для
+    # страниц, СОЗДАННЫХ файлом; общая страница нескольких файлов остаётся без
+    # метки — там принадлежность неоднозначна.
+    file_name: str | None = None
 
 
 class DocAskResponse(BaseModel):
@@ -295,8 +300,18 @@ async def ask_case(
     # A case answer only retrieves from this case's own documents, so every
     # citation belongs to this case — label them with it for the source chip.
     citations = [Citation(anchor=s.slug, title=s.title, quote=s.quote) for s in result.sources]
+    # Slug → физический файл (только по created_pages — однозначная связь).
+    from pathlib import Path as _Path
+
+    slug_to_file: dict[str, str] = {}
+    for d in documents:
+        label = d.display_name or _Path(d.original_name).stem
+        for created_slug in d.created_pages or []:
+            if created_slug:
+                slug_to_file[created_slug] = label
     for c in citations:
         c.case_id, c.case_title = case.id, case.title
+        c.file_name = slug_to_file.get(c.anchor)
     response = DocAskResponse(
         answer=result.answer,
         citations=citations,

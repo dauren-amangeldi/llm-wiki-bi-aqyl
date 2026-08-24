@@ -97,7 +97,10 @@ async def test_rename_document_updates_name_and_wiki_title(
 
     db_session.expire_all()
     fr = await db_session.get(FileRecord, "doc-1")
-    assert fr is not None and fr.original_name == "Годовой отчёт.md"  # extension kept
+    # Новый контракт: rename правит display_name; original_name остаётся
+    # честным именем файла (для скачивания оригинала).
+    assert fr is not None and fr.display_name == "Годовой отчёт"
+    assert fr.original_name == "Report.md"
 
 
 async def test_rename_document_rejects_empty_title(client: AsyncClient) -> None:

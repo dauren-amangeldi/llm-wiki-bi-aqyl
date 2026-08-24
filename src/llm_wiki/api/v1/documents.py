@@ -99,7 +99,9 @@ def _content_type_for(name: str) -> Literal["pdf", "markdown", "docx", "text", "
 
 def _file_record_to_material(fr: FileRecord) -> Material:
     """Convert a FileRecord ORM row into a Material response schema."""
-    name = Path(fr.original_name).stem
+    # Автонейминг (BUG-обс. ревизии): человеческое название из LLM,
+    # фолбэк — имя файла без расширения.
+    name = fr.display_name or Path(fr.original_name).stem
     content_type = _content_type_for(fr.original_name)
     return Material(
         document_id=fr.file_id,
@@ -346,8 +348,9 @@ async def rename_document(
     if not new_name:
         raise HTTPException(status_code=400, detail="title must not be empty")
 
-    ext = Path(fr.original_name).suffix
-    fr.original_name = f"{new_name}{ext}"
+    # Переименование правит ТОЛЬКО отображаемое имя; original_name остаётся
+    # честным именем файла (скачивание оригинала, расширение).
+    fr.display_name = new_name
     await db.commit()
     # Retitle the file's own wiki page(s); merged/shared pages stay as they are.
     wiki_store.set_pages_title(list(fr.created_pages or []), new_name)
