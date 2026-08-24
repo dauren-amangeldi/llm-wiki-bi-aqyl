@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from typing import Literal
 
+import structlog
 from fastapi import Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select, update as sa_update
@@ -13,6 +14,8 @@ from llm_wiki.api.v1 import router
 from llm_wiki.storage import wiki_store
 from llm_wiki.storage.metadata import CaseRecord, ChunkEmbedding, FileRecord
 from llm_wiki.taxonomy import CASE_TAGS, clean_tags
+
+logger = structlog.get_logger(__name__)
 
 
 def _assert_can_edit(row: CaseRecord, caller: str) -> None:
@@ -254,13 +257,106 @@ async def delete_case(
     db: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
 ) -> dict[str, bool]:
-    """Delete a case by id."""
+    """Delete a case AND everything it brought into the knowledge base (BUG-02).
+
+    До этого удалялась одна строка кейса: материалы, вики-страницы и
+    эмбеддинги продолжали жить и находиться поиском — для приватного кейса
+    это утечка «удалённого» содержимого.
+
+    Синхронно (одна транзакция — из поиска кейс исчезает атомарно с ответом):
+      - осиротевшие файлы кейса (не входящие в doc_ids других кейсов),
+        их вики-страницы (created_pages) из wiki_fts и их chunk_embeddings;
+      - артефакты кейса и его осиротевших документов;
+      - твин-сессии кейса с сообщениями;
+      - история чата кейса;
+      - сама строка кейса.
+    Фоново (light-очередь): только S3-объекты — внешнее медленное хранилище
+    не должно держать HTTP-ответ; на поиск оно не влияет.
+
+    ``updated_pages`` не трогаем: файл лишь дополнял чужую страницу — она
+    существовала до него и принадлежит другому материалу.
+    """
+    from sqlalchemy import delete as sa_delete, text
+
+    from llm_wiki.storage.metadata import ArtifactRecord, ChatRecord, TwinMessage, TwinSession
+
     row = await db.get(CaseRecord, case_id)
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
     _assert_can_edit(row, caller)
+
+    file_ids = [d for d in (row.doc_ids or []) if d]
+
+    # Файл сиротеет, только если ни один ДРУГОЙ кейс его не содержит.
+    orphaned: list[str] = []
+    if file_ids:
+        other_cases = (
+            await db.scalars(select(CaseRecord).where(CaseRecord.id != case_id))
+        ).all()
+        used_elsewhere = {d for c in other_cases for d in (c.doc_ids or [])}
+        orphaned = [f for f in file_ids if f not in used_elsewhere]
+
+    slugs: list[str] = []
+    raw_keys: list[str] = []
+    for fid in orphaned:
+        fr = await db.get(FileRecord, fid)
+        if fr is None:
+            continue
+        slugs.extend(s for s in (fr.created_pages or []) if s)
+        if fr.raw_key:
+            raw_keys.append(fr.raw_key)
+        elif fr.original_name and "." in fr.original_name:
+            # Legacy-строки без raw_key лежали по пути raw/<file_id><ext>.
+            from llm_wiki.storage.object_store import legacy_raw_key
+
+            raw_keys.append(legacy_raw_key(fid, "." + fr.original_name.rsplit(".", 1)[1]))
+
+    if slugs:
+        await db.execute(
+            text("DELETE FROM wiki_fts WHERE slug = ANY(:slugs)"), {"slugs": slugs}
+        )
+        await db.execute(sa_delete(ChunkEmbedding).where(ChunkEmbedding.slug.in_(slugs)))
+    if orphaned:
+        # Ремень к подтяжкам: чанки, чей slug не попал в created_pages
+        # (страница перезаписана другим прогоном), находятся по file_id.
+        await db.execute(
+            sa_delete(ChunkEmbedding).where(ChunkEmbedding.file_id.in_(orphaned))
+        )
+        await db.execute(
+            sa_delete(ArtifactRecord).where(ArtifactRecord.document_id.in_(orphaned))
+        )
+        await db.execute(sa_delete(FileRecord).where(FileRecord.file_id.in_(orphaned)))
+
+    await db.execute(sa_delete(ArtifactRecord).where(ArtifactRecord.document_id == case_id))
+    session_ids = (
+        await db.scalars(select(TwinSession.id).where(TwinSession.case_id == case_id))
+    ).all()
+    if session_ids:
+        await db.execute(sa_delete(TwinMessage).where(TwinMessage.session_id.in_(session_ids)))
+        await db.execute(sa_delete(TwinSession).where(TwinSession.id.in_(session_ids)))
+    await db.execute(
+        sa_delete(ChatRecord).where(
+            and_(ChatRecord.scope_type == "case", ChatRecord.scope_id == case_id)
+        )
+    )
     await db.delete(row)
     await db.commit()
+
+    if raw_keys:
+        try:
+            from llm_wiki.orchestrator.tasks import purge_case_objects
+
+            purge_case_objects.delay(raw_keys)
+        except Exception:  # noqa: BLE001 — брокер лёг: сироты в S3 доберёт
+            # scripts/purge_orphans.py; из поиска содержимое уже исчезло.
+            logger.warning("case_delete_s3_purge_not_queued", case_id=case_id)
+    logger.info(
+        "case_deleted_cascade",
+        case_id=case_id,
+        files_deleted=len(orphaned),
+        pages_deleted=len(slugs),
+        twin_sessions_deleted=len(session_ids),
+    )
     return {"ok": True}
 
 

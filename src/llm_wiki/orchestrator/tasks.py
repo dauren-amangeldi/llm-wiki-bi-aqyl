@@ -48,6 +48,7 @@ celery_app.conf.update(
         "llm_wiki.orchestrator.tasks.backfill_case_tags": {"queue": "light"},
         "llm_wiki.orchestrator.tasks.run_weekly_audit": {"queue": "light"},
         "llm_wiki.orchestrator.tasks.sweep_stuck_generations": {"queue": "light"},
+        "llm_wiki.orchestrator.tasks.purge_case_objects": {"queue": "light"},
     },
     # Anything unrouted (new tasks) lands in "light" — visible immediately,
     # can't silently starve behind ingestion.
@@ -686,6 +687,37 @@ def backfill_case_tags(force: bool = False) -> dict[str, object]:
         autotag_case.delay(cid, force)
     logger.info("backfill_case_tags_queued", count=len(ids), force=force)
     return {"queued": len(ids), "force": force}
+
+
+@celery_app.task(
+    name="llm_wiki.orchestrator.tasks.purge_case_objects",
+    soft_time_limit=120,
+    time_limit=180,
+)
+def purge_case_objects(raw_keys: list[str]) -> dict[str, int]:
+    """Удалить S3-объекты каскадно удалённого кейса (BUG-02, фоновая часть).
+
+    Всё БД-содержимое кейса уже удалено синхронно в DELETE /cases/{id} — здесь
+    только внешнее медленное хранилище. Идемпотентно: удаление отсутствующего
+    ключа не ошибка; недоступный store — просто лог (доберёт
+    scripts/purge_orphans.py --purge-s3).
+    """
+    from llm_wiki.logging_config import configure_logging
+    from llm_wiki.storage.object_store import get_object_store
+
+    configure_logging()
+    deleted = 0
+    failed = 0
+    store = get_object_store()
+    for key in raw_keys:
+        try:
+            store.delete(key)
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.warning("purge_case_object_failed", key=key, error=str(exc))
+    logger.info("purge_case_objects_done", deleted=deleted, failed=failed)
+    return {"deleted": deleted, "failed": failed}
 
 
 # Janitor windows. Started generations get the deadline plus a margin; queued
