@@ -49,18 +49,6 @@ async def guidelines() -> dict:
     return {"cards": []}
 
 
-@router.get("/metrics")
-async def metrics(db: AsyncSession = Depends(get_db)) -> dict:
-    """Return real document count; all other counters are zero."""
-    total = await db.scalar(select(func.count()).select_from(FileRecord))
-    return {
-        "total_documents": total or 0,
-        "total_queries_today": 0,
-        "total_artifacts": 0,
-        "last_activity": None,
-    }
-
-
 
 # GET /files/{file_id}/raw now lives in api/routes.py — the real endpoint adds
 # owner/sensitive access control + all file types. Removed from the mock layer.
