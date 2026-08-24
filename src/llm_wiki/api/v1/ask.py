@@ -58,7 +58,10 @@ class AskBody(BaseModel):
     language: Literal["ru", "en", "kk"] = "ru"
     mode: Literal["library", "expert", "advisor"] = "expert"
     # Case ask only: restrict retrieval to this subset of the case's documents
-    # (the panel's source checkboxes). None/empty = use every document.
+    # (the panel's source checkboxes). Semantics matter (BUG-01):
+    #   None → field not sent (older clients) → answer over every document;
+    #   []   → the user unchecked EVERYTHING → refuse instead of silently
+    #          answering over the whole case.
     doc_ids: list[str] | None = None
 
 
@@ -204,14 +207,43 @@ async def ask_case(
         raise HTTPException(404, "Case not found")
 
     doc_ids = list(case.doc_ids or [])
-    # Honour the panel's source selection: keep only the requested docs that
-    # actually belong to this case (guards against pointing at another case's
-    # files). An empty/None selection means "all sources".
-    if body.doc_ids:
-        allowed = set(doc_ids)
-        selected = [d for d in body.doc_ids if d in allowed]
-        if selected:
-            doc_ids = selected
+    # Honour the panel's source selection (BUG-01). The old guard here was
+    # `if body.doc_ids:` — an explicit empty selection ([] is falsy) silently
+    # fell through to the WHOLE case, which is exactly the UAT repro
+    # («Контекст: 0 из 3» → полный ответ с цитатами). Distinguish:
+    #   None      → field absent → all documents (backwards compatible);
+    #   []        → everything unchecked → honest refusal, no LLM call;
+    #   [ids]     → intersect with this case's documents; an intersection of
+    #               zero (stale client state, foreign ids) refuses too rather
+    #               than quietly widening back to the full case.
+    if body.doc_ids is not None:
+        selected = [d for d in body.doc_ids if d in set(doc_ids)]
+        if not selected:
+            refuse = {
+                "ru": "Источники не выбраны. Отметьте хотя бы один материал в панели "
+                      "слева — и я отвечу по нему.",
+                "kk": "Дереккөздер таңдалмаған. Сол жақ панельден кемінде бір материалды "
+                      "белгілеңіз — сол бойынша жауап беремін.",
+                "en": "No sources are selected. Check at least one material in the left "
+                      "panel and I will answer from it.",
+            }
+            response = DocAskResponse(
+                answer=refuse.get(body.language, refuse["en"]),
+                citations=[],
+                follow_ups=[],
+                insufficient_evidence=True,
+                contact=None,
+            )
+            await _persist_turn(
+                db,
+                user_key=user_key,
+                scope_type="case",
+                scope_id=case_id,
+                question=body.question,
+                response=response,
+            )
+            return response
+        doc_ids = selected
     documents: list[FileRecord] = []
     for did in doc_ids:
         fr = await db.get(FileRecord, did)
