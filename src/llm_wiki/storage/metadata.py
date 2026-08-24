@@ -1024,6 +1024,47 @@ class TwinPreset(Base):
     persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class AdvisorConsultation(Base):
+    """Персистентная консультация AI-советника (BUG-03).
+
+    До этого весь флоу «уточнение → понимание → анализ → рекомендация» жил
+    только в памяти вкладки: F5 безвозвратно терял результат полутора минут
+    работы. Строка обновляется на каждом шаге, так что консультация
+    восстанавливается ровно с того места, где её прервали.
+    """
+
+    __tablename__ = "advisor_consultations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Первые ~100 символов ситуации — заголовок в списке «Мои консультации».
+    title: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    situation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    language: Mapped[str] = mapped_column(String(5), nullable=False, default="ru")
+    # questions | understanding | analysis | recommendation — шаг флоу фронта.
+    step: Mapped[str] = mapped_column(String, nullable=False, default="questions")
+    decision_type_label: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # [{id, text, options, multi}] — как отдаёт generate_questions.
+    questions: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # {question_id: [выбранные опции / свободный текст]} — стейт фронта as-is.
+    answers: Mapped[dict[str, list[str]]] = mapped_column(JSON, default=dict)
+    understanding: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Итоговый AdvisorBrief (форма фронта) — присылается клиентом после
+    # финального SSE-события /advisor.
+    brief: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # "" | decided | need_info | postponed | rejected
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class TwinSession(Base):
     """A single Twins council run — which case, which personas."""
 
