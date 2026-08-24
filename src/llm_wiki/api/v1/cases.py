@@ -360,6 +360,70 @@ async def delete_case(
     return {"ok": True}
 
 
+@router.get("/cases/{case_id}/similar")
+async def similar_cases(
+    case_id: str,
+    limit: int = Query(3, ge=1, le=10),
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> list[dict[str, object]]:
+    """«Похоже на»: кейсы с близким содержимым (BUG-16 — фронт давно зовёт
+    этот эндпоинт, но получал 404 при каждом клике по карточке).
+
+    Сходство — косинус между СРЕДНИМИ эмбеддингами чанков кейсов (центроиды
+    считает pgvector: avg(embedding)). Приватные кейсы других людей не
+    участвуют; свои — участвуют.
+    """
+    row = await db.get(CaseRecord, case_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Case not found")
+    doc_ids = [d for d in (row.doc_ids or []) if d]
+    if not doc_ids:
+        return []
+
+    from sqlalchemy import text as sa_text
+
+    # Один SQL: центроид текущего кейса против центроидов остальных кейсов.
+    # JOIN кейс→файлы через jsonb-принадлежность file_id к doc_ids.
+    rows = (
+        await db.execute(
+            sa_text(
+                """
+                WITH case_files AS (
+                    SELECT c.id AS case_id, c.title, c.sensitive, c.owner, f.value AS file_id
+                    FROM cases c, jsonb_array_elements_text(c.doc_ids::jsonb) AS f(value)
+                ),
+                centroids AS (
+                    SELECT cf.case_id, cf.title, cf.sensitive, cf.owner,
+                           avg(ce.embedding) AS centroid
+                    FROM case_files cf
+                    JOIN chunk_embeddings ce ON ce.file_id = cf.file_id
+                    GROUP BY cf.case_id, cf.title, cf.sensitive, cf.owner
+                )
+                SELECT o.case_id, o.title,
+                       1 - (o.centroid <=> me.centroid) AS similarity
+                FROM centroids me
+                JOIN centroids o ON o.case_id <> me.case_id
+                WHERE me.case_id = :case_id
+                  AND (NOT o.sensitive OR o.owner = :caller)
+                ORDER BY o.centroid <=> me.centroid
+                LIMIT :limit
+                """
+            ),
+            {"case_id": case_id, "caller": caller, "limit": limit},
+        )
+    ).all()
+    return [
+        {
+            "id": r.case_id,
+            "title": r.title,
+            "similarity_pct": max(0, min(100, round(float(r.similarity) * 100))),
+        }
+        for r in rows
+        if float(r.similarity) > 0.35  # ниже — не «похоже», а случайные соседи
+    ]
+
+
 @router.delete("/cases/{case_id}/documents/{document_id}")
 async def unlink_document(
     case_id: str,
