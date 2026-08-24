@@ -1035,6 +1035,33 @@ class TwinPreset(Base):
     persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class FeedbackRecord(Base):
+    """Фидбэк пользователей: 👍/👎 и «Сообщить об ошибке» (BUG-08/09).
+
+    До этого обе кнопки были пустышками (менялся только CSS-класс) — петля
+    качества не собиралась вовсе. Каждая реакция — строка; агрегирование и
+    админ-выгрузка — отдельной задачей.
+    """
+
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # chat_answer | artifact | wiki_page | … — тип сущности, о которой фидбэк.
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # up | down | NULL (репорт без оценки).
+    vote: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Причина из «Сообщить об ошибке» (ключ i18n или свободный текст).
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Контекст: фрагмент ответа/вопрос — чтобы редактор понял, о чём речь.
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class MaterialNote(Base):
     """Личная заметка пользователя к материалу/кейсу (BUG-24).
 
