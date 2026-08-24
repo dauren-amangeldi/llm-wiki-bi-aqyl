@@ -150,7 +150,10 @@ async def list_generations(
     )
 
     return {
-        "queues": _queue_depths(),
+        # В поток: синхронный Redis-клиент (connect + 4×LLEN, до ~2 с) в
+        # async-хендлере стопорит ВЕСЬ event loop — на проде опросы Grafana
+        # задерживали ответы readiness-пробы, и kubelet валил под по таймауту.
+        "queues": await asyncio.to_thread(_queue_depths),
         "items": items[:limit],
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -207,7 +210,7 @@ async def celery_state(
     — задачи, уже взятые воркерами. Вместе — полная картина конвейера.
     """
     snapshot = await asyncio.to_thread(_celery_snapshot)
-    snapshot["queues"] = _queue_depths()
+    snapshot["queues"] = await asyncio.to_thread(_queue_depths)
     snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
     return snapshot
 

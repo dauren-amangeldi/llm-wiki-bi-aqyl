@@ -1,8 +1,10 @@
 """FastAPI application entry point."""
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -182,6 +184,17 @@ async def _check_object_store() -> None:
     await asyncio.to_thread(_probe)
 
 
+# Один раунд проверок на 5 секунд: kubelet, AMS и балансировщик опрашивают
+# readiness каждый со своим периодом — без кэша каждый опрос гонял S3/БД/Redis
+# заново, и при медленной зависимости проба валилась по timeoutSeconds
+# (инцидент 22.08: «не успевает отработать Readiness по таймауту»).
+_READYZ_TTL_S = 5.0
+_readyz_cache: dict[str, Any] = {"at": 0.0, "body": None, "code": 200}
+# Потолок на ОДНУ проверку; все три идут параллельно, так что худший ответ
+# (без кэша) ≈ этому значению. Держим ниже timeoutSeconds пробы.
+_READYZ_CHECK_TIMEOUT_S = 3.0
+
+
 @app.get("/readyz", tags=["system"])
 @app.get("/readiness", tags=["system"])
 @app.get("/api/readyz", tags=["system"])
@@ -192,8 +205,14 @@ async def readiness() -> JSONResponse:
     Checks Postgres, Redis and the object store concurrently and returns 503
     (with a per-dependency breakdown) if any is unavailable, so the orchestrator
     can hold traffic until the pod is truly ready. Vector search lives inside
-    Postgres (pgvector), so the postgres check covers it.
+    Postgres (pgvector), so the postgres check covers it. Results are cached
+    for a few seconds — probes answer instantly instead of re-probing the
+    world on every poll.
     """
+    now = time.monotonic()
+    if _readyz_cache["body"] is not None and now - _readyz_cache["at"] < _READYZ_TTL_S:
+        return JSONResponse(_readyz_cache["body"], status_code=_readyz_cache["code"])
+
     checks = {
         "postgres": _check_postgres,
         "redis": _check_redis,
@@ -203,7 +222,7 @@ async def readiness() -> JSONResponse:
 
     async def _run(name: str, fn: Callable[[], Awaitable[None]]) -> None:
         try:
-            await asyncio.wait_for(fn(), timeout=5.0)
+            await asyncio.wait_for(fn(), timeout=_READYZ_CHECK_TIMEOUT_S)
             results[name] = "ok"
         except Exception as exc:  # noqa: BLE001 - report, don't raise
             results[name] = f"error: {type(exc).__name__}: {exc}"
@@ -213,7 +232,6 @@ async def readiness() -> JSONResponse:
     ready = all(v == "ok" for v in results.values())
     if not ready:
         logger.warning("readyz_not_ready", checks=results)
-    return JSONResponse(
-        {"status": "ready" if ready else "not_ready", "checks": results},
-        status_code=200 if ready else 503,
-    )
+    body = {"status": "ready" if ready else "not_ready", "checks": results}
+    _readyz_cache.update(at=time.monotonic(), body=body, code=200 if ready else 503)
+    return JSONResponse(body, status_code=200 if ready else 503)
