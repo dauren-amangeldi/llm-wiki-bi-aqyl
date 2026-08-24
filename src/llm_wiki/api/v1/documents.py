@@ -56,6 +56,9 @@ class Material(BaseModel):
     classification: str | None = None
     possible_duplicate: bool = False
     sensitive: bool = False
+    # Причина падения обработки (status=FAILED) — карточка ошибки на дашборде
+    # показывает её вместе с кнопкой «Повторить» (Б1, макет v2).
+    error: str | None = None
 
 
 class Dossier(BaseModel):
@@ -122,6 +125,7 @@ def _file_record_to_material(fr: FileRecord) -> Material:
         classification=None,
         possible_duplicate=False,
         sensitive=fr.sensitive,
+        error=fr.error,
     )
 
 

@@ -154,6 +154,25 @@ async def list_cases(
     if limit is not None:
         stmt = stmt.offset(offset).limit(limit)
     rows = (await db.scalars(stmt)).all()
+
+    # Счётчик артефактов на карточку (макет v2): артефакты самого кейса + его
+    # материалов. Одним GROUP BY по всей таблице (она маленькая) — без N+1.
+    from llm_wiki.storage.metadata import ArtifactRecord
+
+    art_rows = (
+        await db.execute(
+            select(ArtifactRecord.document_id, func.count()).group_by(
+                ArtifactRecord.document_id
+            )
+        )
+    ).all()
+    art_by_doc: dict[str, int] = {doc: int(n) for doc, n in art_rows}
+
+    def _artifact_count(r: CaseRecord) -> int:
+        return art_by_doc.get(r.id, 0) + sum(
+            art_by_doc.get(d, 0) for d in (r.doc_ids or [])
+        )
+
     return [
         {
             "id": r.id,
@@ -164,6 +183,7 @@ async def list_cases(
             "owner": r.owner,
             "scope": r.scope or "internal",
             "description": r.description or "",
+            "artifact_count": _artifact_count(r),
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows

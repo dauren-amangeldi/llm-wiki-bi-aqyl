@@ -250,6 +250,47 @@ async def get_file_status(
     )
 
 
+@router.post(
+    "/files/{file_id}/retry",
+    summary="Re-run ingestion for a FAILED file",
+    tags=["files"],
+)
+async def retry_file(
+    file_id: str,
+    session: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> dict[str, str]:
+    """Повторить обработку упавшего файла (кнопка «Повторить», Б1).
+
+    Исходник уже лежит в объект-сторе — переобработка не требует повторной
+    загрузки. Только для терминального FAILED (активную не трогаем) и только
+    владельцем (файлы без владельца — legacy/публичные — может любой). Сбрасываем
+    статус и poison-cap счётчик; state_history сохраняется — пайплайн продолжит
+    с недостроенной стадии, а не с нуля.
+    """
+    record = await get_file_record(session, file_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"File {file_id!r} not found")
+    if record.owner and record.owner != caller:
+        raise HTTPException(status_code=403, detail="Only the uploader can retry this file")
+    if record.status.upper() != "FAILED":
+        raise HTTPException(
+            status_code=409, detail=f"File is {record.status!r}, only FAILED can be retried"
+        )
+
+    from sqlalchemy import update as sa_update
+
+    await session.execute(
+        sa_update(FileRecord)
+        .where(FileRecord.file_id == file_id)
+        .values(status="RECEIVED", error=None, ingest_attempts=0)
+    )
+    await session.commit()
+    task = process_file_task.delay(file_id)
+    logger.info("file_retry_queued", file_id=file_id, task_id=str(task.id))
+    return {"file_id": file_id, "task_id": str(task.id), "status": "queued"}
+
+
 @router.get(
     "/files/{file_id}/raw",
     summary="View or download the original uploaded file",
