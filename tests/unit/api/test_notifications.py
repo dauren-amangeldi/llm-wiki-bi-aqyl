@@ -192,6 +192,39 @@ async def test_get_notifications_live_and_read_flow(
 
 
 @pytest.mark.asyncio
+async def test_cards_generate_emits_artifact_done(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Карточки генерятся синхронно (не через Celery) — раньше по ним события
+    «артефакт готов» не было вовсе. Теперь _generate_and_store эмитит его сам."""
+    from unittest.mock import AsyncMock, patch
+
+    db_session.add(FileRecord(file_id="f-card", original_name="c.pdf", status="DONE",
+                              display_name="Материал для карточек"))
+    await db_session.commit()
+
+    with patch("llm_wiki.api.v1.artifacts.generate_content",
+               new=AsyncMock(return_value={"cards": []})), \
+         patch("llm_wiki.llm.client.LLMClient") as _llm:
+        _llm.return_value.aclose = AsyncMock()
+        resp = await client.post(
+            "/api/v1/cards/generate",
+            json={"document_id": "f-card", "languages": ["ru"]},
+        )
+    assert resp.status_code == 200
+
+    rows = (await db_session.scalars(
+        select(NotificationRecord).where(NotificationRecord.section == "artifacts")
+    )).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.event, row.meta["kind"]) == ("done", "card")
+    assert row.meta["document_id"] == "f-card"
+    assert row.title == "Материал для карточек"
+    assert row.recipient == USER
+
+
+@pytest.mark.asyncio
 async def test_create_case_from_existing_materials_emits_ready(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:

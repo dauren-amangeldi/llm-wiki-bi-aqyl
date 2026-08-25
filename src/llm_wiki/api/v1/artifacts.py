@@ -109,7 +109,8 @@ async def export_artifact_prepare(
 
 
 async def _generate_and_store(
-    session: AsyncSession, kind: str, document_id: str, language: str
+    session: AsyncSession, kind: str, document_id: str, language: str,
+    requested_by: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     from llm_wiki.llm.client import LLMClient
 
@@ -122,6 +123,19 @@ async def _generate_and_store(
         await llm.aclose()
     record = await artifacts_store.upsert_artifact(
         session, document_id=document_id, kind=kind, language=language, content=content
+    )
+    # Б1: синхронный путь (карточки; и inline-фолбэк при недоступном брокере)
+    # НЕ проходит через Celery-таск, где эмитится «артефакт готов» — поэтому
+    # событие в ленту нужно эмитить здесь, иначе по карточкам уведомления нет.
+    from llm_wiki.storage import notifications as notif
+
+    await notif.notify_artifact_event(
+        session,
+        artifact_id=record.artifact_id,
+        document_id=document_id,
+        kind=kind,
+        event="done",
+        requested_by=requested_by,
     )
     return record.artifact_id, content
 
@@ -182,7 +196,9 @@ async def _start_generation(
         )
     except Exception:  # noqa: BLE001 — broker down: generate inline as a fallback
         try:
-            await _generate_and_store(session, kind, document_id, language)
+            await _generate_and_store(
+                session, kind, document_id, language, requested_by=requested_by
+            )
         except ArtifactError as exc:
             await artifacts_store.mark_failed(session, record.artifact_id, str(exc))
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -210,7 +226,7 @@ async def studio_generate(
 async def cards_generate(
     body: dict[str, Any],
     session: AsyncSession = Depends(get_db),
-    _caller: str = Depends(get_user_key),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, Any]:
     document_id = str(body.get("document_id") or "")
     langs = body.get("languages")
@@ -218,7 +234,9 @@ async def cards_generate(
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
     try:
-        artifact_id, _ = await _generate_and_store(session, "card", document_id, language)
+        artifact_id, _ = await _generate_and_store(
+            session, "card", document_id, language, requested_by=caller
+        )
     except ArtifactError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"artifact_id": artifact_id, "kind": "card"}
