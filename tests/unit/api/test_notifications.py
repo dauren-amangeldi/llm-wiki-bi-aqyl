@@ -225,6 +225,32 @@ async def test_cards_generate_emits_artifact_done(
 
 
 @pytest.mark.asyncio
+async def test_cards_generate_empty_case_emits_failed(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Генерация карточек для кейса БЕЗ материалов: 422 + событие «ошибка» в
+    ленте с человеческой причиной (раньше по синхронному пути события не было)."""
+    db_session.add(CaseRecord(id="case-empty", title="Пустой кейс", doc_ids=[], owner=USER))
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/cards/generate",
+        json={"document_id": "case-empty", "languages": ["ru"]},
+    )
+    assert resp.status_code == 422
+    assert "нет материалов" in resp.json()["detail"].lower()
+
+    rows = (await db_session.scalars(
+        select(NotificationRecord).where(NotificationRecord.section == "artifacts")
+    )).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.event, row.meta["kind"]) == ("failed", "card")
+    assert row.detail and "нет материалов" in row.detail.lower()
+    assert row.recipient == USER
+
+
+@pytest.mark.asyncio
 async def test_create_case_from_existing_materials_emits_ready(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:

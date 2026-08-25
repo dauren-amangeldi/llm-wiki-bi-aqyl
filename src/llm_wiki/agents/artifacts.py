@@ -232,7 +232,17 @@ async def generate_content(
     title, slugs = await _title_and_slugs(session, document_id)
     content_text, source_titles = _load_bodies(slugs)
     if not content_text.strip():
-        raise ArtifactError("No source content available to generate from.")
+        # Человеческая причина в ленту/тост (не английский технический текст).
+        # Различаем «материалов нет вовсе» и «есть, но ещё без содержимого».
+        if not slugs:
+            raise ArtifactError(
+                "В кейсе нет материалов — добавьте хотя бы один материал, "
+                "чтобы создать артефакт."
+            )
+        raise ArtifactError(
+            "Материалы ещё обрабатываются или пусты — дождитесь завершения "
+            "обработки и попробуйте снова."
+        )
 
     prompt_name, schema, schema_name = _PROMPT_BY_KIND[kind]
     prompt = llm.load_prompt(

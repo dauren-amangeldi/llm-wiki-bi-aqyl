@@ -108,6 +108,32 @@ async def export_artifact_prepare(
     return {}
 
 
+async def _notify_artifact_failed(
+    session: AsyncSession,
+    *,
+    artifact_id: str,
+    document_id: str,
+    kind: str,
+    requested_by: str | None,
+    error: str,
+) -> None:
+    """Пометить артефакт упавшим И положить «ошибка» в ленту — синхронные пути
+    (карточки, inline-фолбэк) сами не проходят через Celery-таск, где это
+    делается. Так ошибка «нет материалов» видна и в тосте, и в колокольчике."""
+    await artifacts_store.mark_failed(session, artifact_id, error)
+    from llm_wiki.storage import notifications as notif
+
+    await notif.notify_artifact_event(
+        session,
+        artifact_id=artifact_id,
+        document_id=document_id,
+        kind=kind,
+        event="failed",
+        requested_by=requested_by,
+        detail=error,
+    )
+
+
 async def _generate_and_store(
     session: AsyncSession, kind: str, document_id: str, language: str,
     requested_by: str | None = None,
@@ -200,7 +226,10 @@ async def _start_generation(
                 session, kind, document_id, language, requested_by=requested_by
             )
         except ArtifactError as exc:
-            await artifacts_store.mark_failed(session, record.artifact_id, str(exc))
+            await _notify_artifact_failed(
+                session, artifact_id=record.artifact_id, document_id=document_id,
+                kind=kind, requested_by=requested_by, error=str(exc),
+            )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"artifact_id": record.artifact_id, "kind": kind, "status": "ready"}
     return {"artifact_id": record.artifact_id, "kind": kind, "status": "pending"}
@@ -233,11 +262,20 @@ async def cards_generate(
     language = str(langs[0]) if isinstance(langs, list) and langs else "ru"
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
+    # Заводим pending-строку заранее — на провале есть artifact_id для «ошибки»
+    # в ленте (и клик из уведомления ведёт на упавший артефакт).
+    record = await artifacts_store.create_pending_artifact(
+        session, document_id=document_id, kind="card", requested_by=caller
+    )
     try:
         artifact_id, _ = await _generate_and_store(
             session, "card", document_id, language, requested_by=caller
         )
     except ArtifactError as exc:
+        await _notify_artifact_failed(
+            session, artifact_id=record.artifact_id, document_id=document_id,
+            kind="card", requested_by=caller, error=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"artifact_id": artifact_id, "kind": "card"}
 

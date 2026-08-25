@@ -171,10 +171,21 @@ async def test_infographic_falls_back_to_svg_when_image_fails(monkeypatch: pytes
     assert out["sources_count"] == 1
 
 
-async def test_no_source_content_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_no_materials_raises_human_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пустой кейс (нет материалов вовсе) — человеческая причина в исключении."""
     monkeypatch.setattr(art, "_title_and_slugs", AsyncMock(return_value=("T", [])))
     monkeypatch.setattr(art, "_load_bodies", lambda _slugs: ("", []))
-    with pytest.raises(ArtifactError, match="No source content"):
+    with pytest.raises(ArtifactError, match="нет материалов"):
+        await generate_content(object(), _StubLLM("{}"), kind="report", document_id="d", language="ru")
+
+
+async def test_materials_without_content_raises_processing_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Материалы есть, но без обработанного текста — другая причина (ещё в работе)."""
+    monkeypatch.setattr(art, "_title_and_slugs", AsyncMock(return_value=("T", ["slug-1"])))
+    monkeypatch.setattr(art, "_load_bodies", lambda _slugs: ("", []))
+    with pytest.raises(ArtifactError, match="обрабатываются"):
         await generate_content(object(), _StubLLM("{}"), kind="report", document_id="d", language="ru")
 
 
