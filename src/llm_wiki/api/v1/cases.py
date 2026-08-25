@@ -218,6 +218,13 @@ async def create_case(
         db, case.doc_ids, sensitive=case.sensitive, owner=case.owner
     )
     await db.commit()
+    # Б1/пункт 2: если кейс собран из уже готовых (дедуп) материалов — событие
+    # «кейс готов» сразу, потому что пайплайн по ним не запустится и иначе кейс
+    # вообще не появился бы в ленте. Если материалы ещё обрабатываются — молчит,
+    # пайплайн эмитит «готов» по завершении.
+    from llm_wiki.storage import notifications as notif
+
+    await notif.notify_case_ready_if_done(db, case.id)
     _dispatch_autotag(case.id)
     return {
         "id": case.id,
@@ -268,11 +275,11 @@ async def update_case(
         db, body.doc_ids, sensitive=body.sensitive, owner=row.owner
     )
     await db.commit()
+    from llm_wiki.storage import notifications as notif
+
     # Б1: смена приватности — социальное событие в ленту («X сделал кейс
     # общим»), broadcast. Best-effort внутри — не роняет сохранение.
     if privacy_changed:
-        from llm_wiki.storage import notifications as notif
-
         await notif.notify_case_privacy(
             db,
             case_id=case_id,
@@ -280,6 +287,12 @@ async def update_case(
             published=not body.sensitive,
             actor=caller,
         )
+    # Б1/пункт 2: материалы прикрепляются к кейсу именно этим PUT (модалка
+    # создания: пустой кейс → загрузка → addDocsToCase). Если все они уже
+    # готовы (в т.ч. дедуп-материалы) — «кейс готов» сразу; иначе молчим,
+    # пайплайн добьёт по завершении обработки.
+    if docs_changed:
+        await notif.notify_case_ready_if_done(db, case_id)
     _dispatch_autotag(case_id)
     return {"ok": True}
 

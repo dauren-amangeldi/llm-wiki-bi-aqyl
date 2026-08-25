@@ -192,6 +192,60 @@ async def test_get_notifications_live_and_read_flow(
 
 
 @pytest.mark.asyncio
+async def test_create_case_from_existing_materials_emits_ready(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Пункт 2: кейс из УЖЕ готовых (дедуп) материалов сразу даёт «кейс готов»
+    (пайплайн по ним не запускается), а по самим материалам — ничего."""
+    db_session.add(FileRecord(file_id="f-existing", original_name="e.pdf", status="DONE"))
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/cases",
+        json={"title": "Кейс из готовых", "doc_ids": ["f-existing"],
+              "sensitive": False, "tags": []},
+    )
+    assert resp.status_code == 201
+
+    rows = (await db_session.scalars(select(NotificationRecord))).all()
+    # Ровно одно событие — по кейсу; по существующему материалу ничего.
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.section, row.family, row.event) == ("cases", "generation", "done")
+    assert row.entity_id == resp.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_update_case_attaching_ready_materials_emits_ready(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Флоу модалки: пустой кейс → PUT с готовыми материалами → «кейс готов».
+    Материалы в работе не триггерят преждевременный «готов»."""
+    db_session.add(FileRecord(file_id="f-ok", original_name="a.pdf", status="DONE"))
+    db_session.add(FileRecord(file_id="f-busy", original_name="b.pdf", status="SEARCHED"))
+    db_session.add(CaseRecord(id="case-u", title="Кейс", doc_ids=[], owner=USER))
+    await db_session.commit()
+
+    # Прикрепляем ещё обрабатывающийся материал — «готов» не должен прийти.
+    r1 = await client.put(
+        "/api/v1/cases/case-u",
+        json={"title": "Кейс", "doc_ids": ["f-busy"], "sensitive": False, "tags": []},
+    )
+    assert r1.status_code == 200
+    assert (await db_session.scalars(select(NotificationRecord))).all() == []
+
+    # Теперь состав — только готовые материалы → «кейс готов».
+    r2 = await client.put(
+        "/api/v1/cases/case-u",
+        json={"title": "Кейс", "doc_ids": ["f-ok"], "sensitive": False, "tags": []},
+    )
+    assert r2.status_code == 200
+    rows = (await db_session.scalars(select(NotificationRecord))).all()
+    assert len(rows) == 1
+    assert (rows[0].section, rows[0].event) == ("cases", "done")
+
+
+@pytest.mark.asyncio
 async def test_case_privacy_flip_emits_broadcast(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:

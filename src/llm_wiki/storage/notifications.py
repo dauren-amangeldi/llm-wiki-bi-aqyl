@@ -242,6 +242,24 @@ async def _maybe_notify_case_done(session: AsyncSession, case_id: str) -> None:
     )
 
 
+async def notify_case_ready_if_done(session: AsyncSession, case_id: str) -> None:
+    """«Кейс готов», если все его материалы уже терминальны (пункт 2).
+
+    Best-effort обёртка над _maybe_notify_case_done для вызова из API-путей
+    (создание кейса / прикрепление материалов). Нужна потому, что кейс из уже
+    существующих (дедуп) материалов пайплайн не запускает — раньше по такому
+    кейсу событие «готов» не приходило вовсе, и юзер его не видел в ленте.
+    Если часть материалов ещё обрабатывается — не эмитит ничего (пайплайн
+    добьёт «готов», когда закончит последний). По самим существующим
+    материалам уведомления не создаются (дубликат не перезапускает обработку).
+    """
+    try:
+        await _maybe_notify_case_done(session, case_id=case_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify_case_ready_failed", case_id=case_id, error=str(exc))
+        await _safe_rollback(session)
+
+
 async def notify_artifact_event(
     session: AsyncSession,
     *,
