@@ -6,7 +6,8 @@ from typing import Literal
 import structlog
 from fastapi import Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select, update as sa_update
+from sqlalchemy import and_, cast, func, or_, select, update as sa_update
+from sqlalchemy.dialects.postgresql import JSONB, array
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key
@@ -61,47 +62,76 @@ def _dispatch_autotag(case_id: str) -> None:
 
 
 async def _cascade_case_visibility(
-    db: AsyncSession, doc_ids: list[str], *, sensitive: bool, owner: str | None
+    db: AsyncSession,
+    doc_ids: list[str],
+    *,
+    sensitive: bool,
+    owner: str | None,
+    exclude_case_id: str | None = None,
 ) -> None:
     """Propagate a case's visibility to every material that belongs to it.
 
-    A case is the single source of truth for the privacy of its nested files,
-    their wiki pages and their embedding chunks. Every time a case is saved we
-    re-assert that membership so two long-standing bugs can't happen:
+    Every time a case is saved we re-assert visibility over its files, their
+    embedding chunks (what shared Q&A retrieval filters on) and the wiki
+    page(s) each file created *on its own* (``created_pages``; shared
+    ``updated_pages`` are left untouched).
 
-    * publishing a case that was created **private** left its files / wiki /
-      chunks private, so they never entered the shared search;
-    * a file uploaded into an already-**public** case stayed private.
+    Мульти-кейс правило (QA-решение): материал может состоять в НЕСКОЛЬКИХ
+    кейсах, поэтому кейс больше не единоличный источник правды. Файл приватен,
+    только если ВСЕ содержащие его кейсы приватны: публикация любого кейса
+    открывает материал; «сделать приватным» не прячет файл, пока тот входит в
+    другой общий кейс. Public content has ``owner = NULL``; private content is
+    owned by the case owner. The caller commits the async work; the wiki store
+    commits itself.
 
-    Both are fixed by flipping ``(sensitive, owner)`` on each doc's
-    ``FileRecord``, its embedding chunks (what shared Q&A retrieval filters on)
-    and the wiki page(s) the file created *on its own*. Pages a public file
-    merged into (``updated_pages``) are shared across many files and are left
-    untouched — only ``created_pages`` (e.g. the ``private-{file_id}`` page) are
-    flipped. Public content has ``owner = NULL``; private content is owned by the
-    case owner. The caller commits the async work; the wiki store commits itself.
+    Args:
+        exclude_case_id: id сохраняемого кейса — его СТАРАЯ строка в БД не
+            должна голосовать за видимость (новое значение передано в
+            ``sensitive``).
     """
     if not doc_ids:
         return
-    new_owner = owner if sensitive else None
 
-    await db.execute(
-        sa_update(FileRecord)
-        .where(FileRecord.file_id.in_(doc_ids))
-        .values(sensitive=sensitive, owner=new_owner)
-    )
-    await db.execute(
-        sa_update(ChunkEmbedding)
-        .where(ChunkEmbedding.file_id.in_(doc_ids))
-        .values(sensitive=sensitive, owner=new_owner)
-    )
-    rows = (
-        await db.execute(
-            select(FileRecord.created_pages).where(FileRecord.file_id.in_(doc_ids))
+    # Файлы, у которых есть ДРУГОЙ публичный кейс — они остаются публичными,
+    # даже когда сохраняемый кейс приватен.
+    public_elsewhere: set[str] = set()
+    if sensitive:
+        stmt = select(CaseRecord.doc_ids).where(
+            CaseRecord.sensitive.is_(False),
+            cast(CaseRecord.doc_ids, JSONB).op("?|")(array(doc_ids)),
         )
-    ).all()
-    slugs = sorted({s for (pages,) in rows for s in (pages or [])})
-    wiki_store.set_pages_visibility(slugs, sensitive=sensitive, owner=new_owner)
+        if exclude_case_id:
+            stmt = stmt.where(CaseRecord.id != exclude_case_id)
+        doc_set = set(doc_ids)
+        for (ids,) in (await db.execute(stmt)).all():
+            public_elsewhere.update(d for d in (ids or []) if d in doc_set)
+
+    private_docs = [d for d in doc_ids if sensitive and d not in public_elsewhere]
+    public_docs = [d for d in doc_ids if d not in set(private_docs)]
+
+    for batch, batch_sensitive in ((private_docs, True), (public_docs, False)):
+        if not batch:
+            continue
+        new_owner = owner if batch_sensitive else None
+        await db.execute(
+            sa_update(FileRecord)
+            .where(FileRecord.file_id.in_(batch))
+            .values(sensitive=batch_sensitive, owner=new_owner)
+        )
+        await db.execute(
+            sa_update(ChunkEmbedding)
+            .where(ChunkEmbedding.file_id.in_(batch))
+            .values(sensitive=batch_sensitive, owner=new_owner)
+        )
+        rows = (
+            await db.execute(
+                select(FileRecord.created_pages).where(FileRecord.file_id.in_(batch))
+            )
+        ).all()
+        slugs = sorted({s for (pages,) in rows for s in (pages or [])})
+        wiki_store.set_pages_visibility(
+            slugs, sensitive=batch_sensitive, owner=new_owner
+        )
 
 
 @router.get("/cases")
@@ -215,7 +245,8 @@ async def create_case(
     db.add(case)
     # If the case is created already holding docs, align their visibility too.
     await _cascade_case_visibility(
-        db, case.doc_ids, sensitive=case.sensitive, owner=case.owner
+        db, case.doc_ids, sensitive=case.sensitive, owner=case.owner,
+        exclude_case_id=case.id,
     )
     await db.commit()
     # Б1/пункт 2: если кейс собран из уже готовых (дедуп) материалов — событие
@@ -268,11 +299,12 @@ async def update_case(
             updated_at=datetime.now(timezone.utc),
         )
     )
-    # The case is the source of truth for its materials' privacy: re-assert it
-    # over the (possibly newly-added) doc set so publishing propagates and new
-    # uploads inherit the case's status. owner stays as stored (unchanged here).
+    # Re-assert visibility over the (possibly newly-added) doc set so
+    # publishing propagates and new uploads inherit the case's status; other
+    # public cases holding the same materials keep them public (multi-case).
     await _cascade_case_visibility(
-        db, body.doc_ids, sensitive=body.sensitive, owner=row.owner
+        db, body.doc_ids, sensitive=body.sensitive, owner=row.owner,
+        exclude_case_id=case_id,
     )
     await db.commit()
     from llm_wiki.storage import notifications as notif
