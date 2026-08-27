@@ -58,7 +58,10 @@ class AskBody(BaseModel):
     language: Literal["ru", "en", "kk"] = "ru"
     mode: Literal["library", "expert", "advisor"] = "expert"
     # Case ask only: restrict retrieval to this subset of the case's documents
-    # (the panel's source checkboxes). None/empty = use every document.
+    # (the panel's source checkboxes). Semantics matter (BUG-01):
+    #   None → field not sent (older clients) → answer over every document;
+    #   []   → the user unchecked EVERYTHING → refuse instead of silently
+    #          answering over the whole case.
     doc_ids: list[str] | None = None
 
 
@@ -73,6 +76,11 @@ class Citation(BaseModel):
     # next to the citation (click → open that case). None when it's not in a case.
     case_id: str | None = None
     case_title: str | None = None
+    # Физический файл-источник страницы (ревизия: «обе цитаты называются
+    # одинаково — не видно, какой это файл: конспект? аудио?»). Только для
+    # страниц, СОЗДАННЫХ файлом; общая страница нескольких файлов остаётся без
+    # метки — там принадлежность неоднозначна.
+    file_name: str | None = None
 
 
 class DocAskResponse(BaseModel):
@@ -204,14 +212,43 @@ async def ask_case(
         raise HTTPException(404, "Case not found")
 
     doc_ids = list(case.doc_ids or [])
-    # Honour the panel's source selection: keep only the requested docs that
-    # actually belong to this case (guards against pointing at another case's
-    # files). An empty/None selection means "all sources".
-    if body.doc_ids:
-        allowed = set(doc_ids)
-        selected = [d for d in body.doc_ids if d in allowed]
-        if selected:
-            doc_ids = selected
+    # Honour the panel's source selection (BUG-01). The old guard here was
+    # `if body.doc_ids:` — an explicit empty selection ([] is falsy) silently
+    # fell through to the WHOLE case, which is exactly the UAT repro
+    # («Контекст: 0 из 3» → полный ответ с цитатами). Distinguish:
+    #   None      → field absent → all documents (backwards compatible);
+    #   []        → everything unchecked → honest refusal, no LLM call;
+    #   [ids]     → intersect with this case's documents; an intersection of
+    #               zero (stale client state, foreign ids) refuses too rather
+    #               than quietly widening back to the full case.
+    if body.doc_ids is not None:
+        selected = [d for d in body.doc_ids if d in set(doc_ids)]
+        if not selected:
+            refuse = {
+                "ru": "Источники не выбраны. Отметьте хотя бы один материал в панели "
+                      "слева — и я отвечу по нему.",
+                "kk": "Дереккөздер таңдалмаған. Сол жақ панельден кемінде бір материалды "
+                      "белгілеңіз — сол бойынша жауап беремін.",
+                "en": "No sources are selected. Check at least one material in the left "
+                      "panel and I will answer from it.",
+            }
+            response = DocAskResponse(
+                answer=refuse.get(body.language, refuse["en"]),
+                citations=[],
+                follow_ups=[],
+                insufficient_evidence=True,
+                contact=None,
+            )
+            await _persist_turn(
+                db,
+                user_key=user_key,
+                scope_type="case",
+                scope_id=case_id,
+                question=body.question,
+                response=response,
+            )
+            return response
+        doc_ids = selected
     documents: list[FileRecord] = []
     for did in doc_ids:
         fr = await db.get(FileRecord, did)
@@ -263,8 +300,18 @@ async def ask_case(
     # A case answer only retrieves from this case's own documents, so every
     # citation belongs to this case — label them with it for the source chip.
     citations = [Citation(anchor=s.slug, title=s.title, quote=s.quote) for s in result.sources]
+    # Slug → физический файл (только по created_pages — однозначная связь).
+    from pathlib import Path as _Path
+
+    slug_to_file: dict[str, str] = {}
+    for d in documents:
+        label = d.display_name or _Path(d.original_name).stem
+        for created_slug in d.created_pages or []:
+            if created_slug:
+                slug_to_file[created_slug] = label
     for c in citations:
         c.case_id, c.case_title = case.id, case.title
+        c.file_name = slug_to_file.get(c.anchor)
     response = DocAskResponse(
         answer=result.answer,
         citations=citations,

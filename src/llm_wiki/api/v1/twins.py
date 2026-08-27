@@ -103,14 +103,40 @@ async def _require_session_access(
 
 @router.get("/twin/sessions")
 async def get_twin_sessions(
-    case_id: str = Query(...),
+    case_id: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
 ) -> list[dict[str, object]]:
-    """Past councils of a case — ONLY the caller's own (demo ones stay shared)."""
+    """Past councils — ONLY the caller's own (demo ones stay shared).
+
+    BUG-16 (N+1): без ``case_id`` отдаёт ВСЕ видимые сессии одним запросом
+    (в ответе есть ``case_id``) — дашборд раньше слал по запросу на каждый
+    кейс, до сотен параллельных вызовов при каждом монтировании.
+    """
+    if case_id is None:
+        from sqlalchemy import select as sa_select
+
+        from llm_wiki.storage.metadata import TwinSession
+
+        rows = (
+            await db.scalars(
+                sa_select(TwinSession).order_by(TwinSession.created_at.desc())
+            )
+        ).all()
+        return [
+            {
+                "id": s.id,
+                "case_id": s.case_id,
+                "persona_ids": s.persona_ids,
+                "created_at": s.created_at.isoformat(),
+            }
+            for s in rows
+            if _visible_to(caller, s.created_by)
+        ]
     return [
         {
             "id": s.id,
+            "case_id": case_id,
             "persona_ids": s.persona_ids,
             "created_at": s.created_at.isoformat(),
         }

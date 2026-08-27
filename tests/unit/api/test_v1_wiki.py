@@ -128,3 +128,28 @@ async def test_private_page_endpoint_isolation(client: AsyncClient) -> None:
         "/api/v1/wiki/private-hr/full", headers={"X-User-Email": "bob@bi.group"}
     )
     assert other_detail.status_code == 404
+
+
+async def test_search_strips_frontmatter_and_groups_by_case(
+    client, db_session
+) -> None:
+    """BUG-19: сниппет без YAML-блока; страницы одного кейса схлопываются."""
+    from llm_wiki.storage import wiki_store
+    from llm_wiki.storage.metadata import CaseRecord, FileRecord
+
+    fm = "---\ntitle: X\ntags: [переговоры, batna]\nsummary: s\n---\n\n"
+    wiki_store.save_page("grp-a", "Переговоры: базовый курс", fm + "# A\n\nПереговоры и BATNA — часть один.")
+    wiki_store.save_page("grp-b", "Переговоры: продвинутый курс", fm + "# B\n\nПереговоры и ZOPA — часть два.")
+    db_session.add(FileRecord(file_id="grp-f1", original_name="a.md", status="DONE", created_pages=["grp-a"]))
+    db_session.add(FileRecord(file_id="grp-f2", original_name="b.md", status="DONE", created_pages=["grp-b"]))
+    db_session.add(CaseRecord(id="case-grp", title="Тренинг: Переговоры", doc_ids=["grp-f1", "grp-f2"]))
+    await db_session.commit()
+
+    hits = (await client.get("/api/v1/wiki?q=переговоры")).json()
+    ours = [h for h in hits if h["slug"].startswith("grp-")]
+    # Обе страницы кейса схлопнуты в один хит со счётчиком.
+    assert len(ours) == 1
+    assert ours[0]["case_title"] == "Тренинг: Переговоры"
+    assert ours[0]["collapsed_count"] == 1
+    # Сниппет чистый: без фронтматтера.
+    assert "tags:" not in ours[0]["snippet"] and not ours[0]["snippet"].startswith("---")

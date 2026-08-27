@@ -48,6 +48,7 @@ celery_app.conf.update(
         "llm_wiki.orchestrator.tasks.backfill_case_tags": {"queue": "light"},
         "llm_wiki.orchestrator.tasks.run_weekly_audit": {"queue": "light"},
         "llm_wiki.orchestrator.tasks.sweep_stuck_generations": {"queue": "light"},
+        "llm_wiki.orchestrator.tasks.purge_case_objects": {"queue": "light"},
     },
     # Anything unrouted (new tasks) lands in "light" — visible immediately,
     # can't silently starve behind ingestion.
@@ -227,6 +228,10 @@ def process_file_task(self: Any, file_id: str) -> None:
             "вероятно, файлу не хватает памяти или времени). Файл снят с очереди."
         )
         _mark_file_failed_sync(file_id, msg)
+        # Б1: юзер видит снятие с очереди в ленте уведомлений, а не тишину.
+        from llm_wiki.storage.notifications import notify_file_failed_sync
+
+        notify_file_failed_sync(file_id, msg)
         log.error("ingest_delivery_cap_hit", attempts=attempts)
         structlog.contextvars.clear_contextvars()
         return
@@ -542,6 +547,7 @@ def generate_artifact(
         from llm_wiki.agents.artifacts import generate_content
         from llm_wiki.llm.client import LLMClient
         from llm_wiki.storage import artifacts_store
+        from llm_wiki.storage import notifications as notif
         from llm_wiki.storage.metadata import ArtifactRecord
 
         factory = _worker_session_factory()
@@ -557,6 +563,7 @@ def generate_artifact(
                 )
                 return {"artifact_id": artifact_id, "status": "skipped"}
 
+            requested_by = record.requested_by
             # Ops monitoring: реальный момент старта генерации воркером.
             await artifacts_store.mark_started(session, artifact_id)
             llm = LLMClient()
@@ -573,16 +580,30 @@ def generate_artifact(
                     "попробуйте ещё раз; если повторится, материал слишком объёмный"
                 )
                 await artifacts_store.mark_failed(session, artifact_id, msg)
+                await notif.notify_artifact_event(
+                    session, artifact_id=artifact_id, document_id=document_id,
+                    kind=kind, event="failed", requested_by=requested_by, detail=msg,
+                )
                 logger.warning("generate_artifact_deadline", deadline_s=ARTIFACT_DEADLINE_S)
                 return {"artifact_id": artifact_id, "status": "failed"}
             except Exception as exc:  # noqa: BLE001
                 await artifacts_store.mark_failed(session, artifact_id, str(exc))
+                await notif.notify_artifact_event(
+                    session, artifact_id=artifact_id, document_id=document_id,
+                    kind=kind, event="failed", requested_by=requested_by,
+                    detail=str(exc),
+                )
                 logger.warning("generate_artifact_failed", error=str(exc))
                 return {"artifact_id": artifact_id, "status": "failed"}
             finally:
                 await llm.aclose()
             await artifacts_store.upsert_artifact(
                 session, document_id=document_id, kind=kind, language=language, content=content
+            )
+            # Б1: «Готово» в ленту (тост на фронте дублируется записью в панели).
+            await notif.notify_artifact_event(
+                session, artifact_id=artifact_id, document_id=document_id,
+                kind=kind, event="done", requested_by=requested_by,
             )
             logger.info("generate_artifact_done")
             return {"artifact_id": artifact_id, "status": "ready"}
@@ -595,6 +616,11 @@ def generate_artifact(
         # (e.g. inside DB teardown). The loop may be unusable — mark failure
         # over a plain sync connection so the UI unblocks immediately.
         _mark_artifact_failed_sync(
+            artifact_id, "Отменено по таймауту воркера — попробуйте ещё раз"
+        )
+        from llm_wiki.storage.notifications import notify_artifact_failed_sync
+
+        notify_artifact_failed_sync(
             artifact_id, "Отменено по таймауту воркера — попробуйте ещё раз"
         )
         logger.warning("generate_artifact_soft_limit")
@@ -688,6 +714,37 @@ def backfill_case_tags(force: bool = False) -> dict[str, object]:
     return {"queued": len(ids), "force": force}
 
 
+@celery_app.task(
+    name="llm_wiki.orchestrator.tasks.purge_case_objects",
+    soft_time_limit=120,
+    time_limit=180,
+)
+def purge_case_objects(raw_keys: list[str]) -> dict[str, int]:
+    """Удалить S3-объекты каскадно удалённого кейса (BUG-02, фоновая часть).
+
+    Всё БД-содержимое кейса уже удалено синхронно в DELETE /cases/{id} — здесь
+    только внешнее медленное хранилище. Идемпотентно: удаление отсутствующего
+    ключа не ошибка; недоступный store — просто лог (доберёт
+    scripts/purge_orphans.py --purge-s3).
+    """
+    from llm_wiki.logging_config import configure_logging
+    from llm_wiki.storage.object_store import get_object_store
+
+    configure_logging()
+    deleted = 0
+    failed = 0
+    store = get_object_store()
+    for key in raw_keys:
+        try:
+            store.delete(key)
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.warning("purge_case_object_failed", key=key, error=str(exc))
+    logger.info("purge_case_objects_done", deleted=deleted, failed=failed)
+    return {"deleted": deleted, "failed": failed}
+
+
 # Janitor windows. Started generations get the deadline plus a margin; queued
 # ones get longer (a busy-but-alive artifacts queue must not be swept).
 SWEEP_STARTED_AFTER_S = ARTIFACT_DEADLINE_S + 240   # 12 min after worker start
@@ -717,11 +774,14 @@ def sweep_stuck_generations() -> dict[str, int]:
 
         from sqlalchemy import select
 
+        from llm_wiki.storage import notifications as notif
         from llm_wiki.storage.metadata import ArtifactRecord, FileRecord
 
         now = datetime.now(timezone.utc)
         swept_artifacts = 0
         swept_files = 0
+        swept_art_rows: list[tuple[str, str, str, str | None, str]] = []
+        swept_file_rows: list[tuple[str, str]] = []
 
         factory = _worker_session_factory()
         async with factory() as session:
@@ -756,6 +816,10 @@ def sweep_stuck_generations() -> dict[str, int]:
                     art.error = reason
                     art.finished_at = now
                     swept_artifacts += 1
+                    swept_art_rows.append(
+                        (art.artifact_id, art.document_id, art.kind,
+                         art.requested_by, reason)
+                    )
 
             active_files = (
                 await session.scalars(
@@ -784,9 +848,26 @@ def sweep_stuck_generations() -> dict[str, int]:
                         "загрузите файл повторно"
                     )
                     swept_files += 1
+                    swept_file_rows.append((fr.file_id, fr.error))
 
             if swept_artifacts or swept_files:
                 await session.commit()
+
+            # Б1: свипнутое видно в ленте уведомлений («Ошибка», не тишина).
+            for aid, doc_id, akind, req_by, why in swept_art_rows:
+                await notif.notify_artifact_event(
+                    session, artifact_id=aid, document_id=doc_id, kind=akind,
+                    event="failed", requested_by=req_by, detail=why,
+                )
+            for fid, why in swept_file_rows:
+                await notif.notify_file_failed(session, fid, why)
+
+            # Ретенция ленты: события старше 30 дней уходят вместе с отметками
+            # чтения (janitor — единственное место, где лента чистится).
+            try:
+                await notif.sweep_old_events(session, days=30)
+            except Exception as sweep_exc:  # noqa: BLE001
+                logger.warning("notifications_retention_failed", error=str(sweep_exc))
 
         return {"artifacts_swept": swept_artifacts, "files_swept": swept_files}
 
