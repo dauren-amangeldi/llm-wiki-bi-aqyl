@@ -95,6 +95,52 @@ async def test_file_goes_private_only_when_all_cases_private(
 
 
 @pytest.mark.asyncio
+async def test_put_without_doc_ids_keeps_composition(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """QA-баг «воскрешение источника»: PUT без doc_ids НЕ трогает состав.
+
+    Сценарий бага: юзер удалил материал из кейса (unlink), затем изменил теги —
+    старый фронт слал полный устаревший doc_ids и молча возвращал материал.
+    Теперь правка метаданных идёт без doc_ids → состав сохраняется.
+    """
+    db_session.add(FileRecord(file_id="f-keep", original_name="k.pdf", status="DONE"))
+    db_session.add(CaseRecord(id="case-k", title="К", doc_ids=["f-keep"],
+                              sensitive=False, owner=USER, tags=["Инновация"]))
+    await db_session.commit()
+
+    # Unlink материала (как из студии).
+    r = await client.delete("/api/v1/cases/case-k/documents/f-keep")
+    assert r.status_code == 200
+
+    # Правка тегов БЕЗ doc_ids (новый контракт метаданных).
+    r = await client.put(
+        "/api/v1/cases/case-k",
+        json={"title": "К", "sensitive": False, "tags": ["Качество"],
+              "scope": "internal"},
+    )
+    assert r.status_code == 200
+
+    db_session.expire_all()
+    row = await db_session.get(CaseRecord, "case-k")
+    assert row is not None
+    assert row.doc_ids == []          # материал НЕ воскрес
+    assert row.tags == ["Качество"]   # а теги обновились
+
+    # tags=None (не передан) → теги тоже не трогаем.
+    r = await client.put(
+        "/api/v1/cases/case-k",
+        json={"title": "К переименован", "sensitive": False, "scope": "internal"},
+    )
+    assert r.status_code == 200
+    db_session.expire_all()
+    row = await db_session.get(CaseRecord, "case-k")
+    assert row is not None
+    assert row.title == "К переименован"
+    assert row.tags == ["Качество"]
+
+
+@pytest.mark.asyncio
 async def test_publishing_any_case_opens_the_file(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:

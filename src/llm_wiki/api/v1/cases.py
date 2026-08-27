@@ -33,18 +33,24 @@ def _assert_can_edit(row: CaseRecord, caller: str) -> None:
 
 
 class CaseBody(BaseModel):
-    """Request/response body for case CRUD."""
+    """Request/response body for case CRUD.
+
+    PUT — PATCH-семантика для состава и тегов (QA-баг «воскрешение источника»):
+    ``doc_ids``/``tags`` = ``None`` → поле не трогаем. Клиент, меняющий только
+    название/теги/приватность, НЕ шлёт doc_ids вовсе — и его устаревший стор
+    больше не может молча вернуть в кейс удалённый оттуда материал.
+    """
 
     id: str | None = None
     title: str
-    doc_ids: list[str] = []
+    doc_ids: list[str] | None = None
     # Private case: only its owner can list/open it. The frontend sends this
     # explicitly (new cases default private there); the backend default is False
     # so a client that omits it gets a normal, visible case. File-level privacy
     # (owner-scoped chunks) is what actually protects sensitive content.
     sensitive: bool = False
     # Fixed-taxonomy tags; unknown tags are dropped server-side (see clean_tags).
-    tags: list[str] = []
+    tags: list[str] | None = None
     # Источник опыта: внутренний опыт BI или мировой. Двигает фильтр на главной.
     scope: Literal["internal", "external"] = "internal"
 
@@ -231,8 +237,8 @@ async def create_case(
     case = CaseRecord(
         id=body.id or f"case-{int(now.timestamp() * 1000):x}-1",
         title=body.title.strip() or "Без названия",
-        doc_ids=body.doc_ids,
-        tags=clean_tags(body.tags),
+        doc_ids=body.doc_ids or [],
+        tags=clean_tags(body.tags or []),
         sensitive=body.sensitive,
         scope=body.scope,
         # Always attribute the author — "anon" included (clients without the
@@ -282,17 +288,21 @@ async def update_case(
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
     _assert_can_edit(row, caller)
+    # PATCH-семантика (QA-баг «воскрешение источника»): doc_ids/tags = None →
+    # поле не трогаем. Правка тегов/названия из устаревшего стора больше не
+    # перезаписывает состав материалов.
+    effective_doc_ids = row.doc_ids or [] if body.doc_ids is None else body.doc_ids
     # Состав материалов изменился → LLM-описание устарело: сбрасываем, а
     # _dispatch_autotag ниже перегенерит его по новому составу.
-    docs_changed = set(body.doc_ids) != set(row.doc_ids or [])
+    docs_changed = set(effective_doc_ids) != set(row.doc_ids or [])
     privacy_changed = bool(row.sensitive) != bool(body.sensitive)
     await db.execute(
         sa_update(CaseRecord)
         .where(CaseRecord.id == case_id)
         .values(
             title=body.title.strip() or row.title,
-            doc_ids=body.doc_ids,
-            tags=clean_tags(body.tags),
+            doc_ids=effective_doc_ids,
+            **({} if body.tags is None else {"tags": clean_tags(body.tags)}),
             sensitive=body.sensitive,
             scope=body.scope,
             **({"description": ""} if docs_changed else {}),
@@ -303,7 +313,7 @@ async def update_case(
     # publishing propagates and new uploads inherit the case's status; other
     # public cases holding the same materials keep them public (multi-case).
     await _cascade_case_visibility(
-        db, body.doc_ids, sensitive=body.sensitive, owner=row.owner,
+        db, effective_doc_ids, sensitive=body.sensitive, owner=row.owner,
         exclude_case_id=case_id,
     )
     await db.commit()
