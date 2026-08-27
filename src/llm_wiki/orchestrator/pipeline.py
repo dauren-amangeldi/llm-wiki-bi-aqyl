@@ -148,8 +148,16 @@ async def process_file(file_id: str) -> None:
             if "WRITTEN" not in completed:
                 logger.info("pipeline_step_start", file_id=file_id, step="WRITTEN")
                 writer = WriterAgent(llm)
+                from pathlib import Path as _Path
+
+                # BUG-17: настоящее имя материала для цитат в вики-страницах.
+                source_display_name = (
+                    record.display_name or _Path(record.original_name).stem
+                )
                 created_pages: list[str] = []
                 updated_pages: list[str] = []
+                # Автонейминг материала: первый LLM-заголовок из этого прогона.
+                generated_title: str | None = None
 
                 if record.sensitive:
                     # Private file — create a private, owner-only wiki page. The
@@ -159,7 +167,8 @@ async def process_file(file_id: str) -> None:
                     # graph — no heading index, no backlinks — and its slug is
                     # namespaced by file_id so it can't collide with a public page.
                     private_slug = f"private-{file_id}"
-                    page = await writer.create_page(file_text, file_id)
+                    page = await writer.create_page(file_text, file_id, source_name=source_display_name)
+                    generated_title = generated_title or page.title
                     _save_wiki_page(
                         page, slug=private_slug, sensitive=True, owner=record.owner
                     )
@@ -175,7 +184,8 @@ async def process_file(file_id: str) -> None:
                     created_pages.append(private_slug)
                 elif not search_results:
                     # Scenario A — brand-new topic
-                    page = await writer.create_page(file_text, file_id)
+                    page = await writer.create_page(file_text, file_id, source_name=source_display_name)
+                    generated_title = generated_title or page.title
                     _save_wiki_page(page)
                     sync_chunks_for_page(
                         chunk_store=chunk_store,
@@ -202,7 +212,9 @@ async def process_file(file_id: str) -> None:
                         previous_outgoing_by_slug: dict[str, list[str]] = {
                             p.slug: extract_outgoing_links(p.content) for p in existing
                         }
-                        pages_out = await writer.update_pages(file_text, existing, file_id)
+                        pages_out = await writer.update_pages(file_text, existing, file_id, source_name=source_display_name)
+                        if pages_out:
+                            generated_title = generated_title or pages_out[0].title
                         for p in pages_out:
                             _save_wiki_page(p)
                             sync_chunks_for_page(
@@ -222,7 +234,8 @@ async def process_file(file_id: str) -> None:
                             )
                     else:
                         # Search found headings but files are absent — create new
-                        page = await writer.create_page(file_text, file_id)
+                        page = await writer.create_page(file_text, file_id, source_name=source_display_name)
+                        generated_title = generated_title or page.title
                         _save_wiki_page(page)
                         sync_chunks_for_page(
                             chunk_store=chunk_store,
@@ -244,10 +257,22 @@ async def process_file(file_id: str) -> None:
                 # Persist page lists to DB
                 from sqlalchemy import update as sa_update
 
+                # Автонейминг: LLM-заголовок страницы становится человеческим
+                # названием материала. coalesce — ручное переименование
+                # (display_name уже задан) пайплайн не затирает.
+                from sqlalchemy import func as sa_func
+
                 await session.execute(
                     sa_update(FileRecord)
                     .where(FileRecord.file_id == file_id)
-                    .values(created_pages=created_pages, updated_pages=updated_pages)
+                    .values(
+                        created_pages=created_pages,
+                        updated_pages=updated_pages,
+                        display_name=sa_func.coalesce(
+                            FileRecord.display_name,
+                            (generated_title or "").strip() or None,
+                        ),
+                    )
                 )
                 await session.commit()
                 await _transition(session, file_id, "WRITTEN")
@@ -290,13 +315,25 @@ async def process_file(file_id: str) -> None:
             # ----------------------------------------------------------------
             await _transition(session, file_id, "DONE")
             await update_file_status(session, file_id, "DONE")
+            # Б1: событие в ленту уведомлений (+ «Кейс обработан», если это был
+            # последний материал кейса). Best-effort внутри — не роняет пайплайн.
+            from llm_wiki.storage import notifications as notif
+
+            await notif.notify_file_done(session, file_id)
             logger.info("pipeline_done", file_id=file_id)
 
         except Exception as exc:
             logger.error("pipeline_failed", file_id=file_id, error=str(exc))
             # Persist the reason so it is visible in the API / status stream / UI,
-            # not only in the logs.
-            await update_file_status(session, file_id, "FAILED", error=str(exc))
+            # not only in the logs. QA D3: юзеру — человеческий русский текст,
+            # технический оригинал остаётся в логах строчкой выше.
+            human = _humanize_pipeline_error(exc)
+            await update_file_status(session, file_id, "FAILED", error=human)
+            # Б1: «Ошибка» в ленту сразу (ретрай, если он будет, перепишет ту же
+            # строку в «Готово» — upsert по entity).
+            from llm_wiki.storage import notifications as notif
+
+            await notif.notify_file_failed(session, file_id, human)
             raise
         finally:
             # Always close the SDK client within the active event loop so that
@@ -309,6 +346,31 @@ async def process_file(file_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _humanize_pipeline_error(exc: Exception) -> str:
+    """Технический текст ошибки → человеческая русская причина (QA D3).
+
+    Юзер видел «No extractable text in PDF '01a04411-…' (and OCR unavailable/
+    failed)» на карточке и в уведомлении — с UUID внутри. Известные паттерны
+    переводим; уже русский текст пропускаем как есть; незнакомый английский —
+    заворачиваем в общий понятный фолбэк (оригинал остаётся в логах).
+    """
+    raw = str(exc)
+    low = raw.lower()
+    if "no extractable text in pdf" in low:
+        return (
+            "Не удалось извлечь текст из PDF — файл повреждён или это скан "
+            "без распознаваемого текста"
+        )
+    if "no extractable text in docx" in low:
+        return "Не удалось извлечь текст из DOCX — файл пуст или повреждён"
+    if "unsupported file extension" in low:
+        return "Формат файла не поддерживается"
+    # Русский текст (наши собственные сообщения) — уже человеческий.
+    if any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in raw):
+        return raw
+    return "Не удалось обработать файл — он повреждён или в неподдерживаемом виде"
 
 
 async def _transition(session: AsyncSession, file_id: str, state: str) -> None:

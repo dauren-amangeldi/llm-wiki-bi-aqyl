@@ -65,6 +65,13 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS scope varchar NOT NULL DEFAULT 'internal'",
     "ALTER TABLE cases ADD COLUMN IF NOT EXISTS description varchar NOT NULL DEFAULT ''",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS ingest_attempts integer NOT NULL DEFAULT 0",
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS display_name varchar",
+    # Бэкфилл автонейминга: у уже обработанных файлов display_name берётся из
+    # заголовка их вики-страницы. Идемпотентно (только NULL) — ручные
+    # переименования не затираются.
+    "UPDATE files f SET display_name = w.title FROM wiki_fts w"
+    " WHERE f.display_name IS NULL AND w.title IS NOT NULL AND w.title <> ''"
+    " AND f.created_pages::jsonb ? w.slug",
     # One row per (document, kind) is the store's contract — enforce it so two
     # concurrent generations can't insert duplicates (check-then-insert race
     # became real once artifact workers run in parallel). Dedupe first: keep an
@@ -284,6 +291,10 @@ class FileRecord(Base):
     # delivery incl. crash re-deliveries that bypass max_retries; the ingest
     # task refuses the file after INGEST_MAX_DELIVERIES. Reset on clean finish.
     ingest_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    # Человеческое название материала (автонейминг): LLM-заголовок вики-страницы
+    # («audio_2026-04-07…» → «Выход BI Group на рынок Грузии»). original_name
+    # остаётся честным именем файла для скачивания. NULL → показываем stem.
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     # Access control (sensitive files): indexed but owner-scoped — excluded from
     # the shared wiki/search and only retrievable by their owner.
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -1022,6 +1033,159 @@ class TwinPreset(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     persona_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class FeedbackRecord(Base):
+    """Фидбэк пользователей: 👍/👎 и «Сообщить об ошибке» (BUG-08/09).
+
+    До этого обе кнопки были пустышками (менялся только CSS-класс) — петля
+    качества не собиралась вовсе. Каждая реакция — строка; агрегирование и
+    админ-выгрузка — отдельной задачей.
+    """
+
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # chat_answer | artifact | wiki_page | … — тип сущности, о которой фидбэк.
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # up | down | NULL (репорт без оценки).
+    vote: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Причина из «Сообщить об ошибке» (ключ i18n или свободный текст).
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Контекст: фрагмент ответа/вопрос — чтобы редактор понял, о чём речь.
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class MaterialNote(Base):
+    """Личная заметка пользователя к материалу/кейсу (BUG-24).
+
+    Раньше «Мои заметки» жили только в localStorage браузера — терялись при
+    смене устройства и не переживали чистку. Ключ — (owner, doc_id): заметка
+    приватна для автора; doc_id — материал ИЛИ кейс (case-*).
+    """
+
+    __tablename__ = "material_notes"
+
+    owner: Mapped[str] = mapped_column(String, primary_key=True)
+    doc_id: Mapped[str] = mapped_column(String, primary_key=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class NotificationRecord(Base):
+    """Событие ленты уведомлений (Б1): терминальные исходы генераций и
+    социальные события (смена приватности кейса).
+
+    «В работе» здесь НЕ хранится — живые строки панель получает из статусов
+    ``files``/``artifacts`` на момент запроса (один источник правды, рассинхрон
+    невозможен). Генерационные события обновляются IN-PLACE: одна строка на
+    ``(section, entity_id, family)``, так что успешный повтор превращает
+    «Ошибка» в «Готово», а не наслаивает шум. ``recipient=NULL`` — событие
+    видно всем (broadcast); иначе — только адресату.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recipient: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Кто совершил действие (социальные события: «X сделал кейс общим»).
+    actor: Mapped[str | None] = mapped_column(String, nullable=True)
+    section: Mapped[str] = mapped_column(String, nullable=False)  # cases|materials|artifacts
+    family: Mapped[str] = mapped_column(String, nullable=False)  # generation|privacy
+    event: Mapped[str] = mapped_column(String, nullable=False)  # done|failed|published|privated
+    entity_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Имя сущности на момент события (материал переименуют — история честная).
+    title: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # Причина ошибки и т.п. — человекочитаемый хвост строки.
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Контекст клика: {case_id?, document_id?, kind?} — куда вести из строки.
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_notifications_entity_family",
+            "section",
+            "entity_id",
+            "family",
+            unique=True,
+        ),
+    )
+
+
+class NotificationRead(Base):
+    """Отметка «прочитано» — на сервере, не в localStorage (переживает смену
+    устройства; счётчик на колокольчике одинаков во всех вкладках). Broadcast-
+    события общие для всех, поэтому чтение — отдельная строка на пользователя."""
+
+    __tablename__ = "notification_reads"
+
+    notification_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_key: Mapped[str] = mapped_column(String, primary_key=True)
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AdvisorConsultation(Base):
+    """Персистентная консультация AI-советника (BUG-03).
+
+    До этого весь флоу «уточнение → понимание → анализ → рекомендация» жил
+    только в памяти вкладки: F5 безвозвратно терял результат полутора минут
+    работы. Строка обновляется на каждом шаге, так что консультация
+    восстанавливается ровно с того места, где её прервали.
+    """
+
+    __tablename__ = "advisor_consultations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Первые ~100 символов ситуации — заголовок в списке «Мои консультации».
+    title: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    situation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    language: Mapped[str] = mapped_column(String(5), nullable=False, default="ru")
+    # questions | understanding | analysis | recommendation — шаг флоу фронта.
+    step: Mapped[str] = mapped_column(String, nullable=False, default="questions")
+    decision_type_label: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # [{id, text, options, multi}] — как отдаёт generate_questions.
+    questions: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # {question_id: [выбранные опции / свободный текст]} — стейт фронта as-is.
+    answers: Mapped[dict[str, list[str]]] = mapped_column(JSON, default=dict)
+    understanding: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Итоговый AdvisorBrief (форма фронта) — присылается клиентом после
+    # финального SSE-события /advisor.
+    brief: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # "" | decided | need_info | postponed | rejected
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class TwinSession(Base):

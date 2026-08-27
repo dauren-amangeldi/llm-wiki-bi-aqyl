@@ -37,28 +37,10 @@ async def doc_sources(
     ]
 
 
-@router.get("/notifications")
-async def notifications() -> list:
-    """MOCK."""
-    return []
-
-
 @router.get("/guidelines")
 async def guidelines() -> dict:
     """MOCK."""
     return {"cards": []}
-
-
-@router.get("/metrics")
-async def metrics(db: AsyncSession = Depends(get_db)) -> dict:
-    """Return real document count; all other counters are zero."""
-    total = await db.scalar(select(func.count()).select_from(FileRecord))
-    return {
-        "total_documents": total or 0,
-        "total_queries_today": 0,
-        "total_artifacts": 0,
-        "last_activity": None,
-    }
 
 
 
@@ -93,10 +75,8 @@ async def compare(body: dict) -> dict:
     return {"ok": True, "diff": []}
 
 
-@router.post("/notifications/{nid}/read")
-async def notif_read(nid: str) -> dict:
-    """MOCK."""
-    return {"ok": True}
+# GET /notifications + POST /notifications/read живут в api/v1/notifications.py
+# (реальная лента, Б1) — мок-заглушки удалены, чтобы не конфликтовать путями.
 
 
 # ── PUT / PATCH / DELETE — 200 with {ok: true} ───────────────────────────────

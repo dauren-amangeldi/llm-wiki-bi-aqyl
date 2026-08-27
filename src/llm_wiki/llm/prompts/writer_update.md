@@ -15,7 +15,7 @@ Slug: {slug}
 
 {existing_content}
 
-## New Source Document
+## New Source Document: «{source_name}»
 
 {raw_content}
 

@@ -295,13 +295,18 @@ def keyword_search(q: str, limit: int = 10, caller: str | None = None) -> list[W
     if not term:
         return []
     clause, extra = _visibility(caller)
+    # BUG-19: страницы хранятся с YAML-фронтматтером (---\ntags: …\n---) —
+    # сниппеты отдавали его в выдачу («tags: [маркетинг, …] summary: …»).
+    # Срезаем блок на лету перед ts_headline/префиксом; сама страница не
+    # меняется (фронтматтер нужен рендеру и переиндексации).
+    _BODY_SANS_FM = r"regexp_replace(body, '^---.*?---[[:space:]]*', '')"
     with get_sync_engine().connect() as conn:
         rows = conn.execute(
             text(
                 f"""
                 WITH query AS (SELECT {_PG_TSQUERY} AS tsq)
                 SELECT slug, title,
-                       ts_headline('{_PG_TS_CONFIG}', body, query.tsq,
+                       ts_headline('{_PG_TS_CONFIG}', {_BODY_SANS_FM}, query.tsq,
                                    '{_PG_HEADLINE_OPTS}') AS snippet
                 FROM wiki_fts, query
                 WHERE tsv @@ query.tsq AND {clause}
@@ -318,7 +323,7 @@ def keyword_search(q: str, limit: int = 10, caller: str | None = None) -> list[W
         with get_sync_engine().connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT slug, title, left(body, 200) AS snippet FROM wiki_fts "
+                    f"SELECT slug, title, left({_BODY_SANS_FM}, 200) AS snippet FROM wiki_fts "
                     f"WHERE {clause} AND word_similarity(lower(:q), lower(title)) > 0.3 "
                     "ORDER BY word_similarity(lower(:q), lower(title)) DESC LIMIT :limit"
                 ),

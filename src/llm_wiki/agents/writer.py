@@ -55,7 +55,9 @@ class WriterAgent(BaseAgent):
     # Scenario A — create a brand-new wiki page
     # ------------------------------------------------------------------
 
-    async def create_page(self, raw_content: str, file_id: str) -> WikiPage:
+    async def create_page(
+        self, raw_content: str, file_id: str, source_name: str = ""
+    ) -> WikiPage:
         """Create a brand-new wiki page from *raw_content*.
 
         Sends the full source text to the LLM with the writer_create prompt
@@ -78,6 +80,9 @@ class WriterAgent(BaseAgent):
             "writer_create",
             language=settings.wiki_language,
             raw_content=raw_content,
+            # BUG-17: настоящее имя материала — иначе модель цитирует
+            # буквальный заголовок секции: «[Источник: Source Document]».
+            source_name=source_name or "материал без названия",
         )
         system = "You are a technical wiki author. Return only valid JSON."
 
@@ -121,6 +126,7 @@ class WriterAgent(BaseAgent):
         raw_content: str,
         existing_pages: list[WikiPage],
         file_id: str,
+        source_name: str = "",
     ) -> list[WikiPage]:
         """Enrich up to 5 existing wiki pages with information from *raw_content*.
 
@@ -156,6 +162,7 @@ class WriterAgent(BaseAgent):
                 slug=page.slug,
                 existing_content=page.content,
                 raw_content=raw_content,
+                source_name=source_name or "материал без названия",
             )
             system = "You are a technical wiki editor. Return only valid JSON."
 
