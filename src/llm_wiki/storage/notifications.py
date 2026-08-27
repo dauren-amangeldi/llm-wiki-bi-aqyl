@@ -373,8 +373,12 @@ async def notify_case_privacy(
     published: bool,
     actor: str,
 ) -> None:
-    """Кейс стал общим/приватным — социальное событие, видно всем (broadcast).
-    In-place по family="privacy": туда-сюда-переключения не спамят ленту."""
+    """Смена приватности кейса — социальное событие.
+
+    QA D8: «стал общим» — broadcast (кейс появился у всех, это новость);
+    «стал приватным» — только владельцу: остальным кейс уже не виден, клик по
+    такому уведомлению вёл бы в «Недоступно». In-place по family="privacy":
+    туда-сюда-переключения не спамят ленту."""
     try:
         await upsert_event(
             session,
@@ -383,7 +387,7 @@ async def notify_case_privacy(
             event="published" if published else "privated",
             entity_id=case_id,
             title=title,
-            recipient=None,
+            recipient=None if published else actor,
             actor=actor,
         )
     except Exception as exc:  # noqa: BLE001

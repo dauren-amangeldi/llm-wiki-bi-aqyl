@@ -335,6 +335,9 @@ async def test_case_privacy_flip_emits_broadcast(
     rows = (await db_session.scalars(select(NotificationRecord))).all()
     assert len(rows) == 1
     assert rows[0].event == "privated"
+    # QA D8: «стал приватным» — только владельцу (кейс другим уже не виден,
+    # broadcast вёл бы кликом в «Недоступно»).
+    assert rows[0].recipient == USER
 
 
 @pytest.mark.asyncio

@@ -179,5 +179,7 @@ def serialize_summary(record: ArtifactRecord) -> dict[str, Any]:
         "artifact_id": record.artifact_id,
         "kind": record.kind,
         "status": record.status,
+        # QA D5: плитка студии показывает failed-состояние с причиной в тултипе.
+        "error": record.error,
         "created_at": record.created_at.isoformat() if record.created_at else "",
     }

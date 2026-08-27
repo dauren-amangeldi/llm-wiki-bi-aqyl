@@ -325,13 +325,15 @@ async def process_file(file_id: str) -> None:
         except Exception as exc:
             logger.error("pipeline_failed", file_id=file_id, error=str(exc))
             # Persist the reason so it is visible in the API / status stream / UI,
-            # not only in the logs.
-            await update_file_status(session, file_id, "FAILED", error=str(exc))
+            # not only in the logs. QA D3: юзеру — человеческий русский текст,
+            # технический оригинал остаётся в логах строчкой выше.
+            human = _humanize_pipeline_error(exc)
+            await update_file_status(session, file_id, "FAILED", error=human)
             # Б1: «Ошибка» в ленту сразу (ретрай, если он будет, перепишет ту же
             # строку в «Готово» — upsert по entity).
             from llm_wiki.storage import notifications as notif
 
-            await notif.notify_file_failed(session, file_id, str(exc))
+            await notif.notify_file_failed(session, file_id, human)
             raise
         finally:
             # Always close the SDK client within the active event loop so that
@@ -344,6 +346,31 @@ async def process_file(file_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _humanize_pipeline_error(exc: Exception) -> str:
+    """Технический текст ошибки → человеческая русская причина (QA D3).
+
+    Юзер видел «No extractable text in PDF '01a04411-…' (and OCR unavailable/
+    failed)» на карточке и в уведомлении — с UUID внутри. Известные паттерны
+    переводим; уже русский текст пропускаем как есть; незнакомый английский —
+    заворачиваем в общий понятный фолбэк (оригинал остаётся в логах).
+    """
+    raw = str(exc)
+    low = raw.lower()
+    if "no extractable text in pdf" in low:
+        return (
+            "Не удалось извлечь текст из PDF — файл повреждён или это скан "
+            "без распознаваемого текста"
+        )
+    if "no extractable text in docx" in low:
+        return "Не удалось извлечь текст из DOCX — файл пуст или повреждён"
+    if "unsupported file extension" in low:
+        return "Формат файла не поддерживается"
+    # Русский текст (наши собственные сообщения) — уже человеческий.
+    if any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in raw):
+        return raw
+    return "Не удалось обработать файл — он повреждён или в неподдерживаемом виде"
 
 
 async def _transition(session: AsyncSession, file_id: str, state: str) -> None:
