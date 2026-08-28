@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.agents.artifacts import ArtifactError, generate_content
+from llm_wiki.agents.artifacts import ArtifactError, _title_and_slugs, generate_content
 from llm_wiki.agents.artifacts_export import ExportError, export_artifact, supported_formats
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
@@ -166,6 +166,42 @@ async def _generate_and_store(
     return record.artifact_id, content
 
 
+async def _reject_empty_source(session: AsyncSession, document_id: str) -> None:
+    """Fail-fast (QA): (пере)генерация по заведомо пустому источнику — 422
+    СРАЗУ, до создания pending-строки и постановки в очередь.
+
+    Юзер-сценарий: удалил все материалы кейса → жмёт «Пересоздать» → раньше
+    генерация честно стартовала, минуту спустя падала фоном, а прошлый готовый
+    артефакт при этом перезатирался статусом failed. Теперь ошибка приходит в
+    момент клика, а раз генерация даже не начинается — старый артефакт
+    остаётся «Готово» и ничего не теряется.
+
+    Проверка та же, какой видит источники сама генерация (_title_and_slugs):
+    кейс без материалов / материалы без вики-страниц (ещё обрабатываются или
+    упали) / несуществующий документ.
+    """
+    from llm_wiki.storage.metadata import CaseRecord
+
+    case = await session.get(CaseRecord, document_id)
+    if case is not None and not (case.doc_ids or []):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "В кейсе нет материалов — добавьте хотя бы один материал, "
+                "чтобы создать артефакт."
+            ),
+        )
+    _title, slugs = await _title_and_slugs(session, document_id)
+    if not slugs:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Источник пока без содержимого — материалы ещё обрабатываются "
+                "или были удалены. Дождитесь обработки и попробуйте снова."
+            ),
+        )
+
+
 # A pending artifact younger than this is considered a LIVE generation —
 # repeat clicks return the same id instead of enqueuing another heavy task.
 # Above the worker deadline (480 s) so a running generation is never doubled;
@@ -191,6 +227,10 @@ async def _start_generation(
     A fresh pending row now short-circuits to the same artifact id.
     """
     from datetime import datetime, timedelta, timezone
+
+    # Fail-fast: пустой источник отклоняется ДО каких-либо записей — старый
+    # готовый артефакт не переводится в pending/failed и не теряется.
+    await _reject_empty_source(session, document_id)
 
     existing = await artifacts_store.find_by_kind(session, document_id, kind)
     if existing is not None and existing.status == "pending":
@@ -262,6 +302,9 @@ async def cards_generate(
     language = str(langs[0]) if isinstance(langs, list) and langs else "ru"
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
+    # Fail-fast: пустой источник — 422 сразу, без pending-строки (см.
+    # _reject_empty_source): старая версия карточек остаётся нетронутой.
+    await _reject_empty_source(session, document_id)
     # Заводим pending-строку заранее — на провале есть artifact_id для «ошибки»
     # в ленте (и клик из уведомления ведёт на упавший артефакт).
     record = await artifacts_store.create_pending_artifact(
