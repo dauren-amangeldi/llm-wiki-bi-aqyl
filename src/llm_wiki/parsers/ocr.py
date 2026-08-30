@@ -21,11 +21,22 @@ logger = structlog.get_logger(__name__)
 
 _OCR_PROMPT = (
     "You are an OCR engine. Transcribe ALL text visible on this document page "
-    "exactly as it appears — preserve reading order, line breaks, numbers, and "
-    "render any tables as plain text. Do NOT translate, summarise, add "
-    "commentary, or wrap the output in code fences. If the page has no legible "
-    "text, reply with nothing."
+    "or photo (including handwritten notes) exactly as it appears — preserve "
+    "reading order, line breaks, numbers, and render any tables as plain text. "
+    "Do NOT translate, summarise, add commentary, or wrap the output in code "
+    "fences. If the page has no legible text, reply with nothing."
 )
+
+# Vision API отклоняет слишком большие изображения; держим запас от лимита.
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+# Фото конспектов/заметок, принимаемые как материалы (upload + пайплайн).
+IMAGE_MIME_BY_EXT: dict[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
 class OCRError(Exception):
@@ -84,16 +95,33 @@ def ocr_pdf(path: Path, file_id: str = "ask") -> str:
     if not pages:
         raise OCRError("PDF has no pages to OCR.")
 
+    text = _transcribe_images(
+        [("image/png", png) for png in pages], file_id=file_id
+    )
+    if not text:
+        raise OCRError("OCR produced no text (blank or unreadable scan).")
+    logger.info("ocr_done", file_id=file_id, pages=len(pages), chars=len(text))
+    return text
+
+
+def _transcribe_images(images: list[tuple[str, bytes]], file_id: str) -> str:
+    """Vision-транскрипция изображений по порядку → сцепленный текст.
+
+    Общее ядро для страниц скан-PDF (``ocr_pdf``) и фото-материалов
+    (``ocr_image``). Каждый элемент — ``(mime, bytes)``.
+    """
     import openai
 
     client = openai.OpenAI(
         api_key=settings.openai_api_key, timeout=settings.llm_timeout_s
     )
-    logger.info("ocr_start", file_id=file_id, model=settings.ocr_model, pages=len(pages))
+    logger.info(
+        "ocr_start", file_id=file_id, model=settings.ocr_model, images=len(images)
+    )
 
     texts: list[str] = []
-    for idx, png in enumerate(pages, start=1):
-        b64 = base64.b64encode(png).decode("ascii")
+    for idx, (mime, data) in enumerate(images, start=1):
+        b64 = base64.b64encode(data).decode("ascii")
         try:
             resp = client.chat.completions.create(
                 model=settings.ocr_model,
@@ -104,7 +132,7 @@ def ocr_pdf(path: Path, file_id: str = "ask") -> str:
                             {"type": "text", "text": _OCR_PROMPT},
                             {
                                 "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{b64}"},
+                                "image_url": {"url": f"data:{mime};base64,{b64}"},
                             },
                         ],
                     }
@@ -117,8 +145,39 @@ def ocr_pdf(path: Path, file_id: str = "ask") -> str:
         if page_text:
             texts.append(page_text)
 
-    text = "\n\n".join(texts).strip()
+    return "\n\n".join(texts).strip()
+
+
+def ocr_image(path: Path, file_id: str = "ask") -> str:
+    """Извлечь текст из фото/картинки (jpeg/png/webp) vision-моделью.
+
+    Фича «фото конспектов»: юзер заливает снимок лекционных заметок (в т.ч.
+    рукописных) как материал — vision-модель транскрибирует его в текст, дальше
+    материал идёт по обычному пайплайну (вики-страница, поиск, артефакты).
+
+    Raises:
+        OCRError: нет API-ключа, неподдерживаемое расширение, файл слишком
+            большой, сбой API или на снимке нет читаемого текста.
+    """
+    if not settings.openai_api_key:
+        raise OCRError("OPENAI_API_KEY is required for OCR.")
+
+    mime = IMAGE_MIME_BY_EXT.get(path.suffix.lower())
+    if mime is None:
+        raise OCRError(f"Unsupported image type: {path.suffix!r}")
+
+    data = path.read_bytes()
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise OCRError(
+            "Изображение больше 20 МБ — сожмите фото и загрузите ещё раз."
+        )
+    if not data:
+        raise OCRError("Image file is empty.")
+
+    text = _transcribe_images([(mime, data)], file_id=file_id)
     if not text:
-        raise OCRError("OCR produced no text (blank or unreadable scan).")
-    logger.info("ocr_done", file_id=file_id, pages=len(pages), chars=len(text))
+        raise OCRError(
+            "На фото не найден читаемый текст — убедитесь, что снимок чёткий."
+        )
+    logger.info("ocr_image_done", file_id=file_id, chars=len(text))
     return text

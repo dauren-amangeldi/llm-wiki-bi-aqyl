@@ -40,7 +40,7 @@ class Material(BaseModel):
 
     document_id: str
     title: str
-    content_type: Literal["pdf", "markdown", "docx", "text", "audio"]
+    content_type: Literal["pdf", "markdown", "docx", "text", "audio", "image"]
     scope: Literal["internal", "external"] = "internal"
     business_unit: str = "HQ"
     status: str
@@ -84,9 +84,12 @@ class DocumentText(BaseModel):
 
 
 _AUDIO_EXTS = (".mp3", ".ogg", ".wav", ".m4a", ".webm")
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 
-def _content_type_for(name: str) -> Literal["pdf", "markdown", "docx", "text", "audio"]:
+def _content_type_for(
+    name: str,
+) -> Literal["pdf", "markdown", "docx", "text", "audio", "image"]:
     """Map an original filename to a Material content_type (drives the UI icon)."""
     n = (name or "").lower()
     if n.endswith(".pdf"):
@@ -97,6 +100,8 @@ def _content_type_for(name: str) -> Literal["pdf", "markdown", "docx", "text", "
         return "text"
     if n.endswith(_AUDIO_EXTS):
         return "audio"
+    if n.endswith(_IMAGE_EXTS):
+        return "image"
     return "markdown"
 
 

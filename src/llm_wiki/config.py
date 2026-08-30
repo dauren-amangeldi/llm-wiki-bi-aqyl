@@ -95,6 +95,11 @@ class Settings(BaseSettings):
             ".wav",
             ".m4a",
             ".webm",
+            # images (фото конспектов/заметок) → vision-OCR before ingestion
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
         }
     )
 
