@@ -91,3 +91,67 @@ def test_ocr_wraps_api_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     with patch("openai.OpenAI", return_value=client):
         with pytest.raises(OCRError, match="page 1"):
             ocr_pdf(pdf)
+
+
+# ---------------------------------------------------------------------------
+# ocr_image — фото конспектов/заметок (jpeg/png/webp) как материалы
+# ---------------------------------------------------------------------------
+
+
+def _photo(tmp_path: Path, name: str = "notes.png") -> Path:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (400, 200), "white")
+    ImageDraw.Draw(img).text((20, 90), "конспект", fill="black")
+    out = tmp_path / name
+    img.save(str(out))
+    return out
+
+
+def test_ocr_image_transcribes_photo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_wiki.parsers.ocr import ocr_image
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    photo = _photo(tmp_path)
+    fake = _mock_openai(["Лекция 3: фотосинтез. Хлорофилл поглощает свет."])
+    with patch("openai.OpenAI", return_value=fake):
+        out = ocr_image(photo, file_id="t")
+    assert "фотосинтез" in out
+    # data:image/png — mime по расширению файла, не захардкоженный png от рендера
+    sent = fake.chat.completions.create.call_args.kwargs["messages"][0]["content"][1]
+    assert sent["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_ocr_image_jpeg_mime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_wiki.parsers.ocr import ocr_image
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    photo = _photo(tmp_path, "notes.jpg")
+    fake = _mock_openai(["текст"])
+    with patch("openai.OpenAI", return_value=fake):
+        ocr_image(photo, file_id="t")
+    sent = fake.chat.completions.create.call_args.kwargs["messages"][0]["content"][1]
+    assert sent["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_ocr_image_no_text_raises_human_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_wiki.parsers.ocr import ocr_image
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    photo = _photo(tmp_path)
+    fake = _mock_openai([""])  # модель ничего не прочла
+    with patch("openai.OpenAI", return_value=fake):
+        with pytest.raises(OCRError, match="читаемый текст"):
+            ocr_image(photo, file_id="t")
+
+
+def test_ocr_image_too_large_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_wiki.parsers import ocr as ocr_mod
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(ocr_mod, "_MAX_IMAGE_BYTES", 10)  # крошечный лимит для теста
+    photo = _photo(tmp_path)
+    with pytest.raises(OCRError, match="20 МБ"):
+        ocr_mod.ocr_image(photo, file_id="t")
