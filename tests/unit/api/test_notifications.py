@@ -199,8 +199,11 @@ async def test_cards_generate_emits_artifact_done(
     «артефакт готов» не было вовсе. Теперь _generate_and_store эмитит его сам."""
     from unittest.mock import AsyncMock, patch
 
+    # created_pages непустой — иначе fail-fast guard (источник без содержимого)
+    # отклонит запрос 422 до генерации.
     db_session.add(FileRecord(file_id="f-card", original_name="c.pdf", status="DONE",
-                              display_name="Материал для карточек"))
+                              display_name="Материал для карточек",
+                              created_pages=["page-card"]))
     await db_session.commit()
 
     with patch("llm_wiki.api.v1.artifacts.generate_content",
@@ -225,11 +228,12 @@ async def test_cards_generate_emits_artifact_done(
 
 
 @pytest.mark.asyncio
-async def test_cards_generate_empty_case_emits_failed(
+async def test_cards_generate_empty_case_422_no_event(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    """Генерация карточек для кейса БЕЗ материалов: 422 + событие «ошибка» в
-    ленте с человеческой причиной (раньше по синхронному пути события не было)."""
+    """Fail-fast: карточки по кейсу БЕЗ материалов — 422 мгновенно, генерация
+    не начинается, поэтому и события в ленту НЕТ (юзер уже увидел причину
+    тостом; полный контракт — в test_artifact_failfast.py)."""
     db_session.add(CaseRecord(id="case-empty", title="Пустой кейс", doc_ids=[], owner=USER))
     await db_session.commit()
 
@@ -243,11 +247,7 @@ async def test_cards_generate_empty_case_emits_failed(
     rows = (await db_session.scalars(
         select(NotificationRecord).where(NotificationRecord.section == "artifacts")
     )).all()
-    assert len(rows) == 1
-    row = rows[0]
-    assert (row.event, row.meta["kind"]) == ("failed", "card")
-    assert row.detail and "нет материалов" in row.detail.lower()
-    assert row.recipient == USER
+    assert rows == []
 
 
 @pytest.mark.asyncio

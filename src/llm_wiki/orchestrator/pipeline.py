@@ -39,6 +39,8 @@ logger = structlog.get_logger(__name__)
 
 # Audio formats that are transcribed to text before ingestion.
 _AUDIO_EXTENSIONS = frozenset({".mp3", ".ogg", ".wav", ".m4a", ".webm"})
+# Image formats (фото конспектов) that are vision-OCR'd before ingestion.
+_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 
 class FileState(StrEnum):
@@ -393,8 +395,10 @@ def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
     when available; falls back to a legacy scan of the ``raw/`` prefix for
     files uploaded before date-partitioning.
 
-    Supports ``.pdf``, ``.md``, ``.txt``, ``.docx`` (extracted locally) and
-    audio (``.mp3``/``.ogg``/``.wav``/``.m4a``/``.webm``, transcribed via OpenAI).
+    Supports ``.pdf``, ``.md``, ``.txt``, ``.docx`` (extracted locally),
+    audio (``.mp3``/``.ogg``/``.wav``/``.m4a``/``.webm``, transcribed via OpenAI)
+    and images (``.jpg``/``.jpeg``/``.png``/``.webp`` — фото конспектов,
+    транскрибируются vision-моделью).
 
     Raises:
         FileNotFoundError: If no raw object for *file_id* exists.
@@ -456,6 +460,13 @@ def _load_raw_text(file_id: str, stored_key: str | None = None) -> str:
             return parse_docx(path)
         if ext in _AUDIO_EXTENSIONS:
             return transcribe_audio(path, file_id=file_id)
+        if ext in _IMAGE_EXTENSIONS:
+            # Фото конспектов/заметок → vision-OCR (тот же механизм, что у
+            # скан-PDF). OCRError всплывает как причина FAILED — с русским
+            # текстом («сожмите фото», «нет читаемого текста»).
+            from llm_wiki.parsers.ocr import ocr_image
+
+            return ocr_image(path, file_id=file_id)
     raise ValueError(f"Unsupported file extension: {ext!r}")
 
 
