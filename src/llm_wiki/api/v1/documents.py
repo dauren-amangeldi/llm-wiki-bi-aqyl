@@ -46,6 +46,7 @@ class Material(BaseModel):
     status: str
     created_at: str
     updated_at: str | None = None
+    finished_at: str | None = None
     source_language: str = "ru"
     tags: list[Tag] = []
     topic_ids: list[str] = []
@@ -120,6 +121,7 @@ def _file_record_to_material(fr: FileRecord) -> Material:
         status=fr.status,
         created_at=fr.created_at.isoformat(),
         updated_at=fr.updated_at.isoformat() if fr.updated_at else None,
+        finished_at=fr.finished_at.isoformat() if fr.finished_at else None,
         source_language="ru",
         tags=[],
         topic_ids=[],

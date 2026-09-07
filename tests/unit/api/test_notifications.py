@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from llm_wiki.api.deps import get_db
@@ -24,10 +26,174 @@ from llm_wiki.storage.metadata import (
     FileRecord,
     NotificationRead,
     NotificationRecord,
+    ensure_column_migrations,
+    update_file_status,
 )
 
 USER = "demo@bi.group"
 OTHER = "someone@bi.group"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sync", [False, True])
+async def test_delivery_is_idempotent_and_older_outcome_cannot_replace_retry(
+    db_session: AsyncSession, sync: bool,
+) -> None:
+    at = datetime(2026, 9, 7, 5, 20, tzinfo=timezone.utc)
+    args = dict(section="materials", family="generation", event="done",
+                entity_id="clock", title="Material", occurred_at=at, occurrence_key="attempt-1")
+
+    async def deliver(**changes) -> None:
+        if sync:
+            await asyncio.to_thread(notif._upsert_event_sync, **(args | changes))
+        else:
+            await notif.upsert_event(db_session, **(args | changes))
+
+    await deliver()
+    row = (await notif.list_events(db_session, USER))[0][0]
+    original_id, inserted_at, delivered_at = row.id, row.created_at, row.updated_at
+    await notif.mark_read(db_session, USER, mark_all=True)
+    await deliver()
+    row, read = (await notif.list_events(db_session, USER))[0]
+    assert (row.id, row.created_at, row.updated_at, row.occurred_at, read) == (
+        original_id, inserted_at, delivered_at, at, True,
+    )
+
+    # A genuinely new processing attempt with the SAME outcome must be visible.
+    await deliver(occurred_at=at + timedelta(hours=1), occurrence_key="attempt-2")
+    row, read = (await notif.list_events(db_session, USER))[0]
+    assert row.id == original_id and row.created_at == inserted_at
+    assert row.occurred_at == at + timedelta(hours=1) and not read
+    await notif.mark_read(db_session, USER, mark_all=True)
+    # A delayed failure from the previous attempt must not move time backwards.
+    await deliver(event="failed", occurred_at=at, occurrence_key="old-failure")
+    row, read = (await notif.list_events(db_session, USER))[0]
+    assert row.event == "done" and row.occurred_at == at + timedelta(hours=1) and read
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deliveries_create_one_notification(db_engine) -> None:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async def deliver() -> None:
+        async with factory() as session:
+            await notif.upsert_event(session, section="materials", family="generation",
+                                     event="done", entity_id="concurrent", title="Material",
+                                     occurred_at=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                                     occurrence_key="same-attempt")
+
+    await asyncio.gather(*(deliver() for _ in range(5)))
+    async with factory() as session:
+        assert len((await session.scalars(select(NotificationRecord))).all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_emitter_cannot_borrow_a_newer_sources_timestamp(db_session) -> None:
+    at = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    db_session.add(FileRecord(file_id="recovered", original_name="a.pdf", status="DONE", finished_at=at))
+    db_session.add(ArtifactRecord(artifact_id="recovered-art", document_id="recovered", kind="report",
+                                  status="ready", finished_at=at))
+    await db_session.commit()
+    await notif.notify_file_done(db_session, "recovered")
+    await notif.notify_artifact_event(db_session, artifact_id="recovered-art", document_id="recovered",
+                                      kind="report", event="done")
+    await notif.mark_read(db_session, USER, mark_all=True)
+    await notif.notify_file_failed(db_session, "recovered", "old failure")
+    await notif.notify_artifact_event(db_session, artifact_id="recovered-art", document_id="recovered",
+                                      kind="report", event="failed", detail="old failure")
+    await asyncio.to_thread(notif.notify_file_failed_sync, "recovered", "old failure")
+    await asyncio.to_thread(notif.notify_artifact_failed_sync, "recovered-art", "old failure")
+    rows = await notif.list_events(db_session, USER)
+    assert len(rows) == 2
+    assert all(row.event == "done" and row.occurred_at == at and read for row, read in rows)
+
+
+@pytest.mark.asyncio
+async def test_finished_at_survives_rename_and_duplicate_status_but_resets_on_retry(db_session) -> None:
+    fr = FileRecord(file_id="finished", original_name="a.pdf", status="WRITTEN")
+    db_session.add(fr)
+    await db_session.commit()
+    await update_file_status(db_session, fr.file_id, "DONE")
+    await db_session.refresh(fr)
+    finished = fr.finished_at
+    assert finished is not None
+    fr.display_name = "Renamed"
+    await db_session.commit()
+    await update_file_status(db_session, fr.file_id, "DONE")
+    await db_session.refresh(fr)
+    assert fr.finished_at == finished
+    await notif.notify_file_done(db_session, fr.file_id)
+    row, _ = (await notif.list_events(db_session, USER))[0]
+    assert row.occurred_at == finished
+    await notif.mark_read(db_session, USER, mark_all=True)
+    await notif.notify_file_done(db_session, fr.file_id)
+    assert (await notif.unread_counts(db_session, USER))["materials"] == 0
+    await update_file_status(db_session, fr.file_id, "RECEIVED")
+    await db_session.refresh(fr)
+    assert fr.finished_at is None
+    await update_file_status(db_session, fr.file_id, "FAILED")
+    await db_session.refresh(fr)
+    assert fr.finished_at > finished
+
+
+@pytest.mark.asyncio
+async def test_api_uses_source_event_time_and_sorts_by_it(client, db_session) -> None:
+    at = datetime(2026, 9, 7, 5, 20, tzinfo=timezone.utc)
+    db_session.add(ArtifactRecord(artifact_id="source-time", document_id="doc", kind="report",
+                                  status="ready", finished_at=at))
+    await db_session.commit()
+    await notif.notify_artifact_event(db_session, artifact_id="source-time", document_id="doc",
+                                      kind="report", event="done", requested_by=USER)
+    await notif.upsert_event(db_session, section="materials", family="generation", event="done",
+                             entity_id="late-delivery", title="Late", occurred_at=at - timedelta(hours=1))
+    data = (await client.get("/api/v1/notifications")).json()
+    assert [r["entity_id"] for r in data["items"]] == ["source-time", "late-delivery"]
+    assert data["items"][0]["occurred_at"] == data["items"][0]["created_at"] == at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_case_rename_preserves_event_but_reattachment_is_a_new_occurrence(client, db_session, monkeypatch) -> None:
+    from llm_wiki.api.v1 import cases
+
+    monkeypatch.setattr(cases, "_dispatch_autotag", lambda _: None)
+    at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    db_session.add(FileRecord(file_id="case-file", original_name="a.pdf", status="DONE", finished_at=at))
+    db_session.add(CaseRecord(id="case-clock", title="Case", doc_ids=["case-file"], owner=USER,
+                              created_at=at, materials_updated_at=at))
+    await db_session.commit()
+    await notif.notify_case_ready_if_done(db_session, "case-clock")
+    await notif.mark_read(db_session, USER, mark_all=True)
+    response = await client.put("/api/v1/cases/case-clock", json={"title": "Renamed"})
+    assert response.status_code == 200
+    await notif.notify_case_ready_if_done(db_session, "case-clock")
+    row, read = (await notif.list_events(db_session, USER))[0]
+    assert row.occurred_at == at and read
+    for docs in ([], ["case-file"]):
+        response = await client.put("/api/v1/cases/case-clock", json={"title": "Renamed", "doc_ids": docs})
+        assert response.status_code == 200
+    row, read = (await notif.list_events(db_session, USER))[0]
+    case = await db_session.get(CaseRecord, "case-clock", populate_existing=True)
+    assert row.occurred_at == case.materials_updated_at > at and not read
+    assert len(await notif.list_events(db_session, USER)) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_timestamp_migration_is_repeatable(db_engine) -> None:
+    async with db_engine.begin() as conn:
+        await conn.execute(FileRecord.__table__.insert().values(
+            file_id="legacy", original_name="old.pdf", status="DONE",
+            created_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        ))
+        for table, column in (("files", "finished_at"), ("cases", "materials_updated_at"),
+                              ("notifications", "occurred_at"), ("notifications", "occurrence_key")):
+            await conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+        await ensure_column_migrations(conn)
+        first = (await conn.execute(text("SELECT finished_at FROM files WHERE file_id='legacy'"))).scalar_one()
+        await conn.execute(text("UPDATE files SET updated_at='2026-09-03T00:00:00Z' WHERE file_id='legacy'"))
+        await ensure_column_migrations(conn)
+        second = (await conn.execute(text("SELECT finished_at FROM files WHERE file_id='legacy'"))).scalar_one()
+        assert first == second == datetime(2026, 9, 2, tzinfo=timezone.utc)
 
 
 @pytest_asyncio.fixture

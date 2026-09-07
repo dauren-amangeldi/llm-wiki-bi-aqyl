@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     cast,
+    case as sql_case,
     create_engine,
     select,
     text,
@@ -51,6 +52,15 @@ _DEV_USER_ROLE = "admin"
 # Index names match SQLAlchemy's default (``ix_<table>_<column>``) so a fresh
 # ``create_all`` and this backfill never create a duplicate.
 _COLUMN_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS finished_at timestamptz",
+    "UPDATE files SET finished_at = updated_at WHERE finished_at IS NULL"
+    " AND status IN ('DONE', 'FAILED', 'ROLLED_BACK')",
+    "ALTER TABLE cases ADD COLUMN IF NOT EXISTS materials_updated_at timestamptz",
+    "UPDATE cases SET materials_updated_at = created_at WHERE materials_updated_at IS NULL",
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS occurred_at timestamptz",
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS occurrence_key varchar",
+    "UPDATE notifications SET occurred_at = created_at WHERE occurred_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_notifications_occurred_at ON notifications (occurred_at)",
     # Trigram similarity for fuzzy (typo-tolerant) search over titles/names.
     "CREATE EXTENSION IF NOT EXISTS pg_trgm",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS error text",
@@ -284,6 +294,8 @@ class FileRecord(Base):
     # rows created before date-partitioning (read via the legacy raw/ path).
     raw_key: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="RECEIVED")
+    # Terminal transition time; renaming/publishing must never change it.
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Human-readable failure reason, set when status becomes FAILED. Surfaced in
     # GET /files/{id} and the status stream so the cause is visible without logs.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -322,6 +334,8 @@ class CaseRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     doc_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Only membership changes move this clock (not rename, tags or privacy).
+    materials_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Fixed-taxonomy tags (see llm_wiki.taxonomy): auto-assigned at creation,
     # then user-editable. Used to filter cases in the navigation.
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -639,6 +653,14 @@ async def update_file_status(
         "status": new_status,
         "updated_at": datetime.now(timezone.utc),
     }
+    if new_status in {"DONE", "FAILED", "ROLLED_BACK"}:
+        values["finished_at"] = sql_case(
+            (FileRecord.status != new_status, values["updated_at"]),
+            (FileRecord.finished_at.is_(None), values["updated_at"]),
+            else_=FileRecord.finished_at,
+        )
+    else:
+        values["finished_at"] = None
     if error is not None:
         values["error"] = error[:2000]
     await session.execute(
@@ -1110,6 +1132,10 @@ class NotificationRecord(Base):
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Контекст клика: {case_id?, document_id?, kind?} — куда вести из строки.
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Business event time and identity, independent of insert/delivery time.
+    # Nullable for rolling upgrades; legacy records fall back to created_at.
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    occurrence_key: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -1457,5 +1483,4 @@ async def suggest_twin_personas(
                 "persona_ids": twin_session.persona_ids,
             }
     return None
-
 

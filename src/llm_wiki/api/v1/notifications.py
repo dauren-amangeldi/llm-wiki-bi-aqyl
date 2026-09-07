@@ -47,6 +47,7 @@ _TOTAL_STEPS = 4
 
 
 def _serialize_event(rec, read: bool) -> dict[str, object]:  # noqa: ANN001
+    occurred_at = rec.occurred_at or rec.created_at
     return {
         "id": rec.id,
         "section": rec.section,
@@ -57,7 +58,9 @@ def _serialize_event(rec, read: bool) -> dict[str, object]:  # noqa: ANN001
         "detail": rec.detail,
         "actor": rec.actor,
         "meta": rec.meta or {},
-        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+        # Backward-compatible alias for older frontends; both describe the event.
+        "created_at": occurred_at.isoformat() if occurred_at else None,
+        "occurred_at": occurred_at.isoformat() if occurred_at else None,
         "read": read,
     }
 

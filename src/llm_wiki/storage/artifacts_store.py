@@ -59,6 +59,7 @@ async def upsert_artifact(
             kind=kind,
             versions=[version],
             status="ready",
+            finished_at=datetime.now(timezone.utc),
         )
         session.add(record)
         try:

@@ -476,7 +476,9 @@ def _mark_file_failed_sync(file_id: str, error: str) -> None:
         with engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE files SET status = 'FAILED', error = :err "
+                    "UPDATE files SET status = 'FAILED', error = :err, "
+                    "finished_at = CASE WHEN status = 'FAILED' THEN COALESCE(finished_at, now()) ELSE now() END, "
+                    "updated_at = now() "
                     "WHERE file_id = :fid"
                 ),
                 {"err": error[:500], "fid": file_id},
@@ -843,6 +845,7 @@ def sweep_stuck_generations() -> dict[str, int]:
                     now - created > timedelta(seconds=SWEEP_FILES_AFTER_S)
                 ):
                     fr.status = "FAILED"
+                    fr.finished_at = now
                     fr.error = (
                         "Обработка зависла и была снята автоматически — "
                         "загрузите файл повторно"

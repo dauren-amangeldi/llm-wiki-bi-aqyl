@@ -247,6 +247,7 @@ async def create_case(
         owner=owner,
         created_at=now,
         updated_at=now,
+        materials_updated_at=now,
     )
     db.add(case)
     # If the case is created already holding docs, align their visibility too.
@@ -296,6 +297,7 @@ async def update_case(
     # _dispatch_autotag ниже перегенерит его по новому составу.
     docs_changed = set(effective_doc_ids) != set(row.doc_ids or [])
     privacy_changed = bool(row.sensitive) != bool(body.sensitive)
+    changed_at = datetime.now(timezone.utc)
     await db.execute(
         sa_update(CaseRecord)
         .where(CaseRecord.id == case_id)
@@ -305,8 +307,8 @@ async def update_case(
             **({} if body.tags is None else {"tags": clean_tags(body.tags)}),
             sensitive=body.sensitive,
             scope=body.scope,
-            **({"description": ""} if docs_changed else {}),
-            updated_at=datetime.now(timezone.utc),
+            **({"description": "", "materials_updated_at": changed_at} if docs_changed else {}),
+            updated_at=changed_at,
         )
     )
     # Re-assert visibility over the (possibly newly-added) doc set so
@@ -328,6 +330,7 @@ async def update_case(
             title=body.title.strip() or row.title,
             published=not body.sensitive,
             actor=caller,
+            occurred_at=changed_at,
         )
     # Б1/пункт 2: материалы прикрепляются к кейсу именно этим PUT (модалка
     # создания: пустой кейс → загрузка → addDocsToCase). Если все они уже
@@ -556,10 +559,14 @@ async def unlink_document(
         raise HTTPException(status_code=404, detail="Case not found")
     _assert_can_edit(row, caller)
     doc_ids = [d for d in (row.doc_ids or []) if d != document_id]
+    changed_at = datetime.now(timezone.utc)
     await db.execute(
         sa_update(CaseRecord)
         .where(CaseRecord.id == case_id)
-        .values(doc_ids=doc_ids, updated_at=datetime.now(timezone.utc))
+        .values(
+            doc_ids=doc_ids, updated_at=changed_at,
+            **({"materials_updated_at": changed_at} if doc_ids != (row.doc_ids or []) else {}),
+        )
     )
     await db.commit()
     return {"ok": True}
