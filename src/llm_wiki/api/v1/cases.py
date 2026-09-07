@@ -633,7 +633,7 @@ async def generate_case_title(
         sa_update(CaseRecord).where(
             CaseRecord.id == case_id,
             CaseRecord.title == original_title,
-            CaseRecord.doc_ids == original_docs,
+            cast(CaseRecord.doc_ids, JSONB) == original_docs,
         ).values(title=title, updated_at=datetime.now(timezone.utc))
     )
     await db.commit()
