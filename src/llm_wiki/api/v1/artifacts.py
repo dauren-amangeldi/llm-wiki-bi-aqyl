@@ -3,33 +3,80 @@
 Contract expected by the frontend ``StudioColumn``:
 - ``GET  /artifacts?document_id=`` → [{artifact_id, kind, status, created_at}]
 - ``GET  /artifacts/{id}?language=`` → {artifact_id, kind, versions:[{language, content}]}
-- ``POST /studio/generate`` {kind, document_id, language} → {artifact_id, kind, content}  (report/test/presentation)
-- ``POST /cards/generate``  {document_id, languages:[..]} → {artifact_id, kind:"card"}
-- ``POST /images/generate`` {document_id, language, title} → {artifact_id, kind:"infographic", svg}
+- ``POST /studio/generate`` {kind, document_id, language, source_doc_ids?} → {artifact_id, kind, status}
+- ``POST /cards/generate``  {document_id, languages:[..], source_doc_ids?} → {artifact_id, kind:"card", status}
+- ``POST /images/generate`` {document_id, language, source_doc_ids?} → {artifact_id, kind:"infographic", status}
 """
 
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Response
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.agents.artifacts import ArtifactError, _title_and_slugs, generate_content
+from llm_wiki.agents.artifacts import ArtifactError, _title_and_slugs
 from llm_wiki.agents.artifacts_export import ExportError, export_artifact, supported_formats
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage import artifacts_store
+from llm_wiki.storage.metadata import CaseRecord, FileRecord
+
+
+async def _check_document_access(session: AsyncSession, document_id: str, caller: str) -> None:
+    record = await session.get(CaseRecord, document_id)
+    if record is None:
+        record = await session.get(FileRecord, document_id)
+    if record is None or (record.sensitive and record.owner != caller):
+        raise HTTPException(status_code=404, detail="Источник не найден")
+
+
+def _body_sources(body: dict[str, Any]) -> list[str] | None:
+    ids = body.get("source_doc_ids")
+    if ids is None:
+        return None
+    if not isinstance(ids, list) or any(not isinstance(i, str) or not i.strip() for i in ids):
+        raise HTTPException(status_code=422, detail="Некорректный список источников")
+    if not ids:
+        raise HTTPException(status_code=422, detail="Выберите хотя бы один источник для генерации")
+    return list(dict.fromkeys(ids))
+
+
+async def _resolve_sources(
+    session: AsyncSession, document_id: str, selected: list[str] | None, caller: str | None,
+) -> list[str]:
+    case = await session.get(CaseRecord, document_id)
+    file = None if case is not None else await session.get(FileRecord, document_id)
+    parent = case if case is not None else file
+    if parent is not None and caller is not None and parent.sensitive and parent.owner != caller:
+        raise HTTPException(status_code=404, detail="Источник не найден")
+    members = list(case.doc_ids or []) if case is not None else [document_id]
+    ids = members if selected is None else selected
+    if selected is not None and (not ids or not set(ids).issubset(members)):
+        raise HTTPException(status_code=422, detail="Выбранные источники отсутствуют в кейсе. Обновите список материалов.")
+    if len(ids) > 200:
+        raise HTTPException(status_code=422, detail="Выберите не более 200 источников для одной генерации.")
+    for file_id in ids:
+        source = await session.get(FileRecord, file_id)
+        if source is None or source.status != "DONE":
+            raise HTTPException(status_code=422, detail="Источник пока без содержимого — материалы ещё обрабатываются или были удалены. Дождитесь обработки и попробуйте снова.")
+        if caller is not None and source.sensitive and source.owner != caller:
+            raise HTTPException(status_code=404, detail="Источник не найден")
+    return list(dict.fromkeys(ids))
 
 
 @router.get("/artifacts")
 async def list_artifacts(
-    document_id: str | None = None, session: AsyncSession = Depends(get_db)
+    document_id: str | None = None, session: AsyncSession = Depends(get_db),
+    language: str = "ru", caller: str = Depends(get_user_key),
 ) -> list[dict[str, Any]]:
     if not document_id:
         return []
+    await _check_document_access(session, document_id, caller)
     rows = await artifacts_store.list_artifacts(session, document_id)
-    return [artifacts_store.serialize_summary(r) for r in rows]
+    return [artifacts_store.serialize_summary(r, language) for r in rows]
 
 
 @router.get("/artifacts/{artifact_id}")
@@ -37,10 +84,12 @@ async def get_artifact(
     artifact_id: str,
     language: str = "ru",  # noqa: ARG001 — frontend passes it; we return all versions
     session: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, Any]:
     record = await artifacts_store.get_artifact(session, artifact_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    await _check_document_access(session, record.document_id, caller)
     return artifacts_store.serialize_detail(record)
 
 
@@ -62,6 +111,7 @@ async def export_artifact_file(
     format: str = "pdf",
     language: str = "ru",
     session: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> Response:
     """Stream the rendered artifact as a downloadable file.
 
@@ -72,6 +122,7 @@ async def export_artifact_file(
     record = await artifacts_store.get_artifact(session, artifact_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    await _check_document_access(session, record.document_id, caller)
     try:
         data, media_type = export_artifact(
             record.kind, _version_content(record, language), format
@@ -100,6 +151,7 @@ async def export_artifact_prepare(
     record = await artifacts_store.get_artifact(session, artifact_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    await _check_document_access(session, record.document_id, _caller)
     fmt = str(body.get("format") or "")
     if fmt not in supported_formats(record.kind):
         raise HTTPException(
@@ -116,11 +168,11 @@ async def _notify_artifact_failed(
     kind: str,
     requested_by: str | None,
     error: str,
+    generation_id: str,
 ) -> None:
-    """Пометить артефакт упавшим И положить «ошибка» в ленту — синхронные пути
-    (карточки, inline-фолбэк) сами не проходят через Celery-таск, где это
-    делается. Так ошибка «нет материалов» видна и в тосте, и в колокольчике."""
-    await artifacts_store.mark_failed(session, artifact_id, error)
+    """Report an enqueue failure only while this attempt still owns the row."""
+    if not await artifacts_store.mark_failed(session, artifact_id, error, generation_id=generation_id):
+        return
     from llm_wiki.storage import notifications as notif
 
     await notif.notify_artifact_event(
@@ -134,39 +186,7 @@ async def _notify_artifact_failed(
     )
 
 
-async def _generate_and_store(
-    session: AsyncSession, kind: str, document_id: str, language: str,
-    requested_by: str | None = None,
-) -> tuple[str, dict[str, Any]]:
-    from llm_wiki.llm.client import LLMClient
-
-    llm = LLMClient()
-    try:
-        content = await generate_content(
-            session, llm, kind=kind, document_id=document_id, language=language
-        )
-    finally:
-        await llm.aclose()
-    record = await artifacts_store.upsert_artifact(
-        session, document_id=document_id, kind=kind, language=language, content=content
-    )
-    # Б1: синхронный путь (карточки; и inline-фолбэк при недоступном брокере)
-    # НЕ проходит через Celery-таск, где эмитится «артефакт готов» — поэтому
-    # событие в ленту нужно эмитить здесь, иначе по карточкам уведомления нет.
-    from llm_wiki.storage import notifications as notif
-
-    await notif.notify_artifact_event(
-        session,
-        artifact_id=record.artifact_id,
-        document_id=document_id,
-        kind=kind,
-        event="done",
-        requested_by=requested_by,
-    )
-    return record.artifact_id, content
-
-
-async def _reject_empty_source(session: AsyncSession, document_id: str) -> None:
+async def _reject_empty_source(session: AsyncSession, document_id: str, source_doc_ids: list[str] | None = None) -> None:
     """Fail-fast (QA): (пере)генерация по заведомо пустому источнику — 422
     СРАЗУ, до создания pending-строки и постановки в очередь.
 
@@ -191,7 +211,10 @@ async def _reject_empty_source(session: AsyncSession, document_id: str) -> None:
                 "чтобы создать артефакт."
             ),
         )
-    _title, slugs = await _title_and_slugs(session, document_id)
+    try:
+        _title, slugs = await _title_and_slugs(session, document_id, source_doc_ids)
+    except ArtifactError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not slugs:
         raise HTTPException(
             status_code=422,
@@ -213,14 +236,14 @@ _PENDING_DEDUP_WINDOW_S = 600
 async def _start_generation(
     session: AsyncSession, kind: str, document_id: str, language: str,
     requested_by: str | None = None,
+    source_doc_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a pending artifact and enqueue background generation.
 
     Heavy artifacts (LLM reports, gpt-image-1 infographics) can run for minutes,
     so we move them off the request path: the client gets an id immediately and
     polls ``GET /artifacts/{id}`` until ``status`` is ``ready``/``failed``. If the
-    broker is unreachable (e.g. dev without a worker) we fall back to generating
-    synchronously so the feature still works.
+    broker is unreachable, fail promptly and retain the last successful version.
 
     Dedup: during the 2026-08-20 incident stuck «pending» rows made users spam
     the generate button, each click enqueuing another multi-minute LLM task.
@@ -230,7 +253,10 @@ async def _start_generation(
 
     # Fail-fast: пустой источник отклоняется ДО каких-либо записей — старый
     # готовый артефакт не переводится в pending/failed и не теряется.
-    await _reject_empty_source(session, document_id)
+    source_doc_ids = await _resolve_sources(session, document_id, source_doc_ids, requested_by)
+    await _reject_empty_source(session, document_id, source_doc_ids)
+    # Serialize concurrent starts, including the first insert for this kind.
+    await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"artifact:{document_id}:{kind}"})
 
     existing = await artifacts_store.find_by_kind(session, document_id, kind)
     if existing is not None and existing.status == "pending":
@@ -240,14 +266,18 @@ async def _start_generation(
         if ts is not None and datetime.now(timezone.utc) - ts < timedelta(
             seconds=_PENDING_DEDUP_WINDOW_S
         ):
+            context = existing.generation_context or {}
+            if context and (set(context.get("source_doc_ids", [])) != set(source_doc_ids) or context.get("language") != language):
+                raise HTTPException(status_code=409, detail="Артефакт уже создаётся по другому набору источников или языку. Дождитесь завершения.")
             return {
                 "artifact_id": existing.artifact_id,
                 "kind": kind,
                 "status": "pending",
             }
 
+    context = {"id": uuid4().hex, "source_doc_ids": source_doc_ids, "language": language}
     record = await artifacts_store.create_pending_artifact(
-        session, document_id=document_id, kind=kind, requested_by=requested_by
+        session, document_id=document_id, kind=kind, requested_by=requested_by, generation_context=context
     )
     try:
         from llm_wiki.orchestrator.tasks import generate_artifact
@@ -258,20 +288,16 @@ async def _start_generation(
         # (the janitor has already failed their rows).
         generate_artifact.apply_async(
             args=(record.artifact_id, document_id, kind, language),
+            kwargs={"generation_id": context["id"]},
             expires=1800,
         )
-    except Exception:  # noqa: BLE001 — broker down: generate inline as a fallback
-        try:
-            await _generate_and_store(
-                session, kind, document_id, language, requested_by=requested_by
-            )
-        except ArtifactError as exc:
-            await _notify_artifact_failed(
-                session, artifact_id=record.artifact_id, document_id=document_id,
-                kind=kind, requested_by=requested_by, error=str(exc),
-            )
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"artifact_id": record.artifact_id, "kind": kind, "status": "ready"}
+    except Exception as exc:  # noqa: BLE001 — do not run paid work in a failed HTTP enqueue
+        error = "Очередь генерации временно недоступна. Попробуйте ещё раз позже."
+        await _notify_artifact_failed(
+            session, artifact_id=record.artifact_id, document_id=document_id,
+            kind=kind, requested_by=requested_by, error=error, generation_id=context["id"],
+        )
+        raise HTTPException(status_code=503, detail=error) from exc
     return {"artifact_id": record.artifact_id, "kind": kind, "status": "pending"}
 
 
@@ -288,10 +314,10 @@ async def studio_generate(
         raise HTTPException(status_code=400, detail=f"Unsupported kind for /studio/generate: {kind!r}")
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
-    return await _start_generation(session, kind, document_id, language, requested_by=caller)
+    return await _start_generation(session, kind, document_id, language, requested_by=caller, source_doc_ids=_body_sources(body))
 
 
-@router.post("/cards/generate")
+@router.post("/cards/generate", status_code=202)
 async def cards_generate(
     body: dict[str, Any],
     session: AsyncSession = Depends(get_db),
@@ -302,25 +328,10 @@ async def cards_generate(
     language = str(langs[0]) if isinstance(langs, list) and langs else "ru"
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
-    # Fail-fast: пустой источник — 422 сразу, без pending-строки (см.
-    # _reject_empty_source): старая версия карточек остаётся нетронутой.
-    await _reject_empty_source(session, document_id)
-    # Заводим pending-строку заранее — на провале есть artifact_id для «ошибки»
-    # в ленте (и клик из уведомления ведёт на упавший артефакт).
-    record = await artifacts_store.create_pending_artifact(
-        session, document_id=document_id, kind="card", requested_by=caller
+    # Cards use the same durable queue and deduplication as other artifact kinds.
+    return await _start_generation(
+        session, "card", document_id, language, requested_by=caller, source_doc_ids=_body_sources(body)
     )
-    try:
-        artifact_id, _ = await _generate_and_store(
-            session, "card", document_id, language, requested_by=caller
-        )
-    except ArtifactError as exc:
-        await _notify_artifact_failed(
-            session, artifact_id=record.artifact_id, document_id=document_id,
-            kind="card", requested_by=caller, error=str(exc),
-        )
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"artifact_id": artifact_id, "kind": "card"}
 
 
 @router.post("/images/generate", status_code=202)
@@ -335,4 +346,4 @@ async def images_generate(
         raise HTTPException(status_code=400, detail="document_id is required")
     # gpt-image-1 generation is the slowest artifact — always run it async and
     # let the client poll GET /artifacts/{id} for the content.
-    return await _start_generation(session, "infographic", document_id, language, requested_by=caller)
+    return await _start_generation(session, "infographic", document_id, language, requested_by=caller, source_doc_ids=_body_sources(body))

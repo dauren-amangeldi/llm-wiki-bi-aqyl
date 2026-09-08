@@ -283,7 +283,7 @@ async def retry_file(
     await session.execute(
         sa_update(FileRecord)
         .where(FileRecord.file_id == file_id)
-        .values(status="RECEIVED", error=None, ingest_attempts=0)
+        .values(status="RECEIVED", error=None, ingest_attempts=0, finished_at=None)
     )
     await session.commit()
     task = process_file_task.delay(file_id)

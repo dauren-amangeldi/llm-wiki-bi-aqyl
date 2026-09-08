@@ -13,13 +13,18 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from hashlib import sha256
 
 import structlog
-from sqlalchemy import and_, delete as sa_delete, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import delete as sa_delete
+from sqlalchemy.dialects.postgresql import Insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.config import settings
 from llm_wiki.storage.metadata import (
+    ArtifactRecord,
     CaseRecord,
     FileRecord,
     NotificationRead,
@@ -41,6 +46,46 @@ _FILE_TERMINAL = ("DONE", "FAILED", "ROLLED_BACK")
 # ---------------------------------------------------------------------------
 
 
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _identity(*parts: object) -> str:
+    return sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _event_statement(
+    *, section: str, family: str, event: str, entity_id: str, title: str,
+    recipient: str | None = None, actor: str | None = None,
+    detail: str | None = None, meta: dict | None = None,
+    occurred_at: datetime | None = None, occurrence_key: str | None = None,
+) -> Insert:
+    """One atomic write for async and emergency sync emitters.
+
+    A duplicate cannot move the event's clock or reset reads. An older delivery
+    cannot replace a newer outcome. A new attempt has a different source key.
+    """
+    now = datetime.now(timezone.utc)
+    at = _utc(occurred_at or now)
+    key = occurrence_key or _identity(event, detail, meta or {})
+    stmt = pg_insert(NotificationRecord).values(
+        section=section, family=family, event=event, entity_id=entity_id,
+        title=title, recipient=recipient, actor=actor, detail=detail, meta=meta or {},
+        created_at=now, updated_at=now, occurred_at=at, occurrence_key=key,
+    )
+    return stmt.on_conflict_do_update(
+        index_elements=[NotificationRecord.section, NotificationRecord.entity_id, NotificationRecord.family],
+        set_={name: getattr(stmt.excluded, name) for name in (
+            "event", "title", "recipient", "actor", "detail", "meta",
+            "updated_at", "occurred_at", "occurrence_key",
+        )},
+        where=and_(
+            NotificationRecord.occurrence_key.is_distinct_from(stmt.excluded.occurrence_key),
+            stmt.excluded.occurred_at >= func.coalesce(NotificationRecord.occurred_at, NotificationRecord.created_at),
+        ),
+    )
+
+
 async def upsert_event(
     session: AsyncSession,
     *,
@@ -53,51 +98,20 @@ async def upsert_event(
     actor: str | None = None,
     detail: str | None = None,
     meta: dict | None = None,
+    occurred_at: datetime | None = None,
+    occurrence_key: str | None = None,
 ) -> None:
-    """Одна строка на (section, entity_id, family): существующая обновляется.
-
-    Смена события (failed→done, published→privated) сбрасывает отметки чтения
-    — строка снова непрочитана — и поднимает её наверх ленты (created_at=now).
-    """
-    now = datetime.now(timezone.utc)
-    row = (
+    """Update only for a new occurrence; duplicate deliveries are no-ops."""
+    result = await session.execute(_event_statement(
+        section=section, family=family, event=event, entity_id=entity_id,
+        title=title, recipient=recipient, actor=actor, detail=detail, meta=meta,
+        occurred_at=occurred_at, occurrence_key=occurrence_key,
+    ).returning(NotificationRecord), execution_options={"populate_existing": True})
+    notification = result.scalar_one_or_none()
+    if notification is not None:
         await session.execute(
-            select(NotificationRecord).where(
-                NotificationRecord.section == section,
-                NotificationRecord.entity_id == entity_id,
-                NotificationRecord.family == family,
-            )
+            sa_delete(NotificationRead).where(NotificationRead.notification_id == notification.id)
         )
-    ).scalar_one_or_none()
-    if row is None:
-        session.add(
-            NotificationRecord(
-                section=section,
-                family=family,
-                event=event,
-                entity_id=entity_id,
-                title=title,
-                recipient=recipient,
-                actor=actor,
-                detail=detail,
-                meta=meta or {},
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await session.commit()
-        return
-    row.event = event
-    row.title = title or row.title
-    row.recipient = recipient
-    row.actor = actor
-    row.detail = detail
-    row.meta = meta or {}
-    row.created_at = now
-    row.updated_at = now
-    await session.execute(
-        sa_delete(NotificationRead).where(NotificationRead.notification_id == row.id)
-    )
     await session.commit()
 
 
@@ -111,6 +125,8 @@ def _upsert_event_sync(
     recipient: str | None = None,
     detail: str | None = None,
     meta: dict | None = None,
+    occurred_at: datetime | None = None,
+    occurrence_key: str | None = None,
 ) -> None:
     """Синхронный upsert для аварийных путей без живого event loop
     (SoftTimeLimitExceeded, poison-cap). Тот же контракт, что upsert_event."""
@@ -119,37 +135,13 @@ def _upsert_event_sync(
     engine = create_engine(settings.database_url)
     try:
         with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO notifications"
-                    " (recipient, actor, section, family, event, entity_id,"
-                    "  title, detail, meta, created_at, updated_at)"
-                    " VALUES (:recipient, NULL, :section, :family, :event,"
-                    "  :entity_id, :title, :detail, CAST(:meta AS json), now(), now())"
-                    " ON CONFLICT (section, entity_id, family) DO UPDATE SET"
-                    "  event = excluded.event, title = excluded.title,"
-                    "  recipient = excluded.recipient, detail = excluded.detail,"
-                    "  meta = excluded.meta, created_at = now(), updated_at = now()"
-                ),
-                {
-                    "recipient": recipient,
-                    "section": section,
-                    "family": family,
-                    "event": event,
-                    "entity_id": entity_id,
-                    "title": title,
-                    "detail": detail,
-                    "meta": json.dumps(meta or {}, ensure_ascii=False),
-                },
-            )
-            conn.execute(
-                text(
-                    "DELETE FROM notification_reads WHERE notification_id ="
-                    " (SELECT id FROM notifications WHERE section = :section"
-                    "  AND entity_id = :entity_id AND family = :family)"
-                ),
-                {"section": section, "entity_id": entity_id, "family": family},
-            )
+            notification_id = conn.execute(_event_statement(
+                section=section, family=family, event=event, entity_id=entity_id,
+                title=title, recipient=recipient, detail=detail, meta=meta,
+                occurred_at=occurred_at, occurrence_key=occurrence_key,
+            ).returning(NotificationRecord.id)).scalar_one_or_none()
+            if notification_id is not None:
+                conn.execute(sa_delete(NotificationRead).where(NotificationRead.notification_id == notification_id))
     finally:
         engine.dispose()
 
@@ -163,16 +155,29 @@ def _file_title(fr: FileRecord) -> str:
     return fr.display_name or fr.original_name
 
 
+def _file_event_time(fr: FileRecord) -> datetime:
+    if fr.finished_at:
+        return _utc(fr.finished_at)
+    for entry in reversed(fr.state_history or []):
+        if entry.get("state") == fr.status:
+            try:
+                return _utc(datetime.fromisoformat(entry["at"]))
+            except (KeyError, ValueError, TypeError):
+                pass
+    return _utc(fr.created_at or datetime.now(timezone.utc))
+
+
 async def notify_file_done(session: AsyncSession, file_id: str) -> None:
     """Материал обработан → событие в «Материалы»; если это был последний
     обрабатываемый материал кейса — ещё и «Кейс обработан» в «Кейсы»."""
     try:
-        fr = await session.get(FileRecord, file_id)
-        if fr is None:
+        fr = await session.get(FileRecord, file_id, populate_existing=True)
+        if fr is None or fr.status.upper() != "DONE":
             return
         case = await case_for_file(session, file_id)
         # recipient: загрузивший (owner). У опубликованных файлов owner=NULL —
         # broadcast; честная адресация появится с Keycloak (Б2).
+        at = _file_event_time(fr)
         await upsert_event(
             session,
             section="materials",
@@ -182,6 +187,8 @@ async def notify_file_done(session: AsyncSession, file_id: str) -> None:
             title=_file_title(fr),
             recipient=fr.owner,
             meta={"case_id": case[0]} if case else {},
+            occurred_at=at,
+            occurrence_key=_identity("done", at),
         )
         if case:
             await _maybe_notify_case_done(session, case_id=case[0])
@@ -193,10 +200,11 @@ async def notify_file_done(session: AsyncSession, file_id: str) -> None:
 async def notify_file_failed(session: AsyncSession, file_id: str, error: str) -> None:
     """Материал упал → событие «Ошибка» с причиной (никогда не молча)."""
     try:
-        fr = await session.get(FileRecord, file_id)
-        if fr is None:
+        fr = await session.get(FileRecord, file_id, populate_existing=True)
+        if fr is None or fr.status.upper() not in {"FAILED", "ROLLED_BACK"}:
             return
         case = await case_for_file(session, file_id)
+        at = _file_event_time(fr)
         await upsert_event(
             session,
             section="materials",
@@ -207,6 +215,8 @@ async def notify_file_failed(session: AsyncSession, file_id: str, error: str) ->
             recipient=fr.owner,
             detail=(error or "")[:500],
             meta={"case_id": case[0]} if case else {},
+            occurred_at=at,
+            occurrence_key=_identity("failed", at),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("notify_file_failed_failed", file_id=file_id, error=str(exc))
@@ -217,19 +227,26 @@ async def _maybe_notify_case_done(session: AsyncSession, case_id: str) -> None:
     """«Кейс обработан» — только когда ВСЕ его материалы дошли до терминального
     статуса и хотя бы один успешен. Догрузка материалов в кейс позже честно
     переэмитит то же событие (in-place, без наслоения)."""
-    case = await session.get(CaseRecord, case_id)
+    case = await session.get(CaseRecord, case_id, populate_existing=True)
     if case is None or not case.doc_ids:
         return
-    statuses = (
+    files = (
         await session.execute(
-            select(FileRecord.status).where(FileRecord.file_id.in_(case.doc_ids))
+            select(FileRecord).where(FileRecord.file_id.in_(case.doc_ids))
+            .order_by(FileRecord.file_id).execution_options(populate_existing=True)
         )
     ).scalars().all()
+    statuses = [fr.status for fr in files]
+    if len(files) != len(set(case.doc_ids)):
+        return
     if not statuses or any(s.upper() not in _FILE_TERMINAL for s in statuses):
         return
     n_done = sum(1 for s in statuses if s.upper() == "DONE")
     if not n_done:
         return
+    composition_at = _utc(case.materials_updated_at or case.created_at)
+    occurred_at = max(composition_at, *(_file_event_time(fr) for fr in files))
+    key = _identity(composition_at, [(fr.file_id, fr.status, _file_event_time(fr)) for fr in files])
     await upsert_event(
         session,
         section="cases",
@@ -239,6 +256,8 @@ async def _maybe_notify_case_done(session: AsyncSession, case_id: str) -> None:
         title=case.title,
         recipient=case.owner if case.sensitive else None,
         meta={"materials": n_done},
+        occurred_at=occurred_at,
+        occurrence_key=key,
     )
 
 
@@ -274,6 +293,10 @@ async def notify_artifact_event(
     вид артефакта фронт берёт из meta.kind (локализация на клиенте)."""
     try:
         title = await document_title(session, document_id)
+        artifact = await session.get(ArtifactRecord, artifact_id, populate_existing=True)
+        if artifact and artifact.status != {"done": "ready", "failed": "failed"}.get(event):
+            return  # The source has moved on; do not borrow its newer timestamp.
+        at = artifact.finished_at if artifact else None
         await upsert_event(
             session,
             section="artifacts",
@@ -284,6 +307,8 @@ async def notify_artifact_event(
             recipient=requested_by,
             detail=(detail or None) and detail[:500],
             meta={"document_id": document_id, "kind": kind},
+            occurred_at=at,
+            occurrence_key=_identity(event, _utc(at)) if at else None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -303,13 +328,13 @@ def notify_artifact_failed_sync(artifact_id: str, error: str) -> None:
             with engine.connect() as conn:
                 row = conn.execute(
                     text(
-                        "SELECT a.document_id, a.kind, a.requested_by,"
+                        "SELECT a.document_id, a.kind, a.requested_by, a.finished_at,"
                         "  COALESCE(f.display_name, f.original_name, c.title,"
                         "           a.document_id) AS title"
                         " FROM artifacts a"
                         " LEFT JOIN files f ON f.file_id = a.document_id"
                         " LEFT JOIN cases c ON c.id = a.document_id"
-                        " WHERE a.artifact_id = :aid"
+                        " WHERE a.artifact_id = :aid AND a.status = 'failed'"
                     ),
                     {"aid": artifact_id},
                 ).first()
@@ -326,6 +351,8 @@ def notify_artifact_failed_sync(artifact_id: str, error: str) -> None:
             recipient=row.requested_by,
             detail=error[:500],
             meta={"document_id": row.document_id, "kind": row.kind},
+            occurred_at=row.finished_at,
+            occurrence_key=_identity("failed", _utc(row.finished_at)) if row.finished_at else None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -344,7 +371,8 @@ def notify_file_failed_sync(file_id: str, error: str) -> None:
                 row = conn.execute(
                     text(
                         "SELECT COALESCE(display_name, original_name) AS title,"
-                        " owner FROM files WHERE file_id = :fid"
+                        " owner, COALESCE(finished_at, created_at) AS finished_at FROM files"
+                        " WHERE file_id = :fid AND status IN ('FAILED', 'ROLLED_BACK')"
                     ),
                     {"fid": file_id},
                 ).first()
@@ -360,6 +388,8 @@ def notify_file_failed_sync(file_id: str, error: str) -> None:
             title=row.title,
             recipient=row.owner,
             detail=error[:500],
+            occurred_at=row.finished_at,
+            occurrence_key=_identity("failed", _utc(row.finished_at)) if row.finished_at else None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("notify_file_failed_sync_failed", file_id=file_id, error=str(exc))
@@ -372,6 +402,7 @@ async def notify_case_privacy(
     title: str,
     published: bool,
     actor: str,
+    occurred_at: datetime | None = None,
 ) -> None:
     """Смена приватности кейса — социальное событие.
 
@@ -389,6 +420,8 @@ async def notify_case_privacy(
             title=title,
             recipient=None if published else actor,
             actor=actor,
+            occurred_at=occurred_at,
+            occurrence_key=_identity(published, _utc(occurred_at)) if occurred_at else None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("notify_case_privacy_failed", case_id=case_id, error=str(exc))
@@ -449,7 +482,10 @@ async def list_events(
     )
     if tab:
         stmt = stmt.where(NotificationRecord.section == tab)
-    stmt = stmt.order_by(NotificationRecord.created_at.desc()).limit(limit)
+    stmt = stmt.order_by(
+        func.coalesce(NotificationRecord.occurred_at, NotificationRecord.created_at).desc(),
+        NotificationRecord.id.desc(),
+    ).limit(limit).execution_options(populate_existing=True)
     rows = (await session.execute(stmt)).all()
     return [(rec, read_id is not None) for rec, read_id in rows]
 
@@ -500,7 +536,7 @@ async def sweep_old_events(session: AsyncSession, days: int = 30) -> int:
     old_ids = (
         await session.execute(
             select(NotificationRecord.id).where(
-                NotificationRecord.created_at
+                func.coalesce(NotificationRecord.occurred_at, NotificationRecord.created_at)
                 < text(f"now() - interval '{int(days)} days'")
             )
         )

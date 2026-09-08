@@ -133,10 +133,10 @@ async def list_generations(
                 "created_at": f.created_at.isoformat() if f.created_at else None,
                 "started_at": f.created_at.isoformat() if f.created_at else None,
                 "finished_at": (
-                    f.updated_at.isoformat() if f.updated_at and status in ("ready", "failed") else None
+                    f.finished_at.isoformat() if f.finished_at and status in ("ready", "failed") else None
                 ),
                 "duration_s": _duration_s(
-                    f.created_at, f.updated_at if status in ("ready", "failed") else None
+                    f.created_at, f.finished_at if status in ("ready", "failed") else None
                 ),
             }
         )
@@ -286,7 +286,7 @@ async def purge_queues(
     files = await session.execute(
         sa_update(FileRecord)
         .where(func.lower(FileRecord.status).in_(list(_FILE_ACTIVE)))
-        .values(status="FAILED", error=note)
+        .values(status="FAILED", error=note, finished_at=datetime.now(timezone.utc))
     )
     await session.commit()
 

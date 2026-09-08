@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
-from llm_wiki.storage.metadata import FileRecord
+from llm_wiki.storage.metadata import FileRecord, update_file_status
 
 
 # ── GET — empty / minimal responses ─────────────────────────────────────────
@@ -102,6 +102,5 @@ async def delete_doc(
     """Soft-delete: set status to ROLLED_BACK (filtered from GET /documents)."""
     fr = await db.get(FileRecord, document_id)
     if fr:
-        fr.status = "ROLLED_BACK"
-        await db.commit()
+        await update_file_status(db, document_id, "ROLLED_BACK")
     return {"ok": True}
