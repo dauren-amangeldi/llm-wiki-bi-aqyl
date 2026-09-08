@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, Form, HTTPException, Response, UploadFile
+from fastapi import Depends, Form, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -149,15 +149,20 @@ async def list_documents(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
+    ids: list[str] | None = Query(default=None, max_length=200),
 ) -> list[Material]:
     """Return non-rolled-back documents visible to the caller.
 
     Sensitive documents are listed only for their owner.
     """
     stmt = select(FileRecord).where(
-        FileRecord.status != "ROLLED_BACK",
         or_(FileRecord.sensitive.is_(False), FileRecord.owner == caller),
     )
+    if ids is None:
+        stmt = stmt.where(FileRecord.status != "ROLLED_BACK")
+    else:
+        stmt = stmt.where(FileRecord.file_id.in_(ids))
+        limit, offset = len(ids), 0
     if q and q.strip():
         term = q.strip()
         # Substring OR trigram similarity so typos still match (e.g. «маркетнг»).

@@ -134,6 +134,8 @@ async def test_start_generation_dedupes_live_pending(
     from llm_wiki.api.v1 import artifacts as artifacts_api
     from llm_wiki.orchestrator import tasks as tasks_mod
 
+    db_session.add(FileRecord(file_id="doc-dd", original_name="ready.md", status="DONE", created_pages=["ready"]))
+    await db_session.commit()
     calls: list[tuple] = []
 
     with patch.object(

@@ -107,7 +107,12 @@ async def process_file(file_id: str) -> None:
             # STORED — parse raw file to plain text
             # ----------------------------------------------------------------
             logger.info("pipeline_step_start", file_id=file_id, step="STORED")
-            file_text = _load_raw_text(file_id, record.raw_key)
+            await session.refresh(record, attribute_names=["extracted_text"])
+            file_text = record.extracted_text
+            if file_text is None:
+                file_text = _load_raw_text(file_id, record.raw_key)
+                record.extracted_text = file_text
+                await session.commit()
 
             if "STORED" not in completed:
                 await _transition(session, file_id, "STORED")

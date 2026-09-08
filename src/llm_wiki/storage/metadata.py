@@ -99,6 +99,8 @@ _COLUMN_MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_quotes json",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citation_cases json",
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS error text",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS generation_context json",
+    "ALTER TABLE files ADD COLUMN IF NOT EXISTS extracted_text text",
     "ALTER TABLE twin_personas ADD COLUMN IF NOT EXISTS color varchar NOT NULL DEFAULT ''",
     "ALTER TABLE twin_personas ADD COLUMN IF NOT EXISTS description varchar NOT NULL DEFAULT ''",
 )
@@ -293,6 +295,8 @@ class FileRecord(Base):
     # Date-partitioned object-store key (YYYY/MM/DD/<file_id><ext>). NULL for
     # rows created before date-partitioning (read via the legacy raw/ path).
     raw_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Original parsed source, before wiki pages merge content from other files.
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True, deferred=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="RECEIVED")
     # Terminal transition time; renaming/publishing must never change it.
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -377,6 +381,8 @@ class ArtifactRecord(Base):
     kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
     # versions: [{"language": "ru", "content": {...}}, ...]
     versions: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # Immutable input selection and identity of the current generation attempt.
+    generation_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # "pending" while a background task generates it, "ready" when done, "failed"
     # on error (async generation — heavy artifacts run in a Celery worker).
     status: Mapped[str] = mapped_column(String, nullable=False, default="ready")

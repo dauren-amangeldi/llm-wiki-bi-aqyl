@@ -487,7 +487,7 @@ def _mark_file_failed_sync(file_id: str, error: str) -> None:
         engine.dispose()
 
 
-def _mark_artifact_failed_sync(artifact_id: str, error: str) -> None:
+def _mark_artifact_failed_sync(artifact_id: str, error: str, generation_id: str | None = None) -> bool:
     """Last-resort failure marker that works even when the task's event loop
     is already broken (SoftTimeLimitExceeded lands mid-await). Plain sync
     SQLAlchemy over the same psycopg3 URL — no loop involved."""
@@ -496,16 +496,19 @@ def _mark_artifact_failed_sync(artifact_id: str, error: str) -> None:
 
         engine = create_engine(settings.database_url, poolclass=None)
         with engine.begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 text(
                     "UPDATE artifacts SET status='failed', error=:err, "
-                    "finished_at=now() WHERE artifact_id=:aid AND status='pending'"
+                    "finished_at=now() WHERE artifact_id=:aid AND status='pending' "
+                    "AND (CAST(:gid AS text) IS NULL OR generation_context->>'id' = :gid)"
                 ),
-                {"err": error[:500], "aid": artifact_id},
+                {"err": error[:500], "aid": artifact_id, "gid": generation_id},
             )
         engine.dispose()
+        return result.rowcount > 0
     except Exception as exc:  # noqa: BLE001 — janitor will sweep it instead
         logger.warning("mark_failed_sync_failed", artifact_id=artifact_id, error=str(exc))
+        return False
 
 
 @celery_app.task(
@@ -522,7 +525,8 @@ def _mark_artifact_failed_sync(artifact_id: str, error: str) -> None:
     time_limit=600,
 )
 def generate_artifact(
-    artifact_id: str, document_id: str, kind: str, language: str
+    artifact_id: str, document_id: str, kind: str, language: str,
+    generation_id: str | None = None,
 ) -> dict[str, object]:
     """Generate a heavy studio artifact in the background and store it.
 
@@ -554,11 +558,13 @@ def generate_artifact(
 
         factory = _worker_session_factory()
         async with factory() as session:
-            record = await session.get(ArtifactRecord, artifact_id)
+            record = await session.get(ArtifactRecord, artifact_id, with_for_update=True)
+            context = record.generation_context if record is not None else None
+            stale_attempt = bool(context and context.get("id") != generation_id)
             # Duplicate / stale delivery guard: the row may already be resolved
             # (second click raced the first, janitor failed it, task expired in
             # queue past its usefulness). Don't burn LLM budget on it.
-            if record is None or record.status != "pending":
+            if record is None or record.status != "pending" or record.started_at is not None or stale_attempt:
                 logger.info(
                     "generate_artifact_skipped",
                     status=getattr(record, "status", "missing"),
@@ -566,13 +572,14 @@ def generate_artifact(
                 return {"artifact_id": artifact_id, "status": "skipped"}
 
             requested_by = record.requested_by
+            source_doc_ids = context.get("source_doc_ids") if context else None
             # Ops monitoring: реальный момент старта генерации воркером.
             await artifacts_store.mark_started(session, artifact_id)
             llm = LLMClient()
             try:
                 content = await asyncio.wait_for(
                     generate_content(
-                        session, llm, kind=kind, document_id=document_id, language=language
+                        session, llm, kind=kind, document_id=document_id, language=language, source_doc_ids=source_doc_ids
                     ),
                     timeout=ARTIFACT_DEADLINE_S,
                 )
@@ -581,7 +588,8 @@ def generate_artifact(
                     f"Превышено время генерации ({ARTIFACT_DEADLINE_S // 60} мин) — "
                     "попробуйте ещё раз; если повторится, материал слишком объёмный"
                 )
-                await artifacts_store.mark_failed(session, artifact_id, msg)
+                if await artifacts_store.mark_failed(session, artifact_id, msg, generation_id=generation_id) is False:
+                    return {"artifact_id": artifact_id, "status": "skipped"}
                 await notif.notify_artifact_event(
                     session, artifact_id=artifact_id, document_id=document_id,
                     kind=kind, event="failed", requested_by=requested_by, detail=msg,
@@ -589,7 +597,8 @@ def generate_artifact(
                 logger.warning("generate_artifact_deadline", deadline_s=ARTIFACT_DEADLINE_S)
                 return {"artifact_id": artifact_id, "status": "failed"}
             except Exception as exc:  # noqa: BLE001
-                await artifacts_store.mark_failed(session, artifact_id, str(exc))
+                if await artifacts_store.mark_failed(session, artifact_id, str(exc), generation_id=generation_id) is False:
+                    return {"artifact_id": artifact_id, "status": "skipped"}
                 await notif.notify_artifact_event(
                     session, artifact_id=artifact_id, document_id=document_id,
                     kind=kind, event="failed", requested_by=requested_by,
@@ -599,8 +608,12 @@ def generate_artifact(
                 return {"artifact_id": artifact_id, "status": "failed"}
             finally:
                 await llm.aclose()
+            # A timeout/retry may have superseded this attempt while the LLM ran.
+            current = await session.get(ArtifactRecord, artifact_id, populate_existing=True, with_for_update=True)
+            if current is None or current.status != "pending" or (generation_id and (current.generation_context or {}).get("id") != generation_id):
+                return {"artifact_id": artifact_id, "status": "skipped"}
             await artifacts_store.upsert_artifact(
-                session, document_id=document_id, kind=kind, language=language, content=content
+                session, document_id=document_id, kind=kind, language=language, content=content, source_doc_ids=source_doc_ids
             )
             # Б1: «Готово» в ленту (тост на фронте дублируется записью в панели).
             await notif.notify_artifact_event(
@@ -617,9 +630,10 @@ def generate_artifact(
         # Celery's soft limit landed somewhere the async code couldn't catch it
         # (e.g. inside DB teardown). The loop may be unusable — mark failure
         # over a plain sync connection so the UI unblocks immediately.
-        _mark_artifact_failed_sync(
-            artifact_id, "Отменено по таймауту воркера — попробуйте ещё раз"
-        )
+        if not _mark_artifact_failed_sync(
+            artifact_id, "Отменено по таймауту воркера — попробуйте ещё раз", generation_id
+        ):
+            return {"artifact_id": artifact_id, "status": "skipped"}
         from llm_wiki.storage.notifications import notify_artifact_failed_sync
 
         notify_artifact_failed_sync(

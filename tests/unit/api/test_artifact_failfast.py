@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from unittest.mock import Mock
+from unittest.mock import Mock, ANY
 
 import pytest
 import pytest_asyncio
@@ -141,5 +141,5 @@ async def test_valid_source_passes_the_guard(
     assert resp.status_code == 202
     assert resp.json()["status"] == "pending"
     enqueue.assert_called_once_with(
-        args=(resp.json()["artifact_id"], "case-ok", "report", "ru"), expires=1800,
+        args=(resp.json()["artifact_id"], "case-ok", "report", "ru"), kwargs={"generation_id": ANY}, expires=1800,
     )

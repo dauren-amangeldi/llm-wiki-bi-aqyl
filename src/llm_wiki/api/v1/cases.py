@@ -1,7 +1,7 @@
 """Cases (topic containers) CRUD endpoints."""
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from fastapi import Depends, HTTPException, Query, Response
@@ -554,7 +554,7 @@ async def unlink_document(
     this was a mock, so a deleted source reappeared on reopening the case.
     The document itself is left in place; it just no longer belongs here.
     """
-    row = await db.get(CaseRecord, case_id)
+    row = await db.get(CaseRecord, case_id, with_for_update=True)
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
     _assert_can_edit(row, caller)
@@ -565,11 +565,48 @@ async def unlink_document(
         .where(CaseRecord.id == case_id)
         .values(
             doc_ids=doc_ids, updated_at=changed_at,
+            **({"description": ""} if doc_ids != (row.doc_ids or []) else {}),
             **({"materials_updated_at": changed_at} if doc_ids != (row.doc_ids or []) else {}),
         )
     )
+    # Removing the last public membership must not leave the source public.
+    remaining = list(await db.scalars(select(CaseRecord).where(
+        cast(CaseRecord.doc_ids, JSONB).op("?")(document_id), CaseRecord.id != case_id,
+    )))
+    await _cascade_case_visibility(
+        db, [document_id], sensitive=all(c.sensitive for c in remaining),
+        owner=next((c.owner for c in remaining if c.owner), row.owner), exclude_case_id=case_id,
+    )
     await db.commit()
     return {"ok": True}
+
+
+@router.put("/cases/{case_id}/documents/{document_id}")
+async def link_document(
+    case_id: str, document_id: str,
+    db: AsyncSession = Depends(get_db), caller: str = Depends(get_user_key),
+) -> dict[str, Any]:
+    """Idempotent membership addition without replacing a stale case snapshot."""
+    row = await db.get(CaseRecord, case_id, with_for_update=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    _assert_can_edit(row, caller)
+    source = await db.get(FileRecord, document_id)
+    if source is None or source.status == "ROLLED_BACK" or (source.sensitive and source.owner != caller):
+        raise HTTPException(status_code=404, detail="Источник не найден")
+    ids = list(row.doc_ids or [])
+    if document_id not in ids:
+        row.doc_ids = [*ids, document_id]
+        row.description = ""
+        row.updated_at = row.materials_updated_at = datetime.now(timezone.utc)
+        await db.flush()
+        await _cascade_case_visibility(db, [document_id], sensitive=row.sensitive, owner=row.owner, exclude_case_id=case_id)
+        await db.commit()
+        from llm_wiki.storage import notifications as notif
+
+        await notif.notify_case_ready_if_done(db, case_id)
+        _dispatch_autotag(case_id)
+    return {"doc_ids": row.doc_ids or []}
 
 
 @router.get("/tags")
