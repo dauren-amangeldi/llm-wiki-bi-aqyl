@@ -361,26 +361,32 @@ async def test_get_notifications_live_and_read_flow(
 async def test_cards_generate_emits_artifact_done(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    """Карточки генерятся синхронно (не через Celery) — раньше по ним события
-    «артефакт готов» не было вовсе. Теперь _generate_and_store эмитит его сам."""
+    """The HTTP request queues cards; the worker persists and emits completion."""
     from unittest.mock import AsyncMock, patch
+    from llm_wiki.orchestrator.tasks import generate_artifact
 
-    # created_pages непустой — иначе fail-fast guard (источник без содержимого)
-    # отклонит запрос 422 до генерации.
     db_session.add(FileRecord(file_id="f-card", original_name="c.pdf", status="DONE",
                               display_name="Материал для карточек",
                               created_pages=["page-card"]))
     await db_session.commit()
 
-    with patch("llm_wiki.api.v1.artifacts.generate_content",
-               new=AsyncMock(return_value={"cards": []})), \
-         patch("llm_wiki.llm.client.LLMClient") as _llm:
-        _llm.return_value.aclose = AsyncMock()
+    with patch.object(generate_artifact, "apply_async") as enqueue:
         resp = await client.post(
             "/api/v1/cards/generate",
             json={"document_id": "f-card", "languages": ["ru"]},
         )
-    assert resp.status_code == 200
+    assert resp.status_code == 202
+    assert not list(await db_session.scalars(select(NotificationRecord)))
+    data = (await client.get("/api/v1/notifications")).json()
+    assert any(row["section"] == "artifacts" for row in data["live"])
+    job = enqueue.call_args.kwargs
+    with patch("llm_wiki.agents.artifacts.generate_content",
+               new=AsyncMock(return_value={"cards": []})), \
+         patch("llm_wiki.llm.client.LLMClient") as llm:
+        llm.return_value.aclose = AsyncMock()
+        await asyncio.to_thread(generate_artifact.run, *job["args"], **job["kwargs"])
+    data = (await client.get("/api/v1/notifications")).json()
+    assert not any(row["section"] == "artifacts" for row in data["live"])
 
     rows = (await db_session.scalars(
         select(NotificationRecord).where(NotificationRecord.section == "artifacts")

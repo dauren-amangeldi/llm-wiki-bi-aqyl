@@ -91,6 +91,18 @@ async def process_file(file_id: str) -> None:
         if record is None:
             raise ValueError(f"File {file_id!r} not found in database")
 
+        # A redelivered task must not spend tokens or rewrite the completion
+        # timestamp. A rolled-back source must never be republished by an old job.
+        if record.status in {"DONE", "ROLLED_BACK"}:
+            if record.status == "DONE":
+                # Recover a crash between DONE and event emission. The emitter
+                # deduplicates by the original finished_at, preserving reads/time.
+                from llm_wiki.storage import notifications as notif
+
+                await notif.notify_file_done(session, file_id)
+            logger.info("pipeline_skipped_terminal", file_id=file_id, status=record.status)
+            return
+
         completed: set[str] = {e["state"] for e in (record.state_history or [])}
         logger.info(
             "pipeline_started",
@@ -140,7 +152,7 @@ async def process_file(file_id: str) -> None:
             # private, owner-scoped page. Skip the shared-page search entirely so
             # private content can never leak into (or be pulled from) the wiki.
             search_results: list[SearchHit] = []
-            if not record.sensitive:
+            if "WRITTEN" not in completed and not record.sensitive:
                 search_results = await search_agent.run(
                     file_text, heading_texts, file_id=file_id
                 )

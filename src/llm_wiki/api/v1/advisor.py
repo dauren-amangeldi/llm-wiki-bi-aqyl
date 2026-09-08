@@ -179,7 +179,7 @@ async def save_brief(
     row.brief = body.brief
     row.step = "recommendation"
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "updated_at": row.updated_at.isoformat()}
 
 
 class OutcomeBody(BaseModel):

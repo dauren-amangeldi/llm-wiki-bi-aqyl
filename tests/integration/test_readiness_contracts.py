@@ -133,3 +133,18 @@ async def test_ingestion_retry_reuses_parsed_source_after_later_stage_failure(db
     row = await db_session.get(FileRecord, "retry", populate_existing=True)
     await db_session.refresh(row, attribute_names=["extracted_text"])
     assert row.extracted_text == "Original recognized text"
+
+
+async def test_history_preserves_full_original_question_and_all_saved_sections(client, db_session):
+    query = "Стоит ли выходить на новый рынок? " * 40
+    brief = {"headline": "Короткий заголовок модели", "situation": "Пересказ модели", "summary": "Итог", "risks": ["Риск"], "sources": [{"title": "Источник", "slug": "source", "quote": "Цитата"}], "options": [{"scenario": "Пилот", "recommended": True}]}
+    db_session.add(AdvisorConsultation(id="full-question", owner=OWNER, title=query[:100], situation=query, step="understanding"))
+    await db_session.commit()
+    saved = await client.put("/api/v1/advisor/consultations/full-question/brief", json={"brief": brief})
+    assert saved.status_code == 200
+    page = (await client.get("/api/v1/advisor/consultations?include_brief=true&completed_only=true&limit=11")).json()
+    assert saved.json()["updated_at"] == page[0]["updated_at"]
+    assert page[0]["situation"] == query
+    assert page[0]["brief"] == brief
+    assert (await client.get("/api/v1/advisor/consultations/full-question")).json()["brief"] == brief
+    assert (await client.get("/api/v1/advisor/consultations/full-question", headers={"X-User-Email": "other@bi.group"})).status_code == 404

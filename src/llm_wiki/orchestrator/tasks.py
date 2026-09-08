@@ -227,11 +227,12 @@ def process_file_task(self: Any, file_id: str) -> None:
             f"Обработка прерывалась {attempts - 1} раза подряд (воркер падал — "
             "вероятно, файлу не хватает памяти или времени). Файл снят с очереди."
         )
-        _mark_file_failed_sync(file_id, msg)
+        marked_failed = _mark_file_failed_sync(file_id, msg)
         # Б1: юзер видит снятие с очереди в ленте уведомлений, а не тишину.
         from llm_wiki.storage.notifications import notify_file_failed_sync
 
-        notify_file_failed_sync(file_id, msg)
+        if marked_failed:
+            notify_file_failed_sync(file_id, msg)
         log.error("ingest_delivery_cap_hit", attempts=attempts)
         structlog.contextvars.clear_contextvars()
         return
@@ -456,7 +457,8 @@ def _bump_ingest_attempts(file_id: str) -> int:
                 row = conn.execute(
                     text(
                         "UPDATE files SET ingest_attempts = COALESCE(ingest_attempts, 0) + 1 "
-                        "WHERE file_id = :fid RETURNING ingest_attempts"
+                        "WHERE file_id = :fid AND status NOT IN ('DONE', 'ROLLED_BACK') "
+                        "RETURNING ingest_attempts"
                     ),
                     {"fid": file_id},
                 ).first()
@@ -468,21 +470,22 @@ def _bump_ingest_attempts(file_id: str) -> int:
         return 1
 
 
-def _mark_file_failed_sync(file_id: str, error: str) -> None:
+def _mark_file_failed_sync(file_id: str, error: str) -> bool:
     from sqlalchemy import create_engine, text
 
     engine = create_engine(settings.database_url)
     try:
         with engine.begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 text(
                     "UPDATE files SET status = 'FAILED', error = :err, "
                     "finished_at = CASE WHEN status = 'FAILED' THEN COALESCE(finished_at, now()) ELSE now() END, "
                     "updated_at = now() "
-                    "WHERE file_id = :fid"
+                    "WHERE file_id = :fid AND status NOT IN ('DONE', 'ROLLED_BACK')"
                 ),
                 {"err": error[:500], "fid": file_id},
             )
+            return result.rowcount > 0
     finally:
         engine.dispose()
 

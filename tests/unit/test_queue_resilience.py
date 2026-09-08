@@ -224,3 +224,20 @@ async def test_ingest_counter_resets_on_success(
     record = await db_session.get(FileRecord, "f-lucky")
     assert record is not None
     assert record.ingest_attempts == 0
+
+
+@pytest.mark.parametrize("terminal", ["DONE", "ROLLED_BACK"])
+async def test_redelivery_cap_cannot_fail_a_terminal_source(db_session, terminal):
+    from llm_wiki.orchestrator.tasks import INGEST_MAX_DELIVERIES, process_file_task, _mark_file_failed_sync
+
+    at = datetime(2026, 9, 8, 0, 0, tzinfo=timezone.utc)
+    db_session.add(FileRecord(file_id="terminal", original_name="old.md", status=terminal, ingest_attempts=INGEST_MAX_DELIVERIES, finished_at=at))
+    await db_session.commit()
+    with patch("llm_wiki.orchestrator.pipeline.process_file", new=AsyncMock()) as pipeline:
+        await asyncio.to_thread(process_file_task.apply, args=["terminal"])
+    pipeline.assert_awaited_once_with("terminal")
+    assert await asyncio.to_thread(_mark_file_failed_sync, "terminal", "late worker failure") is False
+    record = await db_session.get(FileRecord, "terminal", populate_existing=True)
+    assert record.status == terminal
+    assert record.finished_at == at
+    assert record.error is None

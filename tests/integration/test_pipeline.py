@@ -1,262 +1,135 @@
-"""Integration tests for the ingestion pipeline (LW-9).
+"""Full ingestion against PostgreSQL/pgvector and a temporary object store.
 
-Tests exercise ``process_file`` end-to-end using:
- - an in-memory SQLite DB (no Docker required)
- - patched ``LLMClient`` so no real LLM calls are made
- - patched ``settings`` pointing at ``tmp_path``
+Only model calls are stubbed. Wiki bodies, headings, chunks, state transitions
+and notifications use the same stores as the application.
 """
 
 import json
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import select
 
-from llm_wiki.storage.metadata import Base, create_file_record, get_file_record
+from llm_wiki.orchestrator import pipeline
+from llm_wiki.storage import wiki_store
+from llm_wiki.storage.index import IndexStorage
+from llm_wiki.storage.metadata import FileRecord, NotificationRecord
+from llm_wiki.storage.object_store import get_object_store
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-async def db_engine(tmp_path: Path):  # type: ignore[misc]
-    """Create an in-memory SQLite engine with the full schema."""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/meta.db")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
+FILE_ID = "pipeline-test"
+BODY = "# Transformers\n\n" + (
+    "Self-attention layers and positional embeddings encode sequences. "
+    "Encoder-decoder stacks support translation and summarization. "
+) * 3
 
 
 @pytest.fixture
-async def db_session(db_engine) -> AsyncSession:  # type: ignore[misc]
-    """Yield a single async session for the test DB."""
-    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-        bind=db_engine, expire_on_commit=False, autoflush=False
-    )
-    async with factory() as session:
-        yield session
+async def ingestion(db_engine, vector_engine, db_session, monkeypatch):
+    monkeypatch.setattr("llm_wiki.api.deps._engine", db_engine)
+    monkeypatch.setattr("llm_wiki.storage.metadata._sync_engine", vector_engine)
+    llm = MagicMock()
+    llm.load_prompt.return_value = "prompt"
+    llm.complete = AsyncMock(return_value=(json.dumps({"slug": "transformers", "title": "Transformers", "content": BODY}), None))
+    llm.embed.side_effect = lambda texts, **_kw: [[0.1] * 1536 for _ in texts]
+    llm.aclose = AsyncMock()
+    client = Mock(return_value=llm)
+    monkeypatch.setattr(pipeline, "LLMClient", client)
+    get_object_store().put_text(f"raw/{FILE_ID}.md", BODY)
+    db_session.add(FileRecord(file_id=FILE_ID, original_name="architecture.md", raw_key=f"raw/{FILE_ID}.md", status="RECEIVED", owner="pipeline@test", sensitive=False))
+    await db_session.commit()
+    return llm, client
 
 
-@pytest.fixture
-def pipeline_dirs(tmp_path: Path) -> dict[str, Path]:
-    """Create the full data-dir layout under tmp_path."""
-    dirs = {
-        "data_dir": tmp_path,
-        "raw": tmp_path / "raw",
-        "wiki": tmp_path / "wiki",
-        "chroma": tmp_path / "chroma",
-    }
-    for p in dirs.values():
-        p.mkdir(exist_ok=True)
-    (tmp_path / "index.md").write_text("# Wiki Index\n")
-    (tmp_path / "log.md").write_text("# Ingestion Log\n")
-    (tmp_path / "usage.log").write_text("")
-    return dirs
-
-
-@pytest.fixture
-def fake_md_file(pipeline_dirs: dict[str, Path]) -> tuple[str, Path]:
-    """Write a fake .md file in raw/ and return (file_id, path)."""
-    file_id = "test-file-id-001"
-    path = pipeline_dirs["raw"] / f"{file_id}.md"
-    path.write_text("# Transformer Architecture\n\nDeep learning model intro.\n")
-    return file_id, path
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_settings_patch(pipeline_dirs: dict[str, Path], db_engine) -> MagicMock:  # type: ignore[misc]
-    """Build a mock settings object pointing at tmp_path."""
-    mock_settings = MagicMock()
-    mock_settings.raw_dir = pipeline_dirs["raw"]
-    mock_settings.wiki_dir = pipeline_dirs["wiki"]
-    mock_settings.chroma_dir = pipeline_dirs["chroma"]
-    mock_settings.index_path = pipeline_dirs["data_dir"] / "index.md"
-    mock_settings.log_path = pipeline_dirs["data_dir"] / "log.md"
-    mock_settings.usage_log_path = pipeline_dirs["data_dir"] / "usage.log"
-    mock_settings.llm_provider = "openai"
-    mock_settings.openai_api_key = "sk-test"
-    mock_settings.openai_model = "test"
-    mock_settings.anthropic_api_key = ""
-    mock_settings.anthropic_model = "test"
-    mock_settings.price_table = {}
-    return mock_settings
-
-
-def _llm_create_response(slug: str = "transformers", title: str = "Transformers") -> tuple[str, MagicMock]:
-    """JSON response for a SearchAgent or WriterAgent create_page call."""
-    body = (
-        f"# {title}\n\n"
-        "Deep learning model architecture with encoder-decoder stacks, "
-        "self-attention layers, and positional embeddings for sequence modelling. "
-        "Used widely in NLP and vision tasks across industry and research."
-    )
-    return (
-        json.dumps({"slug": slug, "title": title, "content": body}),
-        MagicMock(),
-    )
-
-
-def _llm_search_empty_response() -> tuple[str, MagicMock]:
-    """JSON response: no relevant pages found."""
-    return (json.dumps([]), MagicMock())
-
-
-def _llm_search_response(slug: str = "transformers") -> tuple[str, MagicMock]:
-    """JSON response: one relevant page with high score."""
-    return (
-        json.dumps([{"slug": slug, "title": "Transformers", "relevance_score": 0.9}]),
-        MagicMock(),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-async def test_upload_md_creates_wiki_page(
-    db_engine, db_session: AsyncSession, pipeline_dirs: dict[str, Path], fake_md_file: tuple[str, Path],
-) -> None:
-    """process_file with an .md file creates a wiki page and logs the event."""
-    file_id, _path = fake_md_file
-
-    await create_file_record(db_session, file_id, "architecture.md")
-
-    mock_settings = _make_settings_patch(pipeline_dirs, db_engine)
-
-    # LLM returns: search finds no pages → create new
-    call_count = 0
-
-    async def _fake_complete(**kwargs):  # type: ignore[no-untyped-def]
-        nonlocal call_count
-        call_count += 1
-        if kwargs.get("agent_type") == "search":
-            return _llm_search_empty_response()
-        return _llm_create_response()
-
-    mock_llm = MagicMock()
-    mock_llm.load_prompt.return_value = "prompt"
-    mock_llm.complete = AsyncMock(side_effect=_fake_complete)
-    mock_llm.embed = MagicMock(return_value=[[0.1] * 1536])
-    mock_llm.aclose = AsyncMock(return_value=None)
-
-    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-        bind=db_engine, expire_on_commit=False, autoflush=False
-    )
-
-    with (
-        patch("llm_wiki.orchestrator.pipeline.settings", mock_settings),
-        patch("llm_wiki.orchestrator.pipeline.LLMClient", return_value=mock_llm),
-        patch("llm_wiki.api.deps._engine", db_engine),
-    ):
-        from llm_wiki.orchestrator.pipeline import process_file
-
-        await process_file(file_id)
-
-    # Wiki page exists
-    wiki_page = pipeline_dirs["wiki"] / "transformers.md"
-    assert wiki_page.exists(), f"Expected {wiki_page} to be created"
-
-    # index.md updated
-    index_text = (pipeline_dirs["data_dir"] / "index.md").read_text()
-    assert "transformers" in index_text
-
-    # log.md updated
-    log_text = (pipeline_dirs["data_dir"] / "log.md").read_text()
-    assert file_id in log_text
-
-    # DB status = DONE
-    async with factory() as s:
-        record = await get_file_record(s, file_id)
-    assert record is not None
-    assert record.status == "DONE"
-
-    # Chunk index populated after ingestion
+async def test_upload_md_creates_wiki_page(ingestion, db_session):
     from llm_wiki.llm.chunk_store import ChunkStore
 
-    chunk_store = ChunkStore(
-        chroma_path=pipeline_dirs["chroma"],
-        llm_client=mock_llm,
-    )
-    assert chunk_store.count() > 0
+    await pipeline.process_file(FILE_ID)
+    assert wiki_store.get_page("transformers") == BODY.strip()
+    assert any(p[0] == "transformers" for p in IndexStorage().read_pages())
+    assert ChunkStore(llm_client=ingestion[0]).count() > 0
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
+    assert record.status == "DONE"
+    assert [e["state"] for e in record.state_history] == ["STORED", "SEARCHED", "WRITTEN", "LINTED", "LOGGED", "DONE"]
+    assert record.finished_at is not None
+    assert record.created_pages == ["transformers"]
+    await db_session.refresh(record, attribute_names=["extracted_text"])
+    assert record.extracted_text.startswith("Transformers\n")
+    assert record.extracted_text.count("Self-attention layers") == 3
+    assert len(list(await db_session.scalars(select(NotificationRecord)))) == 1
 
 
-async def test_pipeline_idempotent_on_rerun(
-    db_engine, db_session: AsyncSession, pipeline_dirs: dict[str, Path], fake_md_file: tuple[str, Path],
-) -> None:
-    """Running process_file twice must not duplicate wiki pages or log entries."""
-    file_id, _path = fake_md_file
-
-    await create_file_record(db_session, file_id, "architecture.md")
-
-    mock_settings = _make_settings_patch(pipeline_dirs, db_engine)
-    mock_llm = MagicMock()
-    mock_llm.load_prompt.return_value = "prompt"
-    mock_llm.complete = AsyncMock(
-        side_effect=lambda **kw: _llm_search_empty_response()
-        if kw.get("agent_type") == "search"
-        else _llm_create_response()
-    )
-    mock_llm.embed = MagicMock(return_value=[[0.1] * 1536])
-    mock_llm.aclose = AsyncMock(return_value=None)
-
-    with (
-        patch("llm_wiki.orchestrator.pipeline.settings", mock_settings),
-        patch("llm_wiki.orchestrator.pipeline.LLMClient", return_value=mock_llm),
-        patch("llm_wiki.api.deps._engine", db_engine),
-    ):
-        from llm_wiki.orchestrator.pipeline import process_file
-
-        await process_file(file_id)
-        await process_file(file_id)
-
-    # Only one wiki page
-    wiki_files = list(pipeline_dirs["wiki"].glob("*.md"))
-    assert len(wiki_files) == 1, f"Expected 1 wiki page, found {wiki_files}"
-
-    # log.md contains file_id exactly once
-    log_text = (pipeline_dirs["data_dir"] / "log.md").read_text()
-    assert log_text.count(file_id) == 1
+async def test_pipeline_idempotent_on_rerun(ingestion, db_session):
+    llm, client = ingestion
+    await pipeline.process_file(FILE_ID)
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
+    before = (record.finished_at, record.updated_at, record.state_history)
+    event = (await db_session.scalars(select(NotificationRecord))).one()
+    event_time = event.created_at
+    completion_calls, embedding_calls = llm.complete.call_count, llm.embed.call_count
+    await pipeline.process_file(FILE_ID)
+    await db_session.refresh(record)
+    await db_session.refresh(event)
+    assert (record.finished_at, record.updated_at, record.state_history) == before
+    assert event.created_at == event_time
+    assert llm.complete.call_count == completion_calls
+    assert llm.embed.call_count == embedding_calls
+    assert client.call_count == 1
+    assert len(wiki_store.list_pages()) == 1
 
 
-async def test_pipeline_failed_state_on_llm_error(
-    db_engine, db_session: AsyncSession, pipeline_dirs: dict[str, Path], fake_md_file: tuple[str, Path],
-) -> None:
-    """When the LLM raises on the search step, the file ends in FAILED state."""
-    file_id, _path = fake_md_file
-
-    await create_file_record(db_session, file_id, "architecture.md")
-
-    mock_settings = _make_settings_patch(pipeline_dirs, db_engine)
-    mock_llm = MagicMock()
-    mock_llm.load_prompt.return_value = "prompt"
-    mock_llm.complete = AsyncMock(side_effect=RuntimeError("LLM exploded"))
-    mock_llm.aclose = AsyncMock(return_value=None)
-
-    factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-        bind=db_engine, expire_on_commit=False, autoflush=False
-    )
-
-    with (
-        patch("llm_wiki.orchestrator.pipeline.settings", mock_settings),
-        patch("llm_wiki.orchestrator.pipeline.LLMClient", return_value=mock_llm),
-        patch("llm_wiki.api.deps._engine", db_engine),
-        pytest.raises(RuntimeError, match="LLM exploded"),
-    ):
-        from llm_wiki.orchestrator.pipeline import process_file
-
-        await process_file(file_id)
-
-    async with factory() as s:
-        record = await get_file_record(s, file_id)
-
-    assert record is not None
+async def test_pipeline_failed_state_on_llm_error(ingestion, db_session):
+    llm, _client = ingestion
+    llm.complete.side_effect = RuntimeError("LLM exploded")
+    with pytest.raises(RuntimeError, match="LLM exploded"):
+        await pipeline.process_file(FILE_ID)
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
     assert record.status == "FAILED"
+    assert record.error
+    assert not wiki_store.list_pages()
+    llm.aclose.assert_awaited_once()
+    assert len(list(await db_session.scalars(select(NotificationRecord)))) == 1
+
+
+async def test_old_task_does_not_republish_rolled_back_source(ingestion, db_session):
+    record = await db_session.get(FileRecord, FILE_ID)
+    record.status = "ROLLED_BACK"
+    await db_session.commit()
+    await pipeline.process_file(FILE_ID)
+    ingestion[1].assert_not_called()
+    await db_session.refresh(record)
+    assert record.status == "ROLLED_BACK"
+    assert not wiki_store.list_pages()
+
+
+async def test_retry_after_writing_does_not_repeat_search_or_writer(ingestion, db_session, monkeypatch):
+    from llm_wiki.storage.metadata import update_file_status
+
+    await pipeline.process_file(FILE_ID)
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
+    record.state_history = [e for e in record.state_history if e["state"] in {"STORED", "SEARCHED", "WRITTEN"}]
+    await db_session.commit()
+    await update_file_status(db_session, FILE_ID, "FAILED")
+    llm = ingestion[0]
+    llm.reset_mock()
+    search = AsyncMock(side_effect=AssertionError("Search must not be repeated"))
+    monkeypatch.setattr(pipeline.SearchAgent, "run", search)
+    await pipeline.process_file(FILE_ID)
+    search.assert_not_called()
+    llm.complete.assert_not_called()
+    llm.embed.assert_not_called()
+    await db_session.refresh(record)
+    assert record.status == "DONE"
+    assert wiki_store.get_page("transformers") == BODY.strip()
+
+
+async def test_redelivery_recovers_event_after_crash_between_done_and_notification(ingestion, db_session, monkeypatch):
+    with monkeypatch.context() as first_run:
+        first_run.setattr("llm_wiki.storage.notifications.notify_file_done", AsyncMock())
+        await pipeline.process_file(FILE_ID)
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
+    finished_at = record.finished_at
+    assert not list(await db_session.scalars(select(NotificationRecord)))
+    await pipeline.process_file(FILE_ID)
+    event = (await db_session.scalars(select(NotificationRecord))).one()
+    assert event.occurred_at == finished_at
+    ingestion[1].assert_called_once()
