@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def load_case_context(documents: "list[FileRecord]") -> str:
+def load_case_context(documents: "list[FileRecord]", *, sources: dict[str, str] | None = None) -> str:
     """Assemble case context text from the wiki pages of all linked documents.
 
     Mirrors ``AnswerAgent._answer_from_slugs``'s slug-aggregation pattern —
@@ -31,6 +31,7 @@ def load_case_context(documents: "list[FileRecord]") -> str:
     """
     from llm_wiki.agents.answer import MAX_PAGE_CHARS, MAX_TOTAL_CONTEXT_CHARS
     from llm_wiki.storage import wiki_store
+    from llm_wiki.storage.wiki_fts import extract_page_title
 
     slugs: list[str] = []
     for doc in documents:
@@ -55,6 +56,8 @@ def load_case_context(documents: "list[FileRecord]") -> str:
         if total + len(truncated) > MAX_TOTAL_CONTEXT_CHARS:
             break
         blocks.append(f"### [[{slug}]]\n\n{truncated}")
+        if sources is not None:
+            sources[slug] = extract_page_title(body, slug)
         total += len(truncated)
 
     return "\n\n".join(blocks)
@@ -216,4 +219,3 @@ class TwinsAgent(BaseAgent):
             reply_to=str(data.get("reply_to", "")),
             ask=str(data.get("ask", "")),
         )
-

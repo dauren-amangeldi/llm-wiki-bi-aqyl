@@ -94,7 +94,7 @@ async def test_delete_case(client: AsyncClient) -> None:
 
     del_resp = await client.delete(f"/api/v1/cases/{case_id}")
     assert del_resp.status_code == 200
-    assert del_resp.json() == {"ok": True}
+    assert del_resp.json() == {"ok": True, "deleted_document_ids": []}
 
     list_resp = await client.get("/api/v1/cases")
     ids = [c["id"] for c in list_resp.json()]
@@ -393,3 +393,18 @@ async def test_case_created_without_header_is_owned_by_anon(client: AsyncClient)
         headers={"X-User-Email": "bob@bi.group"},
     )
     assert r.status_code == 403
+
+
+async def test_delete_reports_orphans_and_keeps_materials_used_in_another_case(client, db_session):
+    from llm_wiki.storage.metadata import CaseRecord, FileRecord
+    for name in ["orphan", "shared"]:
+        db_session.add(FileRecord(file_id=name, original_name=f"{name}.md", status="DONE"))
+    db_session.add(CaseRecord(id="delete-with-docs", title="Delete", doc_ids=["orphan", "shared"]))
+    db_session.add(CaseRecord(id="keep", title="Keep", doc_ids=["shared"]))
+    await db_session.commit()
+    response = await client.delete("/api/v1/cases/delete-with-docs")
+    assert response.status_code == 200
+    assert response.json()["deleted_document_ids"] == ["orphan"]
+    db_session.expire_all()
+    assert await db_session.get(FileRecord, "orphan") is None
+    assert await db_session.get(FileRecord, "shared") is not None

@@ -171,7 +171,7 @@ async def mark_failed(
     return False
 
 
-def serialize_detail(record: ArtifactRecord) -> dict[str, Any]:
+def serialize_detail(record: ArtifactRecord, language: str | None = None) -> dict[str, Any]:
     """Shape a record for GET /artifacts/{id} (versions = [{language, content}])."""
     versions = [
         {"language": v.get("language", ""), "content": v.get("content"),
@@ -179,6 +179,14 @@ def serialize_detail(record: ArtifactRecord) -> dict[str, Any]:
         for v in (record.versions or [])
         if isinstance(v, dict)
     ]
+    if language and versions:
+        versions = [next((v for v in versions if v["language"] == language), versions[0])]
+    if record.kind == "presentation":
+        from llm_wiki.agents.presentation_layout import presentation_layout
+        for version in versions:
+            content = version.get("content")
+            if isinstance(content, dict) and isinstance(content.get("slides"), list):
+                version["content"] = {**content, "layout": presentation_layout(content)}
     return {
         "artifact_id": record.artifact_id,
         "kind": record.kind,
@@ -201,4 +209,5 @@ def serialize_summary(record: ArtifactRecord, language: str = "ru") -> dict[str,
         # QA D5: плитка студии показывает failed-состояние с причиной в тултипе.
         "error": record.error,
         "created_at": record.created_at.isoformat() if record.created_at else "",
+        "updated_at": record.updated_at.isoformat() if record.updated_at else "",
     }

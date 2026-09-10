@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Response
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,7 +83,7 @@ async def list_artifacts(
 @router.get("/artifacts/{artifact_id}")
 async def get_artifact(
     artifact_id: str,
-    language: str = "ru",  # noqa: ARG001 — frontend passes it; we return all versions
+    language: str | None = None,
     session: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
 ) -> dict[str, Any]:
@@ -90,7 +91,9 @@ async def get_artifact(
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     await _check_document_access(session, record.document_id, caller)
-    return artifacts_store.serialize_detail(record)
+    # Font metrics for presentation layout run outside the event loop. Filtering
+    # before layout also avoids transferring embedded images in other languages.
+    return await run_in_threadpool(artifacts_store.serialize_detail, record, language=language)
 
 
 def _version_content(record: Any, language: str) -> dict[str, Any]:
