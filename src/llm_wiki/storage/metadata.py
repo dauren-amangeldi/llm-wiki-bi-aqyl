@@ -404,6 +404,17 @@ class ArtifactRecord(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ChatScopeRecord(Base):
+    """A revision per user's chat prevents cleared conversations from reappearing."""
+
+    __tablename__ = "chat_scopes"
+
+    user_key: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class ChatRecord(Base):
     """A single persisted chat turn, scoped to a user + (document|case).
 
@@ -1008,13 +1019,9 @@ async def clear_chat_messages(
     scope_id: str,
 ) -> int:
     """Delete a user's chat turns for a scope. Returns count removed."""
-    rows = await list_chat_messages(
-        session, user_key=user_key, scope_type=scope_type, scope_id=scope_id, limit=10000
-    )
-    for row in rows:
-        await session.delete(row)
-    await session.commit()
-    return len(rows)
+    from llm_wiki.storage.chat_history import clear_history
+
+    return await clear_history(session, user_key=user_key, scope_type=scope_type, scope_id=scope_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1489,4 +1496,3 @@ async def suggest_twin_personas(
                 "persona_ids": twin_session.persona_ids,
             }
     return None
-

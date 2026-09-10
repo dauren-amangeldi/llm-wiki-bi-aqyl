@@ -347,7 +347,7 @@ async def delete_case(
     case_id: str,
     db: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
-) -> dict[str, bool]:
+) -> dict[str, object]:
     """Delete a case AND everything it brought into the knowledge base (BUG-02).
 
     До этого удалялась одна строка кейса: материалы, вики-страницы и
@@ -474,7 +474,7 @@ async def delete_case(
         pages_deleted=len(slugs),
         twin_sessions_deleted=len(session_ids),
     )
-    return {"ok": True}
+    return {"ok": True, "deleted_document_ids": orphaned}
 
 
 @router.get("/cases/{case_id}/similar")

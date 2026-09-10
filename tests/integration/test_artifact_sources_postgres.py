@@ -107,3 +107,18 @@ async def test_broker_failure_keeps_previous_content_and_never_runs_inline(clien
     await db_session.refresh(old)
     assert old.status == "failed"
     assert old.versions[0]["content"] == {"summary": "original"}
+
+
+async def test_detail_sends_only_requested_language_and_matching_preview_layout(client, db_session):
+    http, _ = client
+    record = await artifacts_store.upsert_artifact(db_session, document_id="case-selection", kind="presentation", language="ru", content={"slides": [{"heading": "Русский", "bullets": ["Текст"]}]})
+    await artifacts_store.upsert_artifact(db_session, document_id="case-selection", kind="presentation", language="en", content={"slides": [{"heading": "English", "bullets": ["Text"]}]})
+    response = await http.get(f"/api/v1/artifacts/{record.artifact_id}?language=en")
+    assert response.status_code == 200
+    versions = response.json()["versions"]
+    assert [v["language"] for v in versions] == ["en"]
+    assert versions[0]["content"]["layout"]["slides"][0]["title"] == "English"
+    fallback = await http.get(f"/api/v1/artifacts/{record.artifact_id}?language=kk")
+    assert len(fallback.json()["versions"]) == 1
+    all_versions = await http.get(f"/api/v1/artifacts/{record.artifact_id}")
+    assert len(all_versions.json()["versions"]) == 2

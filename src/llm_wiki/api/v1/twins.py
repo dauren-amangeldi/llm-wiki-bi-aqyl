@@ -11,8 +11,10 @@ import structlog
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.agents.twin_citations import normalize_citations
 from llm_wiki.agents.twins import TwinPersonaData, TwinsAgent, build_chat_transcript, load_case_context
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
@@ -94,11 +96,12 @@ def _visible_to(caller: str, created_by: str | None) -> bool:
 
 async def _require_session_access(
     db: AsyncSession, session_id: str, caller: str
-) -> None:
+) -> TwinSession:
     """404 незнакомую/чужую сессию (не 403 — не палим существование чужих)."""
     row = await db.get(TwinSession, session_id)
     if row is None or not _visible_to(caller, row.created_by):
         raise HTTPException(status_code=404, detail="twin session not found")
+    return row
 
 
 @router.get("/twin/sessions")
@@ -114,13 +117,9 @@ async def get_twin_sessions(
     кейс, до сотен параллельных вызовов при каждом монтировании.
     """
     if case_id is None:
-        from sqlalchemy import select as sa_select
-
-        from llm_wiki.storage.metadata import TwinSession
-
         rows = (
             await db.scalars(
-                sa_select(TwinSession).order_by(TwinSession.created_at.desc())
+                select(TwinSession).order_by(TwinSession.created_at.desc())
             )
         ).all()
         return [
@@ -153,16 +152,27 @@ async def get_twin_session_transcript(
 ) -> list[dict[str, object]]:
     """Return a session's persisted transcript (user / persona / verdict rows in
     order), so reopening a past council reloads the full conversation."""
-    await _require_session_access(db, session_id, caller)
+    session = await _require_session_access(db, session_id, caller)
+    case = await db.get(CaseRecord, session.case_id)
+    sources: dict[str, str] = {}
+    if case is not None and case.doc_ids:
+        documents = (await db.scalars(select(FileRecord).where(FileRecord.file_id.in_(case.doc_ids)))).all()
+        slugs = list({slug for doc in documents for slug in [*(doc.created_pages or []), *(doc.updated_pages or [])]})
+        if slugs:
+            result = await db.execute(text(
+                "SELECT slug, title FROM wiki_fts WHERE slug = ANY(:slugs) AND (NOT sensitive OR owner = :caller)"
+            ), {"slugs": slugs, "caller": caller})
+            sources = {row.slug: row.title for row in result}
+    rows = await get_twin_session_messages(db, session_id)
     return [
         {
             "role": m.role,
             "persona_id": m.persona_id,
             "seq": m.seq,
-            "content": m.content,
+            "content": normalize_citations(m.content, sources) if m.role == "persona" else m.content,
             "created_at": m.created_at.isoformat() if m.created_at else "",
         }
-        for m in await get_twin_session_messages(db, session_id)
+        for m in rows
     ]
 
 
@@ -280,7 +290,8 @@ async def twin_chat_endpoint(
 
     personas = [_to_persona_data(p) for p in personas_rows]
     real_name_by_id = {p.id: p.real_name for p in personas_rows}
-    case_context = load_case_context(documents)
+    source_titles: dict[str, str] = {}
+    case_context = load_case_context(documents, sources=source_titles)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         from llm_wiki.llm.client import LLMClient
@@ -351,6 +362,7 @@ async def twin_chat_endpoint(
                         "reply_to": reply_to if i == 0 else "",
                         "cite": cite if i == len(bubbles) - 1 else "",
                     }
+                    content = normalize_citations(content, source_titles)
                     row = await append_twin_message(
                         db, session_id=session_row.id, role="persona",
                         persona_id=pid, seq=seq, content=content,
@@ -388,4 +400,3 @@ async def twin_chat_endpoint(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-

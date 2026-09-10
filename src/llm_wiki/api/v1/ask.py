@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key, get_user_title
 from llm_wiki.api.v1 import router
-from llm_wiki.storage.metadata import FileRecord, append_chat_message
+from llm_wiki.storage.chat_history import begin_chat_turn, lock_chat_scope
+from llm_wiki.storage.metadata import ChatRecord, FileRecord
 
 
 async def _persist_turn(
@@ -19,23 +20,26 @@ async def _persist_turn(
     scope_id: str,
     question: str,
     response: "DocAskResponse",
+    revision: int,
 ) -> None:
     """Save the user question and assistant answer to chat history."""
-    await append_chat_message(
-        db,
+    scope = await lock_chat_scope(db, user_key=user_key, scope_type=scope_type, scope_id=scope_id)
+    if scope.revision != revision:
+        await db.rollback()
+        return
+    db.add(ChatRecord(
         user_key=user_key,
         scope_type=scope_type,
         scope_id=scope_id,
         role="user",
-        text_body=question,
-    )
-    await append_chat_message(
-        db,
+        text=question,
+    ))
+    db.add(ChatRecord(
         user_key=user_key,
         scope_type=scope_type,
         scope_id=scope_id,
         role="assistant",
-        text_body=response.answer,
+        text=response.answer,
         citations=[c.anchor for c in response.citations],
         citation_quotes={c.anchor: c.quote for c in response.citations if c.quote},
         citation_cases={
@@ -43,7 +47,8 @@ async def _persist_turn(
             for c in response.citations
             if c.case_id
         },
-    )
+    ))
+    await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +123,7 @@ async def ask_document(
     fr = await db.get(FileRecord, document_id)
     if not fr:
         raise HTTPException(404, "Document not found")
+    revision = await begin_chat_turn(db, user_key=user_key, scope_type=scope_type, scope_id=document_id)
 
     if fr.status not in ("DONE", "LOGGED", "WRITTEN"):
         template = _PROCESSING_MSG.get(body.language, _PROCESSING_MSG["en"])
@@ -135,11 +141,11 @@ async def ask_document(
             scope_id=document_id,
             question=body.question,
             response=response,
+            revision=revision,
         )
         return response
 
     from llm_wiki.agents.answer import AnswerAgent
-    from llm_wiki.config import settings
     from llm_wiki.llm.client import LLMClient
     from llm_wiki.llm.embeddings import EmbeddingStore
     from llm_wiki.storage.metadata import case_for_file
@@ -178,6 +184,7 @@ async def ask_document(
         scope_id=document_id,
         question=body.question,
         response=response,
+        revision=revision,
     )
     return response
 
@@ -210,6 +217,7 @@ async def ask_case(
     case = await db.get(CaseRecord, case_id)
     if not case:
         raise HTTPException(404, "Case not found")
+    revision = await begin_chat_turn(db, user_key=user_key, scope_type="case", scope_id=case_id)
 
     doc_ids = list(case.doc_ids or [])
     # Honour the panel's source selection (BUG-01). The old guard here was
@@ -246,6 +254,7 @@ async def ask_case(
                 scope_id=case_id,
                 question=body.question,
                 response=response,
+                revision=revision,
             )
             return response
         doc_ids = selected
@@ -275,11 +284,11 @@ async def ask_case(
             scope_id=case_id,
             question=body.question,
             response=response,
+            revision=revision,
         )
         return response
 
     from llm_wiki.agents.answer import AnswerAgent
-    from llm_wiki.config import settings
     from llm_wiki.llm.client import LLMClient
     from llm_wiki.llm.embeddings import EmbeddingStore
 
@@ -326,5 +335,6 @@ async def ask_case(
         scope_id=case_id,
         question=body.question,
         response=response,
+        revision=revision,
     )
     return response

@@ -420,8 +420,8 @@ class LLMClient:
 
         Used by the infographic artifact. OpenAI provider only. Raises on any
         provider/config/API error so the caller can fall back to a non-image
-        rendering. The prompt is intentionally text-free — accurate figures are
-        rendered as HTML cards beside the picture, not baked into the pixels.
+        rendering. The art-director prompt includes the infographic text;
+        structured data is also rendered as HTML cards beside the picture.
 
         Handles both response shapes: ``b64_json`` (gpt-image-1) and a temporary
         ``url`` (dall-e-3), fetching + encoding the latter so the stored artifact
