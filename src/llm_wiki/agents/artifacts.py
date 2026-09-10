@@ -333,7 +333,7 @@ async def generate_content(
             "source_line": " · ".join(source_titles[:3]) or title,
         }
         # Primary image brief: the AI art-director (its verbatim system prompt)
-        # reads the source material and returns a ready gpt-image-2 description.
+        # reads the source material and returns a ready image description.
         # Fall back to the structured template prompt if that call fails, then to
         # the self-contained SVG if image generation is unavailable — so the
         # artifact always renders.
@@ -421,7 +421,7 @@ _IG_IMAGE_PALETTE = (
 
 def _infographic_art_direction(lang: str) -> str:
     """The studio-grade look, typography / icon / colour discipline, Cyrillic care and
-    the negative list — appended to every infographic image prompt so gpt-image-1
+    the negative list — appended to every infographic image prompt so the image model
     reads as premium editorial design rather than a template AI picture."""
     return (
         "ART DIRECTION — a premium editorial data infographic at the level of a top "
@@ -462,10 +462,10 @@ async def _infographic_art_director_prompt(
     llm: LLMClient, content_text: str, title: str
 ) -> str:
     """Run the AI art-director over the source material to produce a ready
-    gpt-image-2 brief. The art-director's system prompt is used verbatim (read
+    image brief. The art-director's system prompt is used verbatim (read
     raw, no interpolation); the source content is the "documents" it analyses. Per
     that prompt, when it cannot generate the image itself it returns one finished
-    image description, which we then hand to gpt-image-2."""
+    image description, which we then hand to the configured image model."""
     system = (llm.PROMPTS_DIR / "artifact_infographic_art_director.md").read_text(
         encoding="utf-8"
     )
@@ -484,7 +484,7 @@ async def _infographic_art_director_prompt(
 
 
 def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
-    """Build a DATA infographic prompt for gpt-image-1: embed the real title, figures
+    """Build a DATA infographic prompt for GPT Image: embed the real title, figures
     and steps (fidelity — no invented data or charts), then hand off to a rich,
     art-directed brief. Layout is data-driven so the picture never invents content to
     fill a fixed template. The HTML cards below stay the accurate source of truth."""
