@@ -22,6 +22,7 @@ import httpx
 import structlog
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.auth import (
@@ -34,7 +35,7 @@ from llm_wiki.api.auth import (
 from llm_wiki.api.deps import get_db
 from llm_wiki.api.v1 import router
 from llm_wiki.config import settings
-from llm_wiki.storage.metadata import access_for_email
+from llm_wiki.storage.metadata import User, access_for_email
 
 logger = structlog.get_logger(__name__)
 
@@ -263,14 +264,25 @@ async def auth_me(
         raise HTTPException(
             status_code=403, detail="Access is not allowed for this account"
         )
+    display_name = claims.get("name") or claims.get("preferred_username") or email
+    role = "admin" if decision.is_admin else "employee"
+    # Verified profile names label shared-case contributions. Upsert handles
+    # simultaneous logins and profile renames without changing access decisions.
+    await session.execute(
+        insert(User).values(id=email, name=display_name, role=role)
+        .on_conflict_do_update(
+            index_elements=[User.id], set_={"name": display_name, "role": role},
+        )
+    )
+    await session.commit()
     return JSONResponse(
         {
             "email": email,
-            "name": claims.get("name") or claims.get("preferred_username") or email,
+            "name": display_name,
             # given_name → SPA greeting; title (job title) → LLM personalization.
             # Both are best-effort ("" when the token/mapper doesn't carry them).
             "given_name": claims_given_name(claims),
             "title": claims_title(claims),
-            "role": "admin" if decision.is_admin else "employee",
+            "role": role,
         }
     )

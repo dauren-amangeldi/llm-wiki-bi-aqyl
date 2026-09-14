@@ -14,8 +14,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.agents.response_language import normalize_language
 from llm_wiki.agents.twin_citations import normalize_citations
-from llm_wiki.agents.twins import TwinPersonaData, TwinsAgent, build_chat_transcript, load_case_context
+from llm_wiki.agents.twins import (
+    TwinPersonaData,
+    TwinsAgent,
+    build_chat_transcript,
+    load_case_context,
+)
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import (
@@ -35,7 +41,6 @@ from llm_wiki.storage.metadata import (
     suggest_twin_personas,
     update_twin_session_personas,
 )
-
 
 logger = structlog.get_logger(__name__)
 
@@ -302,6 +307,7 @@ async def twin_chat_endpoint(
             existing = await get_twin_session_messages(db, session_row.id)
             seq = (existing[-1].seq + 1) if existing else 0
             transcript = build_chat_transcript(existing, real_name_by_id)
+            response_language = normalize_language(body.language)
 
             if body.opening:
                 # Opening round: no user message, no routing — everyone speaks.
@@ -319,7 +325,10 @@ async def twin_chat_endpoint(
                 seq += 1
                 transcript = build_chat_transcript(existing + [user_row], real_name_by_id)
                 try:
-                    responder_ids = await agent.route_message(personas, transcript, body.language)
+                    route = await agent.route_message(
+                        personas, transcript, body.language, latest_question=body.message,
+                    )
+                    responder_ids, response_language = route.responders, route.language
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("twins_route_failed_fallback_first_persona", error=str(exc))
                     responder_ids = [personas[0].id]
@@ -338,7 +347,7 @@ async def twin_chat_endpoint(
                 yield _sse_line({"event": "typing", "persona_id": pid})
                 try:
                     reply = await agent.respond_as_persona(
-                        persona, personas, case_context, transcript, body.language
+                        persona, personas, case_context, transcript, response_language
                     )
                     bubbles = reply.messages
                     cite = reply.cite
@@ -346,7 +355,12 @@ async def twin_chat_endpoint(
                     ask = reply.ask
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("twins_persona_reply_failed", persona_id=pid, error=str(exc))
-                    bubbles, cite, reply_to, ask = ["Не удалось получить ответ."], "", "", ""
+                    failed_reply = {
+                        "ru": "Не удалось получить ответ.",
+                        "en": "Could not get a response.",
+                        "kk": "Жауап алу мүмкін болмады.",
+                    }[response_language]
+                    bubbles, cite, reply_to, ask = [failed_reply], "", "", ""
 
                 for i, bubble in enumerate(bubbles):
                     if i > 0:

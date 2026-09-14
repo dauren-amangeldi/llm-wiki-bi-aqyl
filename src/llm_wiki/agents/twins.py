@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from llm_wiki.agents.base import BaseAgent
+from llm_wiki.agents.response_language import normalize_language, with_response_language
 from llm_wiki.llm.client import LLMClient
 
 if TYPE_CHECKING:
@@ -126,10 +127,17 @@ def _route_schema(persona_ids: list[str]) -> dict[str, Any]:
                 "items": {"type": "string", "enum": persona_ids},
                 "maxItems": 3,
             },
+            "response_language": {"type": "string", "enum": ["ru", "en", "kk"]},
         },
-        "required": ["responders"],
+        "required": ["responders", "response_language"],
         "additionalProperties": False,
     }
+
+
+@dataclass(frozen=True)
+class ChatRouteResult:
+    responders: list[str]
+    language: str
 
 
 @dataclass(frozen=True)
@@ -161,19 +169,28 @@ class TwinsAgent(BaseAgent):
         chat_transcript: str,
         language: str,
         file_id: str = "twins",
-    ) -> list[str]:
-        """Decide which 0-3 personas should respond to the latest message, in order."""
+        *,
+        latest_question: str = "",
+    ) -> ChatRouteResult:
+        """Choose responders and the turn's language in the existing routing call."""
         persona_ids = [p.id for p in personas]
         personas_block = "\n".join(
             f"- {p.id}: {p.real_name or p.id} — {p.lens}" for p in personas
         )
         prompt = self._llm.load_prompt(
-            "twins_route", language=language, personas_block=personas_block,
+            "twins_route", language=normalize_language(language), personas_block=personas_block,
             chat_transcript=chat_transcript,
         )
+        prompt += "\n\nLatest user question for language selection: " + json.dumps(latest_question, ensure_ascii=False)
         text, _usage = await self._llm.complete(
             prompt=prompt,
-            system=_ROUTER_SYSTEM_PROMPT,
+            system=_ROUTER_SYSTEM_PROMPT + (
+                "\nAlso return response_language. Use the language of the latest user "
+                "question, or a language explicitly requested in it: English -> en, "
+                "Kazakh -> kk, Russian -> ru. Ignore the language of documents, "
+                "persona names and earlier messages. For ambiguous messages or "
+                f"unsupported languages use the interface locale: {normalize_language(language)}."
+            ),
             file_id=file_id,
             agent_type="twins",
             json_schema=_route_schema(persona_ids),
@@ -181,7 +198,10 @@ class TwinsAgent(BaseAgent):
         )
         data = json.loads(text)
         known = set(persona_ids)
-        return [pid for pid in data["responders"] if pid in known]
+        return ChatRouteResult(
+            responders=[pid for pid in data["responders"] if pid in known],
+            language=normalize_language(data.get("response_language", language)),
+        )
 
     async def respond_as_persona(
         self,
@@ -197,14 +217,14 @@ class TwinsAgent(BaseAgent):
         colleague via ``ask`` (the endpoint continues the chain, capped)."""
         others = [p for p in participants if p.id != persona.id]
         prompt = self._llm.load_prompt(
-            "twins_chat_reply", language=language, persona_lens=persona.lens,
+            "twins_chat_reply", language=normalize_language(language), persona_lens=persona.lens,
             persona_name=persona.real_name or persona.id,
             participants_block=_participants_block(participants),
             case_context=case_context, chat_transcript=chat_transcript,
         )
         text, _usage = await self._llm.complete(
             prompt=prompt,
-            system=persona.system_prompt,
+            system=with_response_language(persona.system_prompt, language),
             file_id=file_id,
             agent_type="twins",
             json_schema=_chat_reply_schema([p.id for p in others]),
