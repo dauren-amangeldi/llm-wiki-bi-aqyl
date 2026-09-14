@@ -45,13 +45,16 @@ async def upsert_artifact(
     kind: str,
     language: str,
     content: dict[str, Any],
+    source_doc_ids: list[str] | None = None,
 ) -> ArtifactRecord:
     """Store (or replace) the ``language`` version of the (document, kind) artifact.
 
     Reassigns ``versions`` to a new list so SQLAlchemy tracks the JSON change.
     """
     record = await find_by_kind(session, document_id, kind)
-    version = {"language": language, "content": content}
+    version: dict[str, Any] = {"language": language, "content": content}
+    if source_doc_ids is not None:
+        version["source_doc_ids"] = list(source_doc_ids)
     if record is None:
         record = ArtifactRecord(
             artifact_id=uuid.uuid4().hex,
@@ -59,6 +62,7 @@ async def upsert_artifact(
             kind=kind,
             versions=[version],
             status="ready",
+            finished_at=datetime.now(timezone.utc),
         )
         session.add(record)
         try:
@@ -93,7 +97,8 @@ async def upsert_artifact(
 
 
 async def create_pending_artifact(
-    session: AsyncSession, *, document_id: str, kind: str, requested_by: str | None = None
+    session: AsyncSession, *, document_id: str, kind: str, requested_by: str | None = None,
+    generation_context: dict[str, Any] | None = None
 ) -> ArtifactRecord:
     """Create (or reset to) a ``pending`` artifact for (document, kind).
 
@@ -111,6 +116,7 @@ async def create_pending_artifact(
             versions=[],
             status="pending",
             requested_by=requested_by,
+            generation_context=generation_context,
             started_at=None,
             finished_at=None,
         )
@@ -123,6 +129,7 @@ async def create_pending_artifact(
             record = await find_by_kind(session, document_id, kind)
             if record is None:  # pragma: no cover — winner vanished mid-race
                 raise
+            record.generation_context = generation_context
             record.status = "pending"
             record.error = None
             record.requested_by = requested_by
@@ -130,6 +137,7 @@ async def create_pending_artifact(
             record.finished_at = None
             await session.commit()
         return record
+    record.generation_context = generation_context
     record.status = "pending"
     record.error = None
     record.requested_by = requested_by
@@ -147,23 +155,38 @@ async def mark_started(session: AsyncSession, artifact_id: str) -> None:
         await session.commit()
 
 
-async def mark_failed(session: AsyncSession, artifact_id: str, error: str) -> None:
+async def mark_failed(
+    session: AsyncSession, artifact_id: str, error: str, *, generation_id: str | None = None,
+) -> bool:
     """Flag an artifact's generation as failed (keeps any prior versions)."""
-    record = await session.get(ArtifactRecord, artifact_id)
+    record = await session.get(ArtifactRecord, artifact_id, populate_existing=True, with_for_update=True)
     if record is not None:
+        if generation_id is not None and (record.status != "pending" or (record.generation_context or {}).get("id") != generation_id):
+            return False
         record.status = "failed"
         record.error = error[:500]
         record.finished_at = datetime.now(timezone.utc)
         await session.commit()
+        return True
+    return False
 
 
-def serialize_detail(record: ArtifactRecord) -> dict[str, Any]:
+def serialize_detail(record: ArtifactRecord, language: str | None = None) -> dict[str, Any]:
     """Shape a record for GET /artifacts/{id} (versions = [{language, content}])."""
     versions = [
-        {"language": v.get("language", ""), "content": v.get("content")}
+        {"language": v.get("language", ""), "content": v.get("content"),
+         "source_doc_ids": v.get("source_doc_ids")}
         for v in (record.versions or [])
         if isinstance(v, dict)
     ]
+    if language and versions:
+        versions = [next((v for v in versions if v["language"] == language), versions[0])]
+    if record.kind == "presentation":
+        from llm_wiki.agents.presentation_layout import presentation_layout
+        for version in versions:
+            content = version.get("content")
+            if isinstance(content, dict) and isinstance(content.get("slides"), list):
+                version["content"] = {**content, "layout": presentation_layout(content)}
     return {
         "artifact_id": record.artifact_id,
         "kind": record.kind,
@@ -173,13 +196,18 @@ def serialize_detail(record: ArtifactRecord) -> dict[str, Any]:
     }
 
 
-def serialize_summary(record: ArtifactRecord) -> dict[str, Any]:
+def serialize_summary(record: ArtifactRecord, language: str = "ru") -> dict[str, Any]:
     """Shape a record for GET /artifacts (list)."""
+    versions = [v for v in (record.versions or []) if isinstance(v, dict)]
+    version = next((v for v in versions if v.get("language") == language), versions[0] if versions else {})
     return {
+        "has_content": bool(versions),
+        "source_doc_ids": version.get("source_doc_ids"),
         "artifact_id": record.artifact_id,
         "kind": record.kind,
         "status": record.status,
         # QA D5: плитка студии показывает failed-состояние с причиной в тултипе.
         "error": record.error,
         "created_at": record.created_at.isoformat() if record.created_at else "",
+        "updated_at": record.updated_at.isoformat() if record.updated_at else "",
     }

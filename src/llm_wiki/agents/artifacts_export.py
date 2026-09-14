@@ -165,29 +165,48 @@ def _build_docx(kind: str, content: dict[str, Any]) -> bytes:
 
 def _build_pptx(content: dict[str, Any]) -> bytes:
     from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.oxml.ns import qn
     from pptx.util import Pt
+    from llm_wiki.agents.presentation_layout import presentation_layout
 
+    layout = presentation_layout(content)
     prs = Presentation()
-    title_layout = prs.slide_layouts[0]  # Title Slide
-    bullet_layout = prs.slide_layouts[1]  # Title and Content
-
-    cover = prs.slides.add_slide(title_layout)
-    cover.shapes.title.text = str(content.get("title") or "Презентация")
-
-    for idx, slide in enumerate(content.get("slides") or [], 1):
-        s = prs.slides.add_slide(bullet_layout)
-        heading = slide.get("heading") or slide.get("title") or f"Слайд {idx}"
-        s.shapes.title.text = str(heading)
-        body = s.placeholders[1].text_frame
-        body.clear()
-        bullets = slide.get("bullets") or []
-        for k, b in enumerate(bullets):
-            para = body.paragraphs[0] if k == 0 else body.add_paragraph()
-            para.text = str(b)
-            para.font.size = Pt(18)
-        if slide.get("notes"):
-            s.notes_slide.notes_text_frame.text = str(slide["notes"])
-
+    prs.slide_width, prs.slide_height = Pt(layout["width"]), Pt(layout["height"])
+    for item in layout["slides"]:
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        fill = slide.background.fill
+        if item["background"][0] == item["background"][1]:
+            fill.solid()
+            fill.fore_color.rgb = RGBColor.from_string(item["background"][0])
+        else:
+            fill.gradient()
+            fill.gradient_angle = 0
+            for stop, color in zip(fill.gradient_stops, item["background"]):
+                stop.color.rgb = RGBColor.from_string(color)
+        for mark in item["marks"]:
+            shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Pt(mark["x"]), Pt(mark["y"]), Pt(mark["size"]), Pt(mark["size"]))
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = RGBColor.from_string(item["accent"])
+            shape.line.fill.background()
+            style = shape._element.find(qn("p:style"))
+            if style is not None:
+                shape._element.remove(style)  # No inherited theme shadows on bullets.
+        for block in item["blocks"]:
+            box = slide.shapes.add_textbox(Pt(block["x"]), Pt(block["y"]), Pt(layout["width"] - block["x"] - 48), Pt(block["size"] * 1.4))
+            frame = box.text_frame
+            frame.word_wrap = False
+            frame.margin_left = frame.margin_right = frame.margin_top = frame.margin_bottom = 0
+            para = frame.paragraphs[0]
+            para.text = block["text"]
+            para.font.name = layout["font"]
+            para.font.size = Pt(block["size"])
+            para.font.bold = block["bold"]
+            para.font.color.rgb = RGBColor.from_string(item["foreground"])
+            para.space_before = para.space_after = Pt(0)
+        if item["notes"]:
+            slide.notes_slide.notes_text_frame.text = item["notes"]
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()

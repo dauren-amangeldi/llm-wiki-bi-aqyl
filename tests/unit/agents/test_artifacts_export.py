@@ -131,3 +131,35 @@ def test_pdf_handles_empty_content() -> None:
     # missing keys must not crash — just a near-empty document
     data, _ = export_artifact("report", {}, "pdf")
     assert data[:4] == b"%PDF"
+
+
+def test_pptx_matches_preview_geometry_without_extra_cover():
+    from pptx import Presentation
+    from pptx.util import Pt
+    from llm_wiki.agents.presentation_layout import presentation_layout
+    content = {"title": "Do not add a cover", "slides": [
+        {"heading": "Обзор кейса", "bullets": ["Контекст и цели", "Риски и решения"], "notes": "Примечание докладчика"},
+        {"title": "Ұсыныстар", "body": "Бизнес және команда"},
+        {"notes": "Invalid empty slide"},
+    ]}
+    layout = presentation_layout(content)
+    data, _ = export_artifact("presentation", content, "pptx")
+    deck = Presentation(io.BytesIO(data))
+    assert len(deck.slides) == len(layout["slides"]) == 2
+    assert deck.slide_width == Pt(960) and deck.slide_height == Pt(540)
+    assert "Примечание докладчика" in deck.slides[0].notes_slide.notes_text_frame.text
+    for slide, expected in zip(deck.slides, layout["slides"]):
+        texts = [shape for shape in slide.shapes if shape.has_text_frame and shape.text]
+        assert [shape.text for shape in texts] == [block["text"] for block in expected["blocks"]]
+        for shape, block in zip(texts, expected["blocks"]):
+            assert shape.left == Pt(block["x"]) and shape.top == Pt(block["y"])
+            assert shape.text_frame.paragraphs[0].font.size == Pt(block["size"])
+
+
+def test_dense_slides_fit_without_losing_any_bullets():
+    from llm_wiki.agents.presentation_layout import presentation_layout
+    bullets = [f"{i}. " + "Очень длинное описание задачи и результата. " * 7 for i in range(12)]
+    slide = presentation_layout({"slides": [{"heading": "План", "bullets": bullets}]})["slides"][0]
+    assert len(slide["marks"]) == len(bullets)
+    assert all(0 <= b["y"] and b["y"] + b["size"] <= 540 for b in slide["blocks"])
+    assert "".join(b["text"] for b in slide["blocks"]).replace(" ", "") == ("План" + "".join(bullets)).replace(" ", "")

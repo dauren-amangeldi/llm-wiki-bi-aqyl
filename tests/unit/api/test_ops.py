@@ -140,3 +140,18 @@ async def test_purge_marks_stuck_generations_failed(
     fr = await db_session.get(FileRecord, "f-stuck")
     assert art is not None and art.status == "failed" and "Отменено" in (art.error or "")
     assert fr is not None and fr.status == "FAILED"
+    assert fr.finished_at is not None
+
+
+async def test_finished_file_duration_does_not_change_after_rename(client, db_session) -> None:
+    start = datetime(2026, 9, 7, 10, tzinfo=timezone.utc)
+    db_session.add(FileRecord(
+        file_id="f-done", original_name="a.pdf", display_name="Renamed", status="DONE",
+        created_at=start, finished_at=start + timedelta(minutes=2),
+        updated_at=start + timedelta(days=1),
+    ))
+    await db_session.commit()
+    data = (await client.get("/api/v1/ops/generations")).json()
+    row = next(item for item in data["items"] if item["id"] == "f-done")
+    assert row["duration_s"] == 120
+    assert row["finished_at"] == (start + timedelta(minutes=2)).isoformat()

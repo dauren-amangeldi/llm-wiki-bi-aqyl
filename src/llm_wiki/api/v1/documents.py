@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, Form, HTTPException, Response, UploadFile
+from fastapi import Depends, Form, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,6 +46,7 @@ class Material(BaseModel):
     status: str
     created_at: str
     updated_at: str | None = None
+    finished_at: str | None = None
     source_language: str = "ru"
     tags: list[Tag] = []
     topic_ids: list[str] = []
@@ -120,6 +121,7 @@ def _file_record_to_material(fr: FileRecord) -> Material:
         status=fr.status,
         created_at=fr.created_at.isoformat(),
         updated_at=fr.updated_at.isoformat() if fr.updated_at else None,
+        finished_at=fr.finished_at.isoformat() if fr.finished_at else None,
         source_language="ru",
         tags=[],
         topic_ids=[],
@@ -147,15 +149,20 @@ async def list_documents(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
+    ids: list[str] | None = Query(default=None, max_length=200),
 ) -> list[Material]:
     """Return non-rolled-back documents visible to the caller.
 
     Sensitive documents are listed only for their owner.
     """
     stmt = select(FileRecord).where(
-        FileRecord.status != "ROLLED_BACK",
         or_(FileRecord.sensitive.is_(False), FileRecord.owner == caller),
     )
+    if ids is None:
+        stmt = stmt.where(FileRecord.status != "ROLLED_BACK")
+    else:
+        stmt = stmt.where(FileRecord.file_id.in_(ids))
+        limit, offset = len(ids), 0
     if q and q.strip():
         term = q.strip()
         # Substring OR trigram similarity so typos still match (e.g. «маркетнг»).

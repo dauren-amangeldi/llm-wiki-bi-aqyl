@@ -11,11 +11,10 @@ SSE-события /advisor. Всё владельческое: чужая ко�
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,7 +179,7 @@ async def save_brief(
     row.brief = body.brief
     row.step = "recommendation"
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "updated_at": row.updated_at.isoformat()}
 
 
 class OutcomeBody(BaseModel):
@@ -204,14 +203,21 @@ async def set_outcome(
 async def list_consultations(
     db: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    include_brief: bool = False,
+    completed_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Свои консультации, свежие сверху (для «Продолжить» и списка истории)."""
+    conditions = [AdvisorConsultation.owner == caller]
+    if completed_only:
+        conditions.append(AdvisorConsultation.step == "recommendation")
     rows = (
         await db.scalars(
             select(AdvisorConsultation)
-            .where(AdvisorConsultation.owner == caller)
-            .order_by(AdvisorConsultation.updated_at.desc())
-            .limit(20)
+            .where(*conditions)
+            .order_by(AdvisorConsultation.updated_at.desc(), AdvisorConsultation.id)
+            .limit(limit).offset(offset)
         )
     ).all()
     return [
@@ -221,6 +227,7 @@ async def list_consultations(
             "step": r.step,
             "outcome": r.outcome,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            **({"brief": r.brief, "situation": r.situation} if include_brief else {}),
         }
         for r in rows
     ]

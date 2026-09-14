@@ -9,11 +9,14 @@ LLM summary (never "let the LLM draw SVG").
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 from typing import Any
 
 import structlog
+from sqlalchemy import select
+from sqlalchemy.orm import undefer
 
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.storage import wiki_store
@@ -163,18 +166,24 @@ _PROMPT_BY_KIND = {
 
 # --- Source gathering --------------------------------------------------------
 
-async def _title_and_slugs(session: Any, document_id: str) -> tuple[str, list[str]]:
+async def _title_and_slugs(session: Any, document_id: str, source_doc_ids: list[str] | None = None) -> tuple[str, list[str]]:
     """Return (title, wiki slugs) for a case id or a single document id."""
     case = await session.get(CaseRecord, document_id)
     if case is not None:
         slugs: list[str] = []
-        for did in case.doc_ids or []:
+        members = case.doc_ids or []
+        selected = members if source_doc_ids is None else source_doc_ids
+        if source_doc_ids is not None and (not selected or not set(selected).issubset(members)):
+            raise ArtifactError("Выбранные источники отсутствуют в кейсе. Обновите список материалов.")
+        for did in selected:
             fr = await session.get(FileRecord, did)
             if fr is not None:
                 slugs.extend(list(fr.created_pages or []))
                 slugs.extend(list(fr.updated_pages or []))
         return case.title, list(dict.fromkeys(slugs))
 
+    if source_doc_ids is not None and source_doc_ids != [document_id]:
+        raise ArtifactError("Выберите этот материал для генерации артефакта.")
     fr = await get_file_record(session, document_id)
     if fr is not None:
         slugs = list(dict.fromkeys(list(fr.created_pages or []) + list(fr.updated_pages or [])))
@@ -215,6 +224,43 @@ def _load_bodies(slugs: list[str]) -> tuple[str, list[str]]:
     return "\n\n---\n\n".join(parts), titles
 
 
+async def _load_selected_sources(session: Any, source_doc_ids: list[str]) -> tuple[str, list[str]]:
+    """Use original source text: a shared wiki page can contain unselected files.
+
+    Legacy files are parsed once in the worker, then cached just like ingestion.
+    No OCR/transcription runs in the HTTP request or on subsequent generations.
+    """
+    from llm_wiki.orchestrator.pipeline import _load_raw_text
+
+    parts: list[str] = []
+    titles: list[str] = []
+    total = 0
+    for file_id in source_doc_ids:
+        record = await session.scalar(select(FileRecord).options(undefer(FileRecord.extracted_text)).where(FileRecord.file_id == file_id))
+        if record is None or record.status != "DONE":
+            raise ArtifactError("Выбранный материал удалён или ещё обрабатывается. Обновите список источников.")
+        body = record.extracted_text
+        if body is None:
+            try:
+                body = await asyncio.to_thread(_load_raw_text, file_id, record.raw_key)
+            except Exception as exc:
+                raise ArtifactError("Не удалось прочитать исходный материал. Повторите обработку или загрузите файл заново.") from exc
+            record.extracted_text = body
+            await session.commit()
+        if not body.strip():
+            raise ArtifactError("Выбранный материал пуст — добавьте материал с содержимым.")
+        title = record.display_name or record.original_name
+        # Share the bounded context across all selected sources.
+        budget = _MAX_TOTAL_CHARS // max(1, len(source_doc_ids))
+        chunk = body[:budget]
+        if total + len(chunk) > _MAX_TOTAL_CHARS:
+            break
+        parts.append(f"Источник: {title}\n{chunk}")
+        titles.append(title)
+        total += len(chunk)
+    return "\n\n---\n\n".join(parts), titles
+
+
 # --- Generation --------------------------------------------------------------
 
 async def generate_content(
@@ -224,13 +270,17 @@ async def generate_content(
     kind: str,
     document_id: str,
     language: str,
+    source_doc_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Generate an artifact's content dict for the given kind (grounded in sources)."""
     if kind not in _PROMPT_BY_KIND:
         raise ArtifactError(f"Unsupported artifact kind: {kind!r}")
 
-    title, slugs = await _title_and_slugs(session, document_id)
-    content_text, source_titles = _load_bodies(slugs)
+    title, slugs = await _title_and_slugs(session, document_id, source_doc_ids)
+    content_text, source_titles = (
+        await _load_selected_sources(session, source_doc_ids)
+        if source_doc_ids is not None else _load_bodies(slugs)
+    )
     if not content_text.strip():
         # Человеческая причина в ленту/тост (не английский технический текст).
         # Различаем «материалов нет вовсе» и «есть, но ещё без содержимого».
@@ -283,7 +333,7 @@ async def generate_content(
             "source_line": " · ".join(source_titles[:3]) or title,
         }
         # Primary image brief: the AI art-director (its verbatim system prompt)
-        # reads the source material and returns a ready gpt-image-2 description.
+        # reads the source material and returns a ready image description.
         # Fall back to the structured template prompt if that call fails, then to
         # the self-contained SVG if image generation is unavailable — so the
         # artifact always renders.
@@ -371,7 +421,7 @@ _IG_IMAGE_PALETTE = (
 
 def _infographic_art_direction(lang: str) -> str:
     """The studio-grade look, typography / icon / colour discipline, Cyrillic care and
-    the negative list — appended to every infographic image prompt so gpt-image-1
+    the negative list — appended to every infographic image prompt so the image model
     reads as premium editorial design rather than a template AI picture."""
     return (
         "ART DIRECTION — a premium editorial data infographic at the level of a top "
@@ -412,10 +462,10 @@ async def _infographic_art_director_prompt(
     llm: LLMClient, content_text: str, title: str
 ) -> str:
     """Run the AI art-director over the source material to produce a ready
-    gpt-image-2 brief. The art-director's system prompt is used verbatim (read
+    image brief. The art-director's system prompt is used verbatim (read
     raw, no interpolation); the source content is the "documents" it analyses. Per
     that prompt, when it cannot generate the image itself it returns one finished
-    image description, which we then hand to gpt-image-2."""
+    image description, which we then hand to the configured image model."""
     system = (llm.PROMPTS_DIR / "artifact_infographic_art_director.md").read_text(
         encoding="utf-8"
     )
@@ -434,7 +484,7 @@ async def _infographic_art_director_prompt(
 
 
 def _infographic_image_prompt(data: dict[str, Any], title: str) -> str:
-    """Build a DATA infographic prompt for gpt-image-1: embed the real title, figures
+    """Build a DATA infographic prompt for GPT Image: embed the real title, figures
     and steps (fidelity — no invented data or charts), then hand off to a rich,
     art-directed brief. Layout is data-driven so the picture never invents content to
     fill a fixed template. The HTML cards below stay the accurate source of truth."""

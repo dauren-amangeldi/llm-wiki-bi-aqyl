@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from unittest.mock import Mock, ANY
 
 import pytest
 import pytest_asyncio
@@ -120,11 +121,13 @@ async def test_generate_while_materials_processing_422(
 
 @pytest.mark.asyncio
 async def test_valid_source_passes_the_guard(
-    client: AsyncClient, db_session: AsyncSession
+    client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Кейс с обработанным материалом guard пропускает: создаётся pending
-    (брокер в тестах недоступен → произойдёт inline-фолбэк, который упадёт на
-    LLM — нам важно лишь, что 422 guard'а НЕ случился)."""
+    """Обработанный материал проходит guard: pending + постановка в очередь."""
+    from llm_wiki.orchestrator.tasks import generate_artifact
+
+    enqueue = Mock()
+    monkeypatch.setattr(generate_artifact, "apply_async", enqueue)
     db_session.add(FileRecord(file_id="f-ok", original_name="ok.pdf",
                               status="DONE", created_pages=["page-ok"]))
     db_session.add(CaseRecord(id="case-ok", title="Готовый",
@@ -135,9 +138,8 @@ async def test_valid_source_passes_the_guard(
         "/api/v1/studio/generate",
         json={"kind": "report", "document_id": "case-ok", "language": "ru"},
     )
-    # Любой исход, кроме fail-fast 422 «нет материалов/без содержимого»:
-    # генерация была ДОПУЩЕНА (детали её судьбы — вне этого теста).
-    if resp.status_code == 422:
-        detail = resp.json()["detail"].lower()
-        assert "нет материалов" not in detail
-        assert "без содержимого" not in detail
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "pending"
+    enqueue.assert_called_once_with(
+        args=(resp.json()["artifact_id"], "case-ok", "report", "ru"), kwargs={"generation_id": ANY}, expires=1800,
+    )
