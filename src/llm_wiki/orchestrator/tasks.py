@@ -553,6 +553,8 @@ def generate_artifact(
     )
 
     async def _run() -> dict[str, object]:
+        from sqlalchemy.exc import SQLAlchemyError
+
         from llm_wiki.agents.artifacts import generate_content
         from llm_wiki.llm.client import LLMClient
         from llm_wiki.storage import artifacts_store
@@ -576,17 +578,27 @@ def generate_artifact(
 
             requested_by = record.requested_by
             source_doc_ids = context.get("source_doc_ids") if context else None
-            # Ops monitoring: реальный момент старта генерации воркером.
-            await artifacts_store.mark_started(session, artifact_id)
-            llm = LLMClient()
+            llm: LLMClient | None = None
             try:
+                # Include initialization and persistence in the failure handler:
+                # either can fail before/after the actual model request.
+                await artifacts_store.mark_started(session, artifact_id)
+                llm = LLMClient()
                 content = await asyncio.wait_for(
                     generate_content(
                         session, llm, kind=kind, document_id=document_id, language=language, source_doc_ids=source_doc_ids
                     ),
                     timeout=ARTIFACT_DEADLINE_S,
                 )
+                # A timeout/retry may have superseded this attempt while the LLM ran.
+                current = await session.get(ArtifactRecord, artifact_id, populate_existing=True, with_for_update=True)
+                if current is None or current.status != "pending" or (generation_id and (current.generation_context or {}).get("id") != generation_id):
+                    return {"artifact_id": artifact_id, "status": "skipped"}
+                await artifacts_store.upsert_artifact(
+                    session, document_id=document_id, kind=kind, language=language, content=content, source_doc_ids=source_doc_ids
+                )
             except asyncio.TimeoutError:
+                await session.rollback()
                 msg = (
                     f"Превышено время генерации ({ARTIFACT_DEADLINE_S // 60} мин) — "
                     "попробуйте ещё раз; если повторится, материал слишком объёмный"
@@ -600,24 +612,26 @@ def generate_artifact(
                 logger.warning("generate_artifact_deadline", deadline_s=ARTIFACT_DEADLINE_S)
                 return {"artifact_id": artifact_id, "status": "failed"}
             except Exception as exc:  # noqa: BLE001
-                if await artifacts_store.mark_failed(session, artifact_id, str(exc), generation_id=generation_id) is False:
+                # PostgreSQL rejects NULs and other invalid data. After such a
+                # flush, mark_failed itself would raise PendingRollbackError
+                # unless we first discard the failed transaction.
+                await session.rollback()
+                msg = (
+                    "Ошибка работы с данными при генерации — попробуйте ещё раз"
+                    if isinstance(exc, SQLAlchemyError) else str(exc).replace("\x00", "")
+                )
+                if await artifacts_store.mark_failed(session, artifact_id, msg, generation_id=generation_id) is False:
                     return {"artifact_id": artifact_id, "status": "skipped"}
                 await notif.notify_artifact_event(
                     session, artifact_id=artifact_id, document_id=document_id,
                     kind=kind, event="failed", requested_by=requested_by,
-                    detail=str(exc),
+                    detail=msg,
                 )
                 logger.warning("generate_artifact_failed", error=str(exc))
                 return {"artifact_id": artifact_id, "status": "failed"}
             finally:
-                await llm.aclose()
-            # A timeout/retry may have superseded this attempt while the LLM ran.
-            current = await session.get(ArtifactRecord, artifact_id, populate_existing=True, with_for_update=True)
-            if current is None or current.status != "pending" or (generation_id and (current.generation_context or {}).get("id") != generation_id):
-                return {"artifact_id": artifact_id, "status": "skipped"}
-            await artifacts_store.upsert_artifact(
-                session, document_id=document_id, kind=kind, language=language, content=content, source_doc_ids=source_doc_ids
-            )
+                if llm is not None:
+                    await llm.aclose()
             # Б1: «Готово» в ленту (тост на фронте дублируется записью в панели).
             await notif.notify_artifact_event(
                 session, artifact_id=artifact_id, document_id=document_id,
@@ -817,7 +831,7 @@ def sweep_stuck_generations() -> dict[str, int]:
                         started = started.replace(tzinfo=timezone.utc)
                     stale = now - started > timedelta(seconds=SWEEP_STARTED_AFTER_S)
                     reason = (
-                        "Генерация прервана (воркер был перезапущен) — "
+                        "Генерация прервана: результат не получен вовремя — "
                         "попробуйте ещё раз"
                     )
                 else:
