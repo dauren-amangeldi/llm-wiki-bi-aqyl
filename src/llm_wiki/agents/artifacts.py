@@ -21,6 +21,7 @@ from sqlalchemy.orm import undefer
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.storage import wiki_store
 from llm_wiki.storage.metadata import CaseRecord, FileRecord, get_file_record
+from llm_wiki.utils.text import sanitize_extracted_text
 
 logger = structlog.get_logger(__name__)
 
@@ -245,6 +246,7 @@ async def _load_selected_sources(session: Any, source_doc_ids: list[str]) -> tup
                 body = await asyncio.to_thread(_load_raw_text, file_id, record.raw_key)
             except Exception as exc:
                 raise ArtifactError("Не удалось прочитать исходный материал. Повторите обработку или загрузите файл заново.") from exc
+            body = sanitize_extracted_text(body)
             record.extracted_text = body
             await session.commit()
         if not body.strip():

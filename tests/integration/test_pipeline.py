@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 
 from llm_wiki.orchestrator import pipeline
 from llm_wiki.storage import wiki_store
@@ -88,6 +89,44 @@ async def test_pipeline_failed_state_on_llm_error(ingestion, db_session):
     assert not wiki_store.list_pages()
     llm.aclose.assert_awaited_once()
     assert len(list(await db_session.scalars(select(NotificationRecord)))) == 1
+
+
+async def test_ingestion_cleans_nul_from_parser_before_caching(ingestion, db_session, monkeypatch):
+    text = "Начало\x00 текста\nҚазақша\tEnglish 🙂"
+    monkeypatch.setattr(pipeline, "_load_raw_text", Mock(return_value=text))
+    await pipeline.process_file(FILE_ID)
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
+    await db_session.refresh(record, attribute_names=["extracted_text"])
+    assert record.status == "DONE"
+    assert record.extracted_text == "Начало текста\nҚазақша\tEnglish 🙂"
+
+
+async def test_ingestion_records_failure_after_database_rejects_a_write(ingestion, db_session, monkeypatch):
+    async def fail_transition(session, file_id, _state):
+        record = await session.get(FileRecord, file_id)
+        record.extracted_text = "Invalid\x00text"
+        await session.commit()
+
+    monkeypatch.setattr(pipeline, "_transition", fail_transition)
+    with pytest.raises(DBAPIError):
+        await pipeline.process_file(FILE_ID)
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
+    assert record.status == "FAILED"
+    assert record.finished_at is not None
+    assert "сохранить данные" in record.error
+    event = (await db_session.scalars(select(NotificationRecord))).one()
+    assert event.event == "failed"
+    ingestion[0].aclose.assert_awaited_once()
+
+
+async def test_ingestion_records_client_initialization_failure(ingestion, db_session, monkeypatch):
+    monkeypatch.setattr(pipeline, "LLMClient", Mock(side_effect=RuntimeError("client init failed")))
+    with pytest.raises(RuntimeError, match="client init failed"):
+        await pipeline.process_file(FILE_ID)
+    record = await db_session.get(FileRecord, FILE_ID, populate_existing=True)
+    assert record.status == "FAILED"
+    assert record.finished_at is not None
+    assert (await db_session.scalars(select(NotificationRecord))).one().event == "failed"
 
 
 async def test_old_task_does_not_republish_rolled_back_source(ingestion, db_session):

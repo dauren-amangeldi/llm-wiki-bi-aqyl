@@ -117,6 +117,7 @@ async def test_sweep_fails_stale_generations_and_keeps_fresh(
 
     assert stale_started is not None and stale_started.status == "failed"
     assert "прервана" in (stale_started.error or "")
+    assert "воркер был перезапущен" not in stale_started.error
     assert fresh_started is not None and fresh_started.status == "pending"
     assert stale_queued is not None and stale_queued.status == "failed"
     assert f_stale is not None and f_stale.status == "FAILED"
