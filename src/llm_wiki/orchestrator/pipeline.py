@@ -12,6 +12,7 @@ from enum import StrEnum
 from pathlib import Path
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from llm_wiki.agents.search import SearchAgent
@@ -27,13 +28,14 @@ from llm_wiki.parsers.pdf import ParseError, parse_pdf
 from llm_wiki.storage.backlinks_sync import sync_backlinks_for_page
 from llm_wiki.storage.chunk_sync import sync_chunks_for_page
 from llm_wiki.storage.index import IndexStorage
-from llm_wiki.utils.backlinks import extract_outgoing_links
 from llm_wiki.storage.metadata import (
     FileRecord,
     append_state_history,
     get_file_record,
     update_file_status,
 )
+from llm_wiki.utils.backlinks import extract_outgoing_links
+from llm_wiki.utils.text import sanitize_extracted_text
 
 logger = structlog.get_logger(__name__)
 
@@ -113,8 +115,9 @@ async def process_file(file_id: str) -> None:
 
         # One LLMClient for the whole pipeline run; closed in finally so its
         # httpx connections are released before the event loop shuts down.
-        llm = LLMClient()
+        llm: LLMClient | None = None
         try:
+            llm = LLMClient()
             # ----------------------------------------------------------------
             # STORED — parse raw file to plain text
             # ----------------------------------------------------------------
@@ -122,7 +125,7 @@ async def process_file(file_id: str) -> None:
             await session.refresh(record, attribute_names=["extracted_text"])
             file_text = record.extracted_text
             if file_text is None:
-                file_text = _load_raw_text(file_id, record.raw_key)
+                file_text = sanitize_extracted_text(_load_raw_text(file_id, record.raw_key))
                 record.extracted_text = file_text
                 await session.commit()
 
@@ -343,6 +346,9 @@ async def process_file(file_id: str) -> None:
 
         except Exception as exc:
             logger.error("pipeline_failed", file_id=file_id, error=str(exc))
+            # A failed flush leaves the session unusable until rollback; using
+            # it directly would lose both the failure status and notification.
+            await session.rollback()
             # Persist the reason so it is visible in the API / status stream / UI,
             # not only in the logs. QA D3: юзеру — человеческий русский текст,
             # технический оригинал остаётся в логах строчкой выше.
@@ -359,7 +365,8 @@ async def process_file(file_id: str) -> None:
             # httpx can release its connection pool cleanly.  Without this,
             # GC would try to close the httpx.AsyncClient after the loop is
             # gone, producing "RuntimeError: Event loop is closed" warnings.
-            await llm.aclose()
+            if llm is not None:
+                await llm.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +382,8 @@ def _humanize_pipeline_error(exc: Exception) -> str:
     переводим; уже русский текст пропускаем как есть; незнакомый английский —
     заворачиваем в общий понятный фолбэк (оригинал остаётся в логах).
     """
+    if isinstance(exc, SQLAlchemyError):
+        return "Не удалось сохранить данные материала — попробуйте обработать его ещё раз"
     raw = str(exc)
     low = raw.lower()
     if "no extractable text in pdf" in low:
