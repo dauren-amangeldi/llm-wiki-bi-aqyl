@@ -13,15 +13,20 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
     Text,
     cast,
-    case as sql_case,
     create_engine,
     select,
     text,
+)
+from sqlalchemy import (
+    case as sql_case,
+)
+from sqlalchemy import (
     update as sa_update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -30,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from llm_wiki.config import settings
-
 
 logger = structlog.get_logger(__name__)
 
@@ -1243,6 +1247,21 @@ class TwinSession(Base):
     outcome: Mapped[str] = mapped_column(String, nullable=False, default="")  # "" | confirmed | refuted
     outcome_note: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
     outcome_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TwinSummary(Base):
+    """Last explicitly requested summary; separate from the conversation context."""
+
+    __tablename__ = "twin_summaries"
+
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("twin_sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[str] = mapped_column(String, nullable=False)
+    source_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    language: Mapped[str] = mapped_column(String, nullable=False)
+    positions: Mapped[list[dict[str, str]]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class TwinMessage(Base):
