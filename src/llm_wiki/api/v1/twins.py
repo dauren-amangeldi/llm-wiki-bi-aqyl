@@ -6,6 +6,8 @@ import asyncio
 import json
 import random
 from collections.abc import AsyncGenerator
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import structlog
 from fastapi import Depends, HTTPException, Query
@@ -16,6 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.agents.response_language import normalize_language
 from llm_wiki.agents.twin_citations import normalize_citations
+from llm_wiki.agents.twin_summary import (
+    MAX_TRANSCRIPT_CHARS,
+    SUMMARY_COOLDOWN_SECONDS,
+    generate_positions,
+    summary_messages,
+)
 from llm_wiki.agents.twins import (
     TwinPersonaData,
     TwinsAgent,
@@ -29,6 +37,7 @@ from llm_wiki.storage.metadata import (
     FileRecord,
     TwinPersona,
     TwinSession,
+    TwinSummary,
     append_twin_message,
     create_twin_session,
     delete_twin_session,
@@ -234,6 +243,112 @@ async def patch_twin_message_reactions(
     return {"ok": True}
 
 
+class TwinSummaryRequest(BaseModel):
+    language: str = "ru"
+    # Compare-and-swap: repeated clicks/retries with an old revision reuse the
+    # saved result. Only the explicit regenerate action supplies this value.
+    previous_revision: str | None = Field(default=None, max_length=64)
+
+
+def _summary_payload(row: TwinSummary | None) -> dict[str, object] | None:
+    if row is None:
+        return None
+    return {
+        "revision": row.revision,
+        "source_seq": row.source_seq,
+        "language": row.language,
+        "positions": row.positions,
+        "created_at": row.created_at.isoformat(),
+        "refresh_available_at": (
+            row.created_at + timedelta(seconds=SUMMARY_COOLDOWN_SECONDS)
+        ).isoformat(),
+    }
+
+
+@router.get("/twin/sessions/{session_id}/summary")
+async def get_twin_summary(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> dict[str, object]:
+    await _require_session_access(db, session_id, caller)
+    return {"summary": _summary_payload(await db.get(TwinSummary, session_id))}
+
+
+@router.post("/twin/sessions/{session_id}/summary")
+async def summarize_twin_session(
+    session_id: str,
+    body: TwinSummaryRequest,
+    db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
+) -> dict[str, object]:
+    from llm_wiki.llm.client import LLMClient
+
+    await _require_session_access(db, session_id, caller)
+    # Cross-process lock: concurrent requests must not pay for the same summary.
+    locked = await db.scalar(
+        text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"twin-summary:{session_id}"},
+    )
+    if not locked:
+        raise HTTPException(409, "summary_in_progress")
+    llm = None
+    try:
+        saved = await db.get(TwinSummary, session_id)
+        if saved and body.previous_revision != saved.revision:
+            return {"summary": _summary_payload(saved)}
+        messages = await get_twin_session_messages(db, session_id)
+        if saved:
+            has_new_replies = any(
+                m.seq > saved.source_seq and m.role == "persona" and summary_messages([m])
+                for m in messages
+            )
+            remaining = (
+                saved.created_at
+                + timedelta(seconds=SUMMARY_COOLDOWN_SECONDS)
+                - datetime.now(timezone.utc)
+            ).total_seconds()
+            if not has_new_replies and remaining > 0:
+                raise HTTPException(
+                    429, "summary_cooldown", headers={"Retry-After": str(int(remaining) + 1)}
+                )
+        transcript = summary_messages(messages)
+        if not any(m["role"] == "expert" for m in transcript):
+            raise HTTPException(422, "summary_no_replies")
+        if sum(len(m["text"]) for m in transcript) > MAX_TRANSCRIPT_CHARS:
+            raise HTTPException(422, "summary_too_long")
+        source_seq = max(m.seq for m in messages if m.role in {"user", "persona"})
+        language = normalize_language(body.language)
+        llm = LLMClient()
+        async with asyncio.timeout(75):
+            positions = await generate_positions(llm, transcript, language, session_id)
+        # A session deleted while the model was working must not be resurrected.
+        exists = await db.scalar(select(TwinSession.id).where(TwinSession.id == session_id))
+        if not exists:
+            raise HTTPException(404, "twin session not found")
+        if saved is None:
+            saved = TwinSummary(session_id=session_id)
+            db.add(saved)
+        saved.revision = str(uuid4())
+        saved.positions = positions
+        saved.source_seq = source_seq
+        saved.language = language
+        saved.created_at = datetime.now(timezone.utc)
+        payload = _summary_payload(saved)
+        await db.commit()
+        return {"summary": payload}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Never return provider keys or raw exception text to the browser.
+        logger.warning("twin_summary_failed", session_id=session_id, error_type=type(exc).__name__)
+        raise HTTPException(503, "summary_failed") from exc
+    finally:
+        await db.rollback()  # release the lock on cache hits and failures too
+        if llm is not None:
+            await llm.aclose()
+
+
 class TwinChatRequest(BaseModel):
     session_id: str | None = None
     case_id: str
@@ -345,6 +460,7 @@ async def twin_chat_endpoint(
                 if persona is None:
                     continue
                 yield _sse_line({"event": "typing", "persona_id": pid})
+                reply_failed = False
                 try:
                     reply = await agent.respond_as_persona(
                         persona, personas, case_context, transcript, response_language
@@ -354,6 +470,7 @@ async def twin_chat_endpoint(
                     reply_to = reply.reply_to
                     ask = reply.ask
                 except Exception as exc:  # noqa: BLE001
+                    reply_failed = True
                     logger.warning("twins_persona_reply_failed", persona_id=pid, error=str(exc))
                     failed_reply = {
                         "ru": "Не удалось получить ответ.",
@@ -371,6 +488,7 @@ async def twin_chat_endpoint(
                         await asyncio.sleep(random.uniform(0.9, 1.7))
                     content: dict[str, object] = {
                         "text": bubble,
+                        "failed": reply_failed,
                         # reply_to on the first bubble (drives the «· Ответ:» label),
                         # cite on the last one (the supporting reference).
                         "reply_to": reply_to if i == 0 else "",
