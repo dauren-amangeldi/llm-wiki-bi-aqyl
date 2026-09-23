@@ -47,6 +47,19 @@ class CaseTitleTests(unittest.IsolatedAsyncioTestCase):
             await self.run_request(raw='{"title": ""}')
         self.assertEqual(error.exception.status_code, 502)
 
+    async def test_cleans_file_style_model_output_before_saving(self):
+        result, db, _ = await self.run_request(
+            raw='{"title": "02-25_Modern_Marketing_Strategy.pdf"}'
+        )
+        self.assertEqual(result["title"], "Modern Marketing Strategy")
+        statement = db.execute.call_args_list[-1].args[0]
+        self.assertEqual(statement.compile().params["title"], result["title"])
+
+    async def test_rejects_output_that_is_empty_after_cleaning(self):
+        with self.assertRaises(HTTPException) as error:
+            await self.run_request(raw='{"title": "02-25___"}')
+        self.assertEqual(error.exception.status_code, 502)
+
     async def test_concurrent_edit_is_not_overwritten(self):
         with self.assertRaises(HTTPException) as error:
             await self.run_request(rowcount=0)
