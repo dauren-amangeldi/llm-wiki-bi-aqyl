@@ -61,6 +61,8 @@ async def test_list_cases_after_create(client: AsyncClient) -> None:
     assert len(cases) == 2
     titles = {c["title"] for c in cases}
     assert titles == {"Alpha", "Beta"}
+    # Saving an empty case remains valid, and missing files never unlock it.
+    assert all(c["council"] == {"ready_doc_ids": [], "processing_doc_ids": []} for c in cases)
 
 
 async def test_update_case(client: AsyncClient) -> None:

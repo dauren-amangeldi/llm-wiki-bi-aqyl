@@ -4,12 +4,13 @@ import pytest
 
 from llm_wiki.agents.twins import ChatReplyResult, ChatRouteResult
 from llm_wiki.api.v1 import twins
-from llm_wiki.storage.metadata import CaseRecord, TwinPersona
+from llm_wiki.storage.metadata import CaseRecord, FileRecord, TwinPersona
 
 
 @pytest.mark.parametrize("opening,expected", [(False, "en"), (True, "kk")])
 async def test_language_is_kept_across_persona_handoffs(db_session, monkeypatch, opening, expected):
-    db_session.add(CaseRecord(id="case", title="Кейс", owner="me", doc_ids=[]))
+    db_session.add(CaseRecord(id="case", title="Кейс", owner="me", doc_ids=["ready"]))
+    db_session.add(FileRecord(file_id="ready", original_name="ready.md", status="DONE", owner="me"))
     for pid in ("musk", "jobs"):
         db_session.add(TwinPersona(id=pid, name=pid, inspiration="x", real_name=pid,
                                   track="tech", lens="x", system_prompt="Русская персона", avatar_init="X"))

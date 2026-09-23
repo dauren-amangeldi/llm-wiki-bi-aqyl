@@ -10,6 +10,7 @@ from sqlalchemy import and_, cast, func, or_, select, update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB, array
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.api.council_readiness import council_readiness
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage import wiki_store
@@ -204,6 +205,8 @@ async def list_cases(
     ).all()
     art_by_doc: dict[str, int] = {doc: int(n) for doc, n in art_rows}
 
+    readiness = await council_readiness(db, rows, caller)
+
     def _artifact_count(r: CaseRecord) -> int:
         return art_by_doc.get(r.id, 0) + sum(
             art_by_doc.get(d, 0) for d in (r.doc_ids or [])
@@ -220,6 +223,7 @@ async def list_cases(
             "scope": r.scope or "internal",
             "description": r.description or "",
             "artifact_count": _artifact_count(r),
+            "council": readiness[r.id],
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
