@@ -30,6 +30,8 @@ from llm_wiki.agents.twins import (
     build_chat_transcript,
     load_case_context,
 )
+from llm_wiki.storage.case_visibility import visible_case_clause
+from llm_wiki.api.council_readiness import council_readiness, require_ready_case
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import (
@@ -85,6 +87,18 @@ async def get_twin_roster(db: AsyncSession = Depends(get_db)) -> dict[str, objec
         ],
         "presets": [{"id": p.id, "name": p.name, "persona_ids": p.persona_ids} for p in presets],
     }
+
+
+@router.get("/twin/readiness")
+async def get_council_readiness(
+    db: AsyncSession = Depends(get_db), caller: str = Depends(get_user_key),
+) -> dict[str, dict[str, object]]:
+    cases = (await db.scalars(select(CaseRecord).where(
+        visible_case_clause(caller)
+    ))).all()
+    readiness = await council_readiness(db, cases, caller)
+    # Membership can change in another browser while this council stays open.
+    return {case.id: {**readiness[case.id], "doc_ids": case.doc_ids or [], "sensitive": case.sensitive or not bool(readiness[case.id]["ready_doc_ids"])} for case in cases}
 
 
 @router.get("/twin/suggest")
@@ -215,7 +229,8 @@ async def patch_twin_session_personas(
     caller: str = Depends(get_user_key),
 ) -> dict[str, bool]:
     """Change the council line-up of an existing session («Изменить состав»)."""
-    await _require_session_access(db, session_id, caller)
+    session = await _require_session_access(db, session_id, caller)
+    await require_ready_case(db, session.case_id, caller)
     for pid in body.persona_ids:
         if await get_twin_persona(db, pid) is None:
             raise HTTPException(status_code=404, detail=f"Unknown persona: {pid}")
@@ -284,7 +299,8 @@ async def summarize_twin_session(
 ) -> dict[str, object]:
     from llm_wiki.llm.client import LLMClient
 
-    await _require_session_access(db, session_id, caller)
+    session = await _require_session_access(db, session_id, caller)
+    await require_ready_case(db, session.case_id, caller)
     # Cross-process lock: concurrent requests must not pay for the same summary.
     locked = await db.scalar(
         text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
@@ -319,6 +335,7 @@ async def summarize_twin_session(
             raise HTTPException(422, "summary_too_long")
         source_seq = max(m.seq for m in messages if m.role in {"user", "persona"})
         language = normalize_language(body.language)
+        await require_ready_case(db, session.case_id, caller)
         llm = LLMClient()
         async with asyncio.timeout(75):
             positions = await generate_positions(llm, transcript, language, session_id)
@@ -326,6 +343,7 @@ async def summarize_twin_session(
         exists = await db.scalar(select(TwinSession.id).where(TwinSession.id == session_id))
         if not exists:
             raise HTTPException(404, "twin session not found")
+        await require_ready_case(db, session.case_id, caller)
         if saved is None:
             saved = TwinSummary(session_id=session_id)
             db.add(saved)
@@ -389,21 +407,13 @@ async def twin_chat_endpoint(
             raise HTTPException(404, f"Unknown persona: {persona_id}")
         personas_rows.append(persona)
 
-    case = await db.get(CaseRecord, body.case_id)
-    documents: list[FileRecord] = []
-    if case is not None:
-        for doc_id in case.doc_ids or []:
-            fr = await db.get(FileRecord, doc_id)
-            if fr is not None:
-                documents.append(fr)
-
     if body.session_id:
-        session_row = await db.get(TwinSession, body.session_id)
-        if session_row is None:
-            raise HTTPException(404, "Unknown session_id")
+        session_row = await _require_session_access(db, body.session_id, user_key)
         if body.case_id != session_row.case_id:
             raise HTTPException(400, "case_id does not match the session's case")
-    else:
+    # Before creating a session, writing a message, opening SSE or constructing an LLM.
+    await require_ready_case(db, body.case_id, user_key)
+    if not body.session_id:
         session_row = await create_twin_session(
             db, case_id=body.case_id, persona_ids=body.persona_ids, created_by=user_key
         )
@@ -411,13 +421,14 @@ async def twin_chat_endpoint(
     personas = [_to_persona_data(p) for p in personas_rows]
     real_name_by_id = {p.id: p.real_name for p in personas_rows}
     source_titles: dict[str, str] = {}
-    case_context = load_case_context(documents, sources=source_titles)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         from llm_wiki.llm.client import LLMClient
 
-        llm = LLMClient()
+        llm = None
         try:
+            await require_ready_case(db, body.case_id, user_key)
+            llm = LLMClient()
             agent = TwinsAgent(llm)
             existing = await get_twin_session_messages(db, session_row.id)
             seq = (existing[-1].seq + 1) if existing else 0
@@ -439,6 +450,7 @@ async def twin_chat_endpoint(
                 )
                 seq += 1
                 transcript = build_chat_transcript(existing + [user_row], real_name_by_id)
+                await require_ready_case(db, body.case_id, user_key)
                 try:
                     route = await agent.route_message(
                         personas, transcript, body.language, latest_question=body.message,
@@ -459,11 +471,15 @@ async def twin_chat_endpoint(
                 persona = personas_by_id.get(pid)
                 if persona is None:
                     continue
+                _, current_documents = await require_ready_case(db, body.case_id, user_key)
+                # Do not keep a removed material in subsequent experts' context.
+                source_titles.clear()
+                current_context = load_case_context(current_documents, sources=source_titles)
                 yield _sse_line({"event": "typing", "persona_id": pid})
                 reply_failed = False
                 try:
                     reply = await agent.respond_as_persona(
-                        persona, personas, case_context, transcript, response_language
+                        persona, personas, current_context, transcript, response_language
                     )
                     bubbles = reply.messages
                     cite = reply.cite
@@ -479,6 +495,7 @@ async def twin_chat_endpoint(
                     }[response_language]
                     bubbles, cite, reply_to, ask = [failed_reply], "", "", ""
 
+                await require_ready_case(db, body.case_id, user_key)
                 for i, bubble in enumerate(bubbles):
                     if i > 0:
                         # Second bubble of the same persona: show «печатает…»
@@ -495,6 +512,7 @@ async def twin_chat_endpoint(
                         "cite": cite if i == len(bubbles) - 1 else "",
                     }
                     content = normalize_citations(content, source_titles)
+                    await require_ready_case(db, body.case_id, user_key)
                     row = await append_twin_message(
                         db, session_id=session_row.id, role="persona",
                         persona_id=pid, seq=seq, content=content,
@@ -521,11 +539,14 @@ async def twin_chat_endpoint(
                     extra_used += 1
 
             yield _sse_line({"done": True, "session_id": session_row.id})
+        except HTTPException as exc:
+            yield _sse_line({"error": str(exc.detail), "session_id": session_row.id})
         except Exception as exc:  # noqa: BLE001
             logger.exception("twins_chat_stream_failed", error=str(exc))
             yield _sse_line({"error": str(exc)})
         finally:
-            await llm.aclose()
+            if llm is not None:
+                await llm.aclose()
 
     return StreamingResponse(
         event_generator(),

@@ -68,9 +68,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Makes an older DB self-migrate on startup — no manual DBA step needed.
         await ensure_column_migrations(conn)
 
+    # Incomplete cases are private even if an older release published them.
+    from llm_wiki.storage.case_visibility import privatize_unready_cases
+    from llm_wiki.api.deps import _SessionLocal
+    async with _SessionLocal() as session:
+        await privatize_unready_cases(session)
+        await session.commit()
+
     # Seed default skills on an empty database. (Wiki pages live in wiki_fts,
     # which is the source of truth — no S3 backfill needed.)
-    from llm_wiki.api.deps import _SessionLocal
 
     async with _SessionLocal() as session:
         from llm_wiki.storage.metadata import (

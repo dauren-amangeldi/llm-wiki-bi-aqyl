@@ -61,6 +61,8 @@ async def test_list_cases_after_create(client: AsyncClient) -> None:
     assert len(cases) == 2
     titles = {c["title"] for c in cases}
     assert titles == {"Alpha", "Beta"}
+    # Saving an empty case remains valid, and missing files never unlock it.
+    assert all(c["council"] == {"ready_doc_ids": [], "processing_doc_ids": []} for c in cases)
 
 
 async def test_update_case(client: AsyncClient) -> None:
@@ -161,10 +163,13 @@ async def test_list_cases_fuzzy_search_tolerates_typos(client: AsyncClient) -> N
     assert (await client.get("/api/v1/cases?q=zzzxyq")).json() == []
 
 
-async def test_list_cases_category_filter(client: AsyncClient) -> None:
+async def test_list_cases_category_filter(client: AsyncClient, db_session: AsyncSession) -> None:
+    from llm_wiki.storage.metadata import FileRecord
+    db_session.add(FileRecord(file_id="ready", original_name="ready.md", status="DONE"))
+    await db_session.commit()
     hdr = {"X-User-Email": "alice@bi.group"}
     await client.post(
-        "/api/v1/cases", json={"id": "c-pub", "title": "Public one", "sensitive": False}, headers=hdr
+        "/api/v1/cases", json={"id": "c-pub", "title": "Public one", "doc_ids": ["ready"], "sensitive": False}, headers=hdr
     )
     await client.post(
         "/api/v1/cases", json={"id": "c-prv", "title": "Private one", "sensitive": True}, headers=hdr
@@ -348,7 +353,8 @@ def test_assert_can_edit_blocks_a_different_author_always() -> None:
         cases._assert_can_edit(owned, "bob@bi.group")
     assert exc.value.status_code == 403
     cases._assert_can_edit(owned, "alice@bi.group")  # author is fine
-    cases._assert_can_edit(ownerless, "bob@bi.group")  # legacy ownerless stays open
+    with pytest.raises(HTTPException):
+        cases._assert_can_edit(ownerless, "bob@bi.group")
 
 
 # ── Ownership matrix (Б1/Б2): любые мутации кейса — только автор ─────────────
@@ -376,7 +382,7 @@ async def test_foreign_case_mutations_are_forbidden(client: AsyncClient) -> None
     ).status_code == 403
 
     # Автору всё можно.
-    ok = {"id": "c-own", "title": "Renamed by Alice", "doc_ids": ["d1"], "sensitive": False}
+    ok = {"id": "c-own", "title": "Renamed by Alice", "doc_ids": ["d1"]}
     assert (await client.put("/api/v1/cases/c-own", json=ok, headers=alice)).status_code == 200
     assert (await client.delete("/api/v1/cases/c-own", headers=alice)).status_code == 200
 
@@ -399,7 +405,7 @@ async def test_delete_reports_orphans_and_keeps_materials_used_in_another_case(c
     from llm_wiki.storage.metadata import CaseRecord, FileRecord
     for name in ["orphan", "shared"]:
         db_session.add(FileRecord(file_id=name, original_name=f"{name}.md", status="DONE"))
-    db_session.add(CaseRecord(id="delete-with-docs", title="Delete", doc_ids=["orphan", "shared"]))
+    db_session.add(CaseRecord(id="delete-with-docs", title="Delete", owner="anon", doc_ids=["orphan", "shared"]))
     db_session.add(CaseRecord(id="keep", title="Keep", doc_ids=["shared"]))
     await db_session.commit()
     response = await client.delete("/api/v1/cases/delete-with-docs")

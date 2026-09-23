@@ -72,7 +72,7 @@ async def _seed_world(db: AsyncSession) -> None:
             created_pages=["page-shared"],
         )
     )
-    db.add(CaseRecord(id="case-a", title="A", doc_ids=["f-own", "f-shared"]))
+    db.add(CaseRecord(id="case-a", title="A", owner="anon", doc_ids=["f-own", "f-shared"]))
     db.add(CaseRecord(id="case-b", title="B", doc_ids=["f-shared"]))
     await upsert_wiki_fts(db, slug="page-own", title="Own", body="секретный текст")
     await upsert_wiki_fts(db, slug="page-shared", title="Shared", body="общий текст")

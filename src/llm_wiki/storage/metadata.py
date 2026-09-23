@@ -670,6 +670,11 @@ async def update_file_status(
         new_status: New status string (e.g. ``"DONE"``, ``"FAILED"``).
         error: Failure reason to persist (truncated); ignored when None.
     """
+    case_ids: list[str] = []
+    if new_status != "DONE":
+        case_ids = list(await session.scalars(select(CaseRecord.id).where(
+            cast(CaseRecord.doc_ids, JSONB).op("?")(file_id)
+        ).order_by(CaseRecord.id).with_for_update()))
     values: dict[str, object] = {
         "status": new_status,
         "updated_at": datetime.now(timezone.utc),
@@ -687,6 +692,9 @@ async def update_file_status(
     await session.execute(
         sa_update(FileRecord).where(FileRecord.file_id == file_id).values(**values)
     )
+    if new_status != "DONE":
+        from llm_wiki.storage.case_visibility import privatize_unready_cases
+        await privatize_unready_cases(session, case_ids)
     await session.commit()
 
 
@@ -971,7 +979,7 @@ async def append_chat_message(
 
 
 async def case_for_file(
-    session: AsyncSession, file_id: str
+    session: AsyncSession, file_id: str, caller: str | None = None
 ) -> tuple[str, str] | None:
     """Return ``(case_id, case_title)`` of the case that owns *file_id*, if any.
 
@@ -989,6 +997,9 @@ async def case_for_file(
         .order_by(CaseRecord.created_at.desc())
         .limit(1)
     )
+    if caller is not None:
+        from llm_wiki.storage.case_visibility import visible_case_clause, ready_case_clause
+        stmt = stmt.where(visible_case_clause(caller), ready_case_clause())
     row = (await session.execute(stmt)).first()
     return (row[0], row[1]) if row else None
 

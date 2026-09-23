@@ -165,7 +165,7 @@ async def ask_document(
         await llm.aclose()
 
     # The document belongs to at most one case — label every citation with it.
-    owning_case = await case_for_file(db, document_id)
+    owning_case = await case_for_file(db, document_id, caller=user_key)
     citations = [Citation(anchor=s.slug, title=s.title, quote=s.quote) for s in result.sources]
     if owning_case:
         for c in citations:
@@ -212,10 +212,11 @@ async def ask_case(
     title: str = Depends(get_user_title),
 ) -> DocAskResponse:
     """Ask a question scoped to a whole case (NotebookLM-style, across all docs)."""
+    from llm_wiki.storage.case_visibility import case_visible
     from llm_wiki.storage.metadata import CaseRecord
 
     case = await db.get(CaseRecord, case_id)
-    if not case:
+    if not case or not await case_visible(db, case, user_key):
         raise HTTPException(404, "Case not found")
     revision = await begin_chat_turn(db, user_key=user_key, scope_type="case", scope_id=case_id)
 
