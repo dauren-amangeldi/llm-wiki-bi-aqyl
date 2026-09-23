@@ -13,7 +13,7 @@ import structlog
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.agents.response_language import normalize_language
@@ -30,6 +30,7 @@ from llm_wiki.agents.twins import (
     build_chat_transcript,
     load_case_context,
 )
+from llm_wiki.storage.case_visibility import visible_case_clause
 from llm_wiki.api.council_readiness import council_readiness, require_ready_case
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
@@ -91,13 +92,13 @@ async def get_twin_roster(db: AsyncSession = Depends(get_db)) -> dict[str, objec
 @router.get("/twin/readiness")
 async def get_council_readiness(
     db: AsyncSession = Depends(get_db), caller: str = Depends(get_user_key),
-) -> dict[str, dict[str, list[str]]]:
+) -> dict[str, dict[str, object]]:
     cases = (await db.scalars(select(CaseRecord).where(
-        or_(CaseRecord.sensitive.is_(False), CaseRecord.owner == caller)
+        visible_case_clause(caller)
     ))).all()
     readiness = await council_readiness(db, cases, caller)
     # Membership can change in another browser while this council stays open.
-    return {case.id: {**readiness[case.id], "doc_ids": case.doc_ids or []} for case in cases}
+    return {case.id: {**readiness[case.id], "doc_ids": case.doc_ids or [], "sensitive": case.sensitive or not bool(readiness[case.id]["ready_doc_ids"])} for case in cases}
 
 
 @router.get("/twin/suggest")

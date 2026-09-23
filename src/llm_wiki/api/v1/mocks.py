@@ -1,10 +1,9 @@
 """Mock endpoints for all remaining frontend routes (MVP stub layer)."""
 
-from fastapi import Depends
-from sqlalchemy import func, select
+from fastapi import Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.api.deps import get_db
+from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage.metadata import FileRecord, update_file_status
 
@@ -19,10 +18,11 @@ from llm_wiki.storage.metadata import FileRecord, update_file_status
 async def doc_sources(
     document_id: str,
     db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> list:
     """Return one source entry pointing at the raw file (minimal implementation)."""
     fr = await db.get(FileRecord, document_id)
-    if not fr:
+    if not fr or (fr.sensitive and fr.owner != caller):
         return []
     return [
         {
@@ -98,9 +98,12 @@ async def remove_tag(document_id: str, tag_id: str) -> dict:
 async def delete_doc(
     document_id: str,
     db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> dict:
     """Soft-delete: set status to ROLLED_BACK (filtered from GET /documents)."""
     fr = await db.get(FileRecord, document_id)
+    if fr and fr.sensitive and fr.owner != caller:
+        raise HTTPException(404, "Document not found")
     if fr:
         await update_file_status(db, document_id, "ROLLED_BACK")
     return {"ok": True}

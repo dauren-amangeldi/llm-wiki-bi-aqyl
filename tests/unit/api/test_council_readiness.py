@@ -135,6 +135,7 @@ async def test_readiness_tracks_completion_removal_failures_and_visibility(db_se
         "ready_doc_ids": [],
         "processing_doc_ids": ["file"],
         "doc_ids": case.doc_ids,
+        "sensitive": True,
     }
     pending.status = "DONE"
     await db_session.commit()

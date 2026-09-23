@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.storage.case_visibility import case_visible
 from llm_wiki.storage.metadata import CaseRecord, FileRecord
 
 PROCESSING_STATUSES = frozenset({"RECEIVED", "STORED", "SEARCHED", "WRITTEN", "LINTED", "LOGGED"})
@@ -52,7 +53,7 @@ async def require_ready_case(
 ) -> tuple[CaseRecord, list[FileRecord]]:
     # Refresh ORM objects too: materials may be removed during an SSE round.
     case = await db.get(CaseRecord, case_id, populate_existing=True)
-    if case is None or (case.sensitive and case.owner != caller):
+    if case is None or not await case_visible(db, case, caller):
         raise HTTPException(404, "case_not_available")
     documents = list(
         (

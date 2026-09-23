@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
+from llm_wiki.storage.case_visibility import public_case_clause
 from llm_wiki.storage.metadata import CaseRecord, User
 
 RANKING_TIMEZONE = "Asia/Almaty"
@@ -40,7 +41,7 @@ async def get_contributions(
     caller: str = Depends(get_user_key),
 ) -> dict[str, object]:
     eligible = (
-        CaseRecord.sensitive.is_(False),
+        public_case_clause(),
         CaseRecord.owner.is_not(None),
         CaseRecord.owner.not_in(("", "anon")),
     )
