@@ -68,13 +68,14 @@ def _plain_snippet(content: str, length: int = 200) -> str:
     return text[:length] + ("…" if len(text) > length else "")
 
 
-async def _slug_to_case_map() -> dict[str, tuple[str, str]]:
+async def _slug_to_case_map(caller: str) -> dict[str, tuple[str, str]]:
     """slug вики-страницы → (case_id, case_title) через files.created_pages и
     cases.doc_ids. Объёмы малы (сотни строк без тел) — два простых SELECT'а;
     при росте до десятков тысяч заменить на junction-таблицу."""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from llm_wiki.storage.case_visibility import visible_case_clause, ready_case_clause
     from llm_wiki.api.deps import _engine
     from llm_wiki.storage.metadata import CaseRecord, FileRecord
 
@@ -84,7 +85,7 @@ async def _slug_to_case_map() -> dict[str, tuple[str, str]]:
             await session.execute(select(FileRecord.file_id, FileRecord.created_pages))
         ).all()
         cases = (
-            await session.execute(select(CaseRecord.id, CaseRecord.title, CaseRecord.doc_ids))
+            await session.execute(select(CaseRecord.id, CaseRecord.title, CaseRecord.doc_ids).where(visible_case_clause(caller), ready_case_clause()))
         ).all()
     file_to_case: dict[str, tuple[str, str]] = {}
     for cid, ctitle, doc_ids in cases:
@@ -143,7 +144,7 @@ async def list_wiki_pages(
         # Восстанавливаем цепочку slug → файл (created_pages) → кейс (doc_ids)
         # и схлопываем: первый (самый релевантный) хит кейса остаётся, у него
         # счётчик «ещё N страниц»; безкейсовые страницы идут как есть.
-        slug_case = await _slug_to_case_map()
+        slug_case = await _slug_to_case_map(caller)
         seen_case_idx: dict[str, int] = {}
         for hit in wiki_store.keyword_search(term, limit=(limit + offset) * 3, caller=caller):
             content = wiki_store.get_page(hit.slug, caller=caller)

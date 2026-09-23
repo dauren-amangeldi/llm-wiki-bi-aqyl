@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage import notifications as notif_store
+from llm_wiki.storage.case_visibility import visible_case_clause
 from llm_wiki.storage.metadata import ArtifactRecord, CaseRecord, FileRecord
 
 # Активные стадии пайплайна (тот же набор, что у janitor-свипа).
@@ -89,7 +90,7 @@ async def _live_rows(db: AsyncSession, caller: str) -> list[dict[str, object]]:
         cases = (
             await db.scalars(
                 select(CaseRecord).where(
-                    cast(CaseRecord.doc_ids, JSONB).op("?|")(array(file_ids))
+                    cast(CaseRecord.doc_ids, JSONB).op("?|")(array(file_ids)), visible_case_clause(caller)
                 )
             )
         ).all()

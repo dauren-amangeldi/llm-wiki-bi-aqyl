@@ -23,6 +23,7 @@ from llm_wiki.agents.artifacts_export import ExportError, export_artifact, suppo
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
 from llm_wiki.storage import artifacts_store
+from llm_wiki.storage.case_visibility import case_visible
 from llm_wiki.storage.metadata import CaseRecord, FileRecord
 
 
@@ -30,7 +31,7 @@ async def _check_document_access(session: AsyncSession, document_id: str, caller
     record = await session.get(CaseRecord, document_id)
     if record is None:
         record = await session.get(FileRecord, document_id)
-    if record is None or (record.sensitive and record.owner != caller):
+    if record is None or (record.sensitive and record.owner != caller) or (isinstance(record, CaseRecord) and not await case_visible(session, record, caller)):
         raise HTTPException(status_code=404, detail="Источник не найден")
 
 
@@ -52,6 +53,8 @@ async def _resolve_sources(
     file = None if case is not None else await session.get(FileRecord, document_id)
     parent = case if case is not None else file
     if parent is not None and caller is not None and parent.sensitive and parent.owner != caller:
+        raise HTTPException(status_code=404, detail="Источник не найден")
+    if case is not None and caller is not None and not await case_visible(session, case, caller):
         raise HTTPException(status_code=404, detail="Источник не найден")
     members = list(case.doc_ids or []) if case is not None else [document_id]
     ids = members if selected is None else selected

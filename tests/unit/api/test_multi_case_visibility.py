@@ -116,7 +116,7 @@ async def test_put_without_doc_ids_keeps_composition(
     # Правка тегов БЕЗ doc_ids (новый контракт метаданных).
     r = await client.put(
         "/api/v1/cases/case-k",
-        json={"title": "К", "sensitive": False, "tags": ["Качество"],
+        json={"title": "К", "tags": ["Качество"],
               "scope": "internal"},
     )
     assert r.status_code == 200
@@ -130,7 +130,7 @@ async def test_put_without_doc_ids_keeps_composition(
     # tags=None (не передан) → теги тоже не трогаем.
     r = await client.put(
         "/api/v1/cases/case-k",
-        json={"title": "К переименован", "sensitive": False, "scope": "internal"},
+        json={"title": "К переименован", "scope": "internal"},
     )
     assert r.status_code == 200
     db_session.expire_all()

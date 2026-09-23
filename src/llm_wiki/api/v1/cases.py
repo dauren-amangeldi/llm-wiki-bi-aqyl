@@ -7,13 +7,21 @@ import structlog
 from fastapi import Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, cast, func, or_, select, update as sa_update
-from sqlalchemy.dialects.postgresql import JSONB, array
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.api.council_readiness import council_readiness
 from llm_wiki.api.deps import get_db, get_user_key
 from llm_wiki.api.v1 import router
-from llm_wiki.storage import wiki_store
 from llm_wiki.storage.metadata import CaseRecord, ChunkEmbedding, FileRecord
+from llm_wiki.storage.case_visibility import (
+    cascade_case_visibility as _cascade_case_visibility,
+    case_visible,
+    has_ready_material,
+    privatize_unready_cases,
+    public_case_clause,
+    visible_case_clause,
+)
 from llm_wiki.taxonomy import CASE_TAGS, clean_tags
 
 logger = structlog.get_logger(__name__)
@@ -25,11 +33,21 @@ def _assert_can_edit(row: CaseRecord, caller: str) -> None:
     ANY mutation — rename, tags, doc membership, privacy flip, delete — is
     author-only. Enforced ALWAYS (demo mode included): in demo the caller comes
     from the X-User-Email header the frontend consistently sends, so ownership
-    attribution works there too. Legacy rows with owner=NULL predate ownership
-    and stay editable by anyone (prod data gets owners on creation — Б2).
+    attribution works there too. Legacy ownerless rows require ownership repair
+    before editing; an unknown author must never grant edit access to everyone.
     """
-    if row.owner and row.owner != caller:
+    if row.owner != caller:
         raise HTTPException(status_code=403, detail="Only the case author can modify this case")
+
+
+async def _assert_sources_accessible(db: AsyncSession, doc_ids: list[str], caller: str) -> None:
+    # Never let a forged membership change transfer another user's private file.
+    inaccessible = await db.scalar(select(FileRecord.file_id).where(
+        FileRecord.file_id.in_(doc_ids), FileRecord.sensitive.is_(True),
+        or_(FileRecord.owner.is_(None), FileRecord.owner != caller),
+    ).limit(1))
+    if inaccessible:
+        raise HTTPException(404, "Document not found")
 
 
 class CaseBody(BaseModel):
@@ -44,11 +62,9 @@ class CaseBody(BaseModel):
     id: str | None = None
     title: str
     doc_ids: list[str] | None = None
-    # Private case: only its owner can list/open it. The frontend sends this
-    # explicitly (new cases default private there); the backend default is False
-    # so a client that omits it gets a normal, visible case. File-level privacy
-    # (owner-scoped chunks) is what actually protects sensitive content.
-    sensitive: bool = False
+    # Omitted on create -> private; omitted on update -> keep current privacy.
+    # Publishing requires an explicit false AND a ready material.
+    sensitive: bool | None = None
     # Fixed-taxonomy tags; unknown tags are dropped server-side (see clean_tags).
     tags: list[str] | None = None
     # Источник опыта: внутренний опыт BI или мировой. Двигает фильтр на главной.
@@ -65,79 +81,6 @@ def _dispatch_autotag(case_id: str) -> None:
         autotag_case.delay(case_id)
     except Exception:  # noqa: BLE001
         pass
-
-
-async def _cascade_case_visibility(
-    db: AsyncSession,
-    doc_ids: list[str],
-    *,
-    sensitive: bool,
-    owner: str | None,
-    exclude_case_id: str | None = None,
-) -> None:
-    """Propagate a case's visibility to every material that belongs to it.
-
-    Every time a case is saved we re-assert visibility over its files, their
-    embedding chunks (what shared Q&A retrieval filters on) and the wiki
-    page(s) each file created *on its own* (``created_pages``; shared
-    ``updated_pages`` are left untouched).
-
-    Мульти-кейс правило (QA-решение): материал может состоять в НЕСКОЛЬКИХ
-    кейсах, поэтому кейс больше не единоличный источник правды. Файл приватен,
-    только если ВСЕ содержащие его кейсы приватны: публикация любого кейса
-    открывает материал; «сделать приватным» не прячет файл, пока тот входит в
-    другой общий кейс. Public content has ``owner = NULL``; private content is
-    owned by the case owner. The caller commits the async work; the wiki store
-    commits itself.
-
-    Args:
-        exclude_case_id: id сохраняемого кейса — его СТАРАЯ строка в БД не
-            должна голосовать за видимость (новое значение передано в
-            ``sensitive``).
-    """
-    if not doc_ids:
-        return
-
-    # Файлы, у которых есть ДРУГОЙ публичный кейс — они остаются публичными,
-    # даже когда сохраняемый кейс приватен.
-    public_elsewhere: set[str] = set()
-    if sensitive:
-        stmt = select(CaseRecord.doc_ids).where(
-            CaseRecord.sensitive.is_(False),
-            cast(CaseRecord.doc_ids, JSONB).op("?|")(array(doc_ids)),
-        )
-        if exclude_case_id:
-            stmt = stmt.where(CaseRecord.id != exclude_case_id)
-        doc_set = set(doc_ids)
-        for (ids,) in (await db.execute(stmt)).all():
-            public_elsewhere.update(d for d in (ids or []) if d in doc_set)
-
-    private_docs = [d for d in doc_ids if sensitive and d not in public_elsewhere]
-    public_docs = [d for d in doc_ids if d not in set(private_docs)]
-
-    for batch, batch_sensitive in ((private_docs, True), (public_docs, False)):
-        if not batch:
-            continue
-        new_owner = owner if batch_sensitive else None
-        await db.execute(
-            sa_update(FileRecord)
-            .where(FileRecord.file_id.in_(batch))
-            .values(sensitive=batch_sensitive, owner=new_owner)
-        )
-        await db.execute(
-            sa_update(ChunkEmbedding)
-            .where(ChunkEmbedding.file_id.in_(batch))
-            .values(sensitive=batch_sensitive, owner=new_owner)
-        )
-        rows = (
-            await db.execute(
-                select(FileRecord.created_pages).where(FileRecord.file_id.in_(batch))
-            )
-        ).all()
-        slugs = sorted({s for (pages,) in rows for s in (pages or [])})
-        wiki_store.set_pages_visibility(
-            slugs, sensitive=batch_sensitive, owner=new_owner
-        )
 
 
 @router.get("/cases")
@@ -165,11 +108,11 @@ async def list_cases(
     number of matches (ignoring ``limit``/``offset``) is returned in the
     ``X-Total-Count`` header so the client can render pagination.
     """
-    conds = [or_(CaseRecord.sensitive.is_(False), CaseRecord.owner == caller)]
+    conds = [visible_case_clause(caller)]
     if category == "public":
-        conds.append(CaseRecord.sensitive.is_(False))
+        conds.append(public_case_clause())
     elif category == "private":
-        conds.append(and_(CaseRecord.sensitive.is_(True), CaseRecord.owner == caller))
+        conds.append(and_(~public_case_clause(), CaseRecord.owner == caller))
     if q and q.strip():
         term = q.strip()
         # Substring match OR trigram similarity (typo-tolerant, e.g. «маркетнг»).
@@ -204,6 +147,8 @@ async def list_cases(
     ).all()
     art_by_doc: dict[str, int] = {doc: int(n) for doc, n in art_rows}
 
+    readiness = await council_readiness(db, rows, caller)
+
     def _artifact_count(r: CaseRecord) -> int:
         return art_by_doc.get(r.id, 0) + sum(
             art_by_doc.get(d, 0) for d in (r.doc_ids or [])
@@ -214,12 +159,13 @@ async def list_cases(
             "id": r.id,
             "title": r.title,
             "doc_ids": r.doc_ids or [],
-            "sensitive": r.sensitive,
+            "sensitive": r.sensitive or not bool(readiness[r.id]["ready_doc_ids"]),
             "tags": r.tags or [],
             "owner": r.owner,
             "scope": r.scope or "internal",
             "description": r.description or "",
             "artifact_count": _artifact_count(r),
+            "council": readiness[r.id],
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
@@ -233,13 +179,14 @@ async def create_case(
     owner: str = Depends(get_user_key),
 ) -> dict[str, object]:
     """Create a new case container."""
+    await _assert_sources_accessible(db, body.doc_ids or [], owner)
     now = datetime.now(timezone.utc)
     case = CaseRecord(
         id=body.id or f"case-{int(now.timestamp() * 1000):x}-1",
         title=body.title.strip() or "Без названия",
         doc_ids=body.doc_ids or [],
         tags=clean_tags(body.tags or []),
-        sensitive=body.sensitive,
+        sensitive=body.sensitive is not False or not await has_ready_material(db, body.doc_ids or [], owner),
         scope=body.scope,
         # Always attribute the author — "anon" included (clients without the
         # X-User-Email header). owner=NULL would leave the case editable by
@@ -285,18 +232,26 @@ async def update_case(
     caller: str = Depends(get_user_key),
 ) -> dict[str, bool]:
     """Update case title and document membership."""
-    row = await db.get(CaseRecord, case_id)
+    row = await db.get(CaseRecord, case_id, with_for_update=True)
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
     _assert_can_edit(row, caller)
+    await privatize_unready_cases(db, [case_id])
     # PATCH-семантика (QA-баг «воскрешение источника»): doc_ids/tags = None →
     # поле не трогаем. Правка тегов/названия из устаревшего стора больше не
     # перезаписывает состав материалов.
-    effective_doc_ids = row.doc_ids or [] if body.doc_ids is None else body.doc_ids
+    effective_doc_ids = (row.doc_ids or []) if body.doc_ids is None else body.doc_ids
+    await _assert_sources_accessible(db, list(set(effective_doc_ids) - set(row.doc_ids or [])), caller)
     # Состав материалов изменился → LLM-описание устарело: сбрасываем, а
     # _dispatch_autotag ниже перегенерит его по новому составу.
     docs_changed = set(effective_doc_ids) != set(row.doc_ids or [])
-    privacy_changed = bool(row.sensitive) != bool(body.sensitive)
+    sensitive = row.sensitive if body.sensitive is None else body.sensitive
+    if not await has_ready_material(db, effective_doc_ids, caller):
+        if body.sensitive is False and not docs_changed:
+            raise HTTPException(422, "Добавьте готовый материал, чтобы открыть общий доступ.")
+        sensitive = True
+    privacy_changed = bool(row.sensitive) != sensitive
+    previous_docs = list(row.doc_ids or [])
     changed_at = datetime.now(timezone.utc)
     await db.execute(
         sa_update(CaseRecord)
@@ -305,7 +260,7 @@ async def update_case(
             title=body.title.strip() or row.title,
             doc_ids=effective_doc_ids,
             **({} if body.tags is None else {"tags": clean_tags(body.tags)}),
-            sensitive=body.sensitive,
+            sensitive=sensitive,
             scope=body.scope,
             **({"description": "", "materials_updated_at": changed_at} if docs_changed else {}),
             updated_at=changed_at,
@@ -315,9 +270,15 @@ async def update_case(
     # publishing propagates and new uploads inherit the case's status; other
     # public cases holding the same materials keep them public (multi-case).
     await _cascade_case_visibility(
-        db, effective_doc_ids, sensitive=body.sensitive, owner=row.owner,
+        db, effective_doc_ids, sensitive=sensitive, owner=row.owner,
         exclude_case_id=case_id,
     )
+    for removed_id in set(previous_docs) - set(effective_doc_ids):
+        remaining = list(await db.scalars(select(CaseRecord).where(
+            cast(CaseRecord.doc_ids, JSONB).op("?")(removed_id), CaseRecord.id != case_id,
+        )))
+        await _cascade_case_visibility(db, [removed_id], sensitive=True,
+            owner=next((c.owner for c in remaining if c.owner), row.owner), exclude_case_id=case_id)
     await db.commit()
     from llm_wiki.storage import notifications as notif
 
@@ -328,7 +289,7 @@ async def update_case(
             db,
             case_id=case_id,
             title=body.title.strip() or row.title,
-            published=not body.sensitive,
+            published=not sensitive,
             actor=caller,
             occurred_at=changed_at,
         )
@@ -457,6 +418,10 @@ async def delete_case(
             )
         )
     await db.delete(row)
+    await db.flush()
+    for fid in set(file_ids) - set(orphaned):
+        remaining_owner = next((c.owner for c in other_cases if fid in (c.doc_ids or [])), row.owner)
+        await _cascade_case_visibility(db, [fid], sensitive=True, owner=remaining_owner)
     await db.commit()
 
     if raw_keys:
@@ -492,7 +457,7 @@ async def similar_cases(
     участвуют; свои — участвуют.
     """
     row = await db.get(CaseRecord, case_id)
-    if not row:
+    if not row or not await case_visible(db, row, caller):
         raise HTTPException(status_code=404, detail="Case not found")
     doc_ids = [d for d in (row.doc_ids or []) if d]
     if not doc_ids:
@@ -509,6 +474,7 @@ async def similar_cases(
                 WITH case_files AS (
                     SELECT c.id AS case_id, c.title, c.sensitive, c.owner, f.value AS file_id
                     FROM cases c, jsonb_array_elements_text(c.doc_ids::jsonb) AS f(value)
+                    WHERE EXISTS (SELECT 1 FROM files ready WHERE ready.status = 'DONE' AND c.doc_ids::jsonb ? ready.file_id)
                 ),
                 centroids AS (
                     SELECT cf.case_id, cf.title, cf.sensitive, cf.owner,
@@ -558,6 +524,8 @@ async def unlink_document(
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
     _assert_can_edit(row, caller)
+    if document_id not in (row.doc_ids or []):
+        return {"ok": True}
     doc_ids = [d for d in (row.doc_ids or []) if d != document_id]
     changed_at = datetime.now(timezone.utc)
     await db.execute(
@@ -569,12 +537,13 @@ async def unlink_document(
             **({"materials_updated_at": changed_at} if doc_ids != (row.doc_ids or []) else {}),
         )
     )
+    await privatize_unready_cases(db, [case_id])
     # Removing the last public membership must not leave the source public.
     remaining = list(await db.scalars(select(CaseRecord).where(
         cast(CaseRecord.doc_ids, JSONB).op("?")(document_id), CaseRecord.id != case_id,
     )))
     await _cascade_case_visibility(
-        db, [document_id], sensitive=all(c.sensitive for c in remaining),
+        db, [document_id], sensitive=True,
         owner=next((c.owner for c in remaining if c.owner), row.owner), exclude_case_id=case_id,
     )
     await db.commit()
@@ -594,6 +563,7 @@ async def link_document(
     source = await db.get(FileRecord, document_id)
     if source is None or source.status == "ROLLED_BACK" or (source.sensitive and source.owner != caller):
         raise HTTPException(status_code=404, detail="Источник не найден")
+    await privatize_unready_cases(db, [case_id])
     ids = list(row.doc_ids or [])
     if document_id not in ids:
         row.doc_ids = [*ids, document_id]
@@ -606,7 +576,7 @@ async def link_document(
 
         await notif.notify_case_ready_if_done(db, case_id)
         _dispatch_autotag(case_id)
-    return {"doc_ids": row.doc_ids or []}
+    return {"doc_ids": row.doc_ids or [], "sensitive": row.sensitive}
 
 
 @router.get("/tags")

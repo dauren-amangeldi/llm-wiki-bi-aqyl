@@ -174,7 +174,7 @@ async def notify_file_done(session: AsyncSession, file_id: str) -> None:
         fr = await session.get(FileRecord, file_id, populate_existing=True)
         if fr is None or fr.status.upper() != "DONE":
             return
-        case = await case_for_file(session, file_id)
+        case = await case_for_file(session, file_id, caller=fr.owner or "")
         # recipient: загрузивший (owner). У опубликованных файлов owner=NULL —
         # broadcast; честная адресация появится с Keycloak (Б2).
         at = _file_event_time(fr)
@@ -203,7 +203,7 @@ async def notify_file_failed(session: AsyncSession, file_id: str, error: str) ->
         fr = await session.get(FileRecord, file_id, populate_existing=True)
         if fr is None or fr.status.upper() not in {"FAILED", "ROLLED_BACK"}:
             return
-        case = await case_for_file(session, file_id)
+        case = await case_for_file(session, file_id, caller=fr.owner or "")
         at = _file_event_time(fr)
         await upsert_event(
             session,
@@ -454,9 +454,24 @@ async def _safe_rollback(session: AsyncSession) -> None:
 
 
 def _visible_to(caller: str):  # noqa: ANN202 — SQLAlchemy expression
-    return or_(
-        NotificationRecord.recipient.is_(None),
-        NotificationRecord.recipient == caller,
+    from llm_wiki.storage.case_visibility import visible_case_clause
+
+    # Historical broadcasts must follow current permissions after demotion too.
+    hidden_case = select(CaseRecord.id).where(
+        or_(CaseRecord.id == NotificationRecord.entity_id,
+            CaseRecord.id == NotificationRecord.meta["case_id"].as_string(),
+            CaseRecord.id == NotificationRecord.meta["document_id"].as_string()),
+        ~visible_case_clause(caller),
+    ).exists()
+    hidden_file = select(FileRecord.file_id).where(
+        or_(FileRecord.file_id == NotificationRecord.entity_id,
+            FileRecord.file_id == NotificationRecord.meta["document_id"].as_string()),
+        FileRecord.sensitive.is_(True),
+        or_(FileRecord.owner.is_(None), FileRecord.owner != caller),
+    ).exists()
+    return and_(
+        or_(NotificationRecord.recipient.is_(None), NotificationRecord.recipient == caller),
+        ~hidden_case, ~hidden_file,
     )
 
 

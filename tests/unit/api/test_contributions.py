@@ -1,12 +1,14 @@
 from datetime import datetime, timezone
 
 from llm_wiki.api.v1.contributions import get_contributions, month_start, public_name
-from llm_wiki.storage.metadata import CaseRecord, User
+from llm_wiki.storage.metadata import CaseRecord, FileRecord, User
 
 
 def add_cases(db, owner, count, *, sensitive=False, created_at=None):
     for i in range(count):
-        db.add(CaseRecord(id=f"{owner}-{sensitive}-{i}", title="Case", owner=owner,
+        fid = f"{owner}-{sensitive}-{i}"
+        db.add(FileRecord(file_id=fid, original_name="ready.md", status="DONE"))
+        db.add(CaseRecord(id=fid, title="Case", owner=owner, doc_ids=[fid],
                           sensitive=sensitive, created_at=created_at or datetime.now(timezone.utc)))
 
 

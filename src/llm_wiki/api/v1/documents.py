@@ -271,10 +271,11 @@ async def get_related_documents(
     document_id: str,
     limit: int = 4,
     db: AsyncSession = Depends(get_db),
+    caller: str = Depends(get_user_key),
 ) -> dict[str, list[dict[str, object]]]:
     """Return documents with similar titles (word overlap)."""
     fr = await db.get(FileRecord, document_id)
-    if not fr:
+    if not fr or (fr.sensitive and fr.owner != caller):
         return {"items": []}
 
     source_words = set(
@@ -286,6 +287,7 @@ async def get_related_documents(
     stmt = select(FileRecord).where(
         FileRecord.file_id != document_id,
         FileRecord.status.notin_(["FAILED", "ROLLED_BACK"]),
+        or_(FileRecord.sensitive.is_(False), FileRecord.owner == caller),
     )
     rows = (await db.scalars(stmt.limit(50))).all()
 

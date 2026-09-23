@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.api.v1 import twins
 from llm_wiki.storage.metadata import (
+    CaseRecord,
+    FileRecord,
     TwinMessage,
     TwinSummary,
     append_twin_message,
@@ -19,6 +21,9 @@ from llm_wiki.storage.metadata import (
 
 @pytest.fixture
 async def council(db_session, monkeypatch):
+    db_session.add_all([CaseRecord(id="case", title="Case", owner="owner", doc_ids=["ready"]),
+                        FileRecord(file_id="ready", original_name="ready.md", status="DONE", owner="owner")])
+    await db_session.commit()
     row = await create_twin_session(
         db_session, case_id="case", persona_ids=["jobs"], created_by="owner"
     )

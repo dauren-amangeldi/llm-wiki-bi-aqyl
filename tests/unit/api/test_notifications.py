@@ -158,7 +158,7 @@ async def test_case_rename_preserves_event_but_reattachment_is_a_new_occurrence(
     monkeypatch.setattr(cases, "_dispatch_autotag", lambda _: None)
     at = datetime(2026, 9, 1, tzinfo=timezone.utc)
     db_session.add(FileRecord(file_id="case-file", original_name="a.pdf", status="DONE", finished_at=at))
-    db_session.add(CaseRecord(id="case-clock", title="Case", doc_ids=["case-file"], owner=USER,
+    db_session.add(CaseRecord(id="case-clock", title="Case", doc_ids=["case-file"], owner=USER, sensitive=True,
                               created_at=at, materials_updated_at=at))
     await db_session.commit()
     await notif.notify_case_ready_if_done(db_session, "case-clock")
@@ -468,7 +468,7 @@ async def test_update_case_attaching_ready_materials_emits_ready(
     # Теперь состав — только готовые материалы → «кейс готов».
     r2 = await client.put(
         "/api/v1/cases/case-u",
-        json={"title": "Кейс", "doc_ids": ["f-ok"], "sensitive": False, "tags": []},
+        json={"title": "Кейс", "doc_ids": ["f-ok"], "tags": []},
     )
     assert r2.status_code == 200
     rows = (await db_session.scalars(select(NotificationRecord))).all()
@@ -481,12 +481,13 @@ async def test_case_privacy_flip_emits_broadcast(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
     """PUT /cases/{id} со сменой sensitive пишет социальное событие с актором."""
-    db_session.add(CaseRecord(id="case-p", title="Секрет", sensitive=True, owner=USER))
+    db_session.add(FileRecord(file_id="pub-ready", original_name="ready.md", status="DONE"))
+    db_session.add(CaseRecord(id="case-p", title="Секрет", doc_ids=["pub-ready"], sensitive=True, owner=USER))
     await db_session.commit()
 
     resp = await client.put(
         "/api/v1/cases/case-p",
-        json={"title": "Секрет", "doc_ids": [], "sensitive": False, "tags": []},
+        json={"title": "Секрет", "doc_ids": ["pub-ready"], "sensitive": False, "tags": []},
     )
     assert resp.status_code == 200
 
@@ -500,7 +501,7 @@ async def test_case_privacy_flip_emits_broadcast(
     # Обратный флип обновляет ту же строку (не спамит ленту).
     await client.put(
         "/api/v1/cases/case-p",
-        json={"title": "Секрет", "doc_ids": [], "sensitive": True, "tags": []},
+        json={"title": "Секрет", "doc_ids": ["pub-ready"], "sensitive": True, "tags": []},
     )
     # API писал в другой сессии — сбрасываем identity map, иначе stale-объект.
     db_session.expire_all()
