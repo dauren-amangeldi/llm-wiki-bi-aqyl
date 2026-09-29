@@ -6,7 +6,6 @@ import jwt
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
-from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.requests import Request
@@ -70,8 +69,7 @@ async def test_login_real_gate_profile_and_read_routes(api):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("load_test_auth_enabled", False), ("app_environment", "production"),
-    ("app_environment", "development"), ("public_base_url", "https://aqyl.bi.group"),
+    ("load_test_auth_enabled", False), ("public_base_url", "https://aqyl.bi.group"),
     ("public_base_url", ""), ("auth_enabled", False),
     ("load_test_login_secret", ""), ("load_test_signing_secret", ""),
 ])
@@ -179,7 +177,7 @@ async def test_startup_seed_is_idempotent_and_preserves_revocation(enabled, db_s
     assert row.blocked and not row.load_test_enabled
     monkeypatch.setattr(settings, "load_test_user_count", 3)
     assert await lt.seed_load_test_users(db_session) == 1
-    monkeypatch.setattr(settings, "app_environment", "production")
+    monkeypatch.setattr(settings, "public_base_url", "https://aqyl.bi.group")
     monkeypatch.setattr(settings, "load_test_user_count", 4)
     assert await lt.seed_load_test_users(db_session) == 0
     assert len((await db_session.scalars(select(AllowedUser))).all()) == 3
@@ -196,17 +194,22 @@ async def test_migration_existing_table_is_idempotent(db_engine):
 
 
 @pytest.mark.parametrize("overrides", [
-    {"app_environment": "production"}, {"public_base_url": "https://aqyl.bi.group"},
+    {"public_base_url": "https://aqyl.bi.group"},
     {"auth_enabled": False}, {"load_test_signing_secret": "short"},
     {"load_test_signing_secret": LOGIN_SECRET},
+    {"load_test_login_secret": ""}, {"load_test_signing_secret": ""},
 ])
-def test_misconfigured_enabled_mode_fails_startup(enabled, overrides):
+def test_misconfigured_enabled_mode_starts_with_load_test_access_disabled(enabled, overrides, monkeypatch):
     values = {**enabled, **overrides}
     values["PUBLIC_BASE_URL"] = values.pop("public_base_url")
-    with pytest.raises(ValidationError) as exc:
-        Settings(_env_file=None, **values)
-    assert LOGIN_SECRET not in str(exc.value)
-    assert SIGNING_SECRET not in str(exc.value)
+    configured = Settings(_env_file=None, **values)
+    assert not configured.load_test_auth_active
+    monkeypatch.setattr(lt, "settings", configured)
+    with pytest.raises(HTTPException) as exc:
+        lt.require_load_test_login(LOGIN_SECRET)
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException):
+        lt.issue_load_test_token(lt.account_email(1))
 
 
 def test_disabled_default_and_valid_test_configuration(enabled):
@@ -214,3 +217,23 @@ def test_disabled_default_and_valid_test_configuration(enabled):
     values = {**enabled}
     values["PUBLIC_BASE_URL"] = values.pop("public_base_url")
     assert Settings(_env_file=None, **values).load_test_auth_active
+
+
+@pytest.mark.parametrize("environment", [None, "production", "development", "test"])
+def test_temporary_environment_waiver_keeps_test_domain_required(enabled, monkeypatch, environment):
+    monkeypatch.delenv("APP_ENVIRONMENT", raising=False)
+    values = {**enabled}
+    values.pop("app_environment")
+    if environment is not None:
+        values["app_environment"] = environment
+    values["PUBLIC_BASE_URL"] = values.pop("public_base_url")
+    configured = Settings(_env_file=None, **values)
+    monkeypatch.setattr(lt, "settings", configured)
+    assert configured.load_test_auth_active
+    lt.require_load_test_login(LOGIN_SECRET)
+    token = lt.issue_load_test_token(lt.account_email(1))
+    assert lt.verify_load_test_token(token)["email"] == lt.account_email(1)
+    configured.public_base_url = "https://aqyl.bi.group"
+    assert not configured.load_test_auth_active
+    with pytest.raises(HTTPException):
+        lt.verify_load_test_token(token)

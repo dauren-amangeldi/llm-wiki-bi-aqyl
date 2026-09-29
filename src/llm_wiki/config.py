@@ -143,25 +143,20 @@ class Settings(BaseSettings):
     @property
     def load_test_auth_active(self) -> bool:
         # Read deployment configuration, never Host/X-Forwarded-Host from a caller.
+        # TODO: Restore APP_ENVIRONMENT=test enforcement before stage/main release.
+        # Temporarily waived at user request; the test-only URL and secrets remain required.
         return (
             self.auth_enabled
             and self.load_test_auth_enabled
-            and self.app_environment == "test"
             and self.public_base_url.rstrip("/") == "https://aqyl.test.bi.group"
             and len(self.load_test_login_secret) >= 32
             and len(self.load_test_signing_secret) >= 32
             and self.load_test_login_secret != self.load_test_signing_secret
         )
 
-    @model_validator(mode="after")
-    def _validate_load_test_auth(self) -> "Settings":
-        if self.load_test_auth_enabled and not self.load_test_auth_active:
-            raise ValueError(
-                "Load-test auth requires AUTH_ENABLED, APP_ENVIRONMENT=test, "
-                "PUBLIC_BASE_URL=https://aqyl.test.bi.group and two distinct "
-                "load-test secrets of at least 32 characters"
-            )
-        return self
+    # An incomplete optional load-test configuration must not prevent API,
+    # worker or beat startup. Token endpoints and account seeding still require
+    # load_test_auth_active, so invalid configurations remain disabled.
 
     @model_validator(mode="after")
     def _assemble_database_url(self) -> "Settings":
