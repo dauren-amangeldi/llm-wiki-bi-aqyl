@@ -7,12 +7,12 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 import structlog
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from llm_wiki.api.deps import _engine
-from llm_wiki.api.middleware import AuthGateMiddleware, RequestIDMiddleware
+from llm_wiki.api.middleware import AuthGateMiddleware, RequestIDMiddleware, bind_request_entities
 from llm_wiki.api.routes import router
 from llm_wiki.api.v1 import router as v1_router
 from llm_wiki.config import settings
@@ -134,10 +134,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     # Pagination total for GET /cases — readable by the SPA even cross-origin.
-    expose_headers=["X-Total-Count"],
+    expose_headers=["X-Total-Count", "X-Request-ID"],
 )
-app.include_router(router, prefix="/api/v1")
-app.include_router(v1_router, prefix="/api/v1")
+app.include_router(router, prefix="/api/v1", dependencies=[Depends(bind_request_entities)])
+app.include_router(v1_router, prefix="/api/v1", dependencies=[Depends(bind_request_entities)])
 
 
 @app.get("/health", tags=["system"])

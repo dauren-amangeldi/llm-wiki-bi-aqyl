@@ -18,6 +18,7 @@ import sys
 import structlog
 
 from llm_wiki.config import settings
+from llm_wiki.observability import merge_trace, redact
 
 
 def configure_logging() -> None:
@@ -33,31 +34,23 @@ def configure_logging() -> None:
     """
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
-    # Stdlib root logger → stderr with a bare format string.
-    # structlog's JSONRenderer does the real work; the stdlib format is just
-    # the transport layer.
-    #
-    # stderr (not stdout) on purpose: on this cluster filebeat ships only the
-    # containers' stderr to Kibana — the worker's stdout, where these app logs
-    # and tracebacks (pipeline_failed / pipeline_retry) would otherwise go, is
-    # dropped, so failures were invisible. Routing app logs to stderr puts them
-    # in the stream that is actually indexed. stderr is also line-buffered, so
-    # records survive a hard worker kill (OOM/SIGKILL) instead of dying in an
-    # unflushed buffer.
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stderr,
-        level=level,
-        force=True,
-    )
-
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
+        merge_trace,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        redact,
     ]
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=shared_processors,
+        processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                    redact, structlog.processors.JSONRenderer()],
+    ))
+    logging.basicConfig(handlers=[handler], level=level, force=True)
 
     structlog.configure(
         processors=[
@@ -66,7 +59,7 @@ def configure_logging() -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,
     )
 
     # Quiet noisy third-party libraries to at least WARNING so they don't

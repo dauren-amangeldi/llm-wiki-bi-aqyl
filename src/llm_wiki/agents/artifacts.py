@@ -342,17 +342,17 @@ async def generate_content(
         try:
             image_prompt = await _infographic_art_director_prompt(llm, content_text, title)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "infographic_art_director_failed", error=str(exc), document_id=document_id
-            )
+            from llm_wiki.observability import error_fields, mark_outcome
+            mark_outcome("degraded")
+            logger.warning("infographic_art_director_failed", document_id=document_id, **error_fields(exc))
             image_prompt = _infographic_image_prompt(data, title)
         try:
             image_url = await llm.generate_image(image_prompt)
             return {"image_url": image_url, **fields}
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "infographic_image_failed", error=str(exc), document_id=document_id
-            )
+            from llm_wiki.observability import error_fields, mark_outcome
+            mark_outcome("degraded")
+            logger.warning("infographic_image_failed", document_id=document_id, **error_fields(exc))
             svg = _render_infographic_svg(data, title=title, source_titles=source_titles)
             return {"svg": svg, **fields}
     if kind == "report":

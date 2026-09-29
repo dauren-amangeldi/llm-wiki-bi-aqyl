@@ -30,6 +30,7 @@ class BudgetSnapshot:
     tokens_today: int
     cost_this_month_usd: float
     timestamp: datetime  # UTC moment when the snapshot was taken
+    unpriced_calls_today: int = 0
 
 
 def compute_budget_snapshot(
@@ -62,6 +63,7 @@ def compute_budget_snapshot(
     cost_today = 0.0
     tokens_today = 0
     cost_this_month = 0.0
+    unpriced_calls_today = 0
 
     if not usage_log_path.exists():
         return BudgetSnapshot(
@@ -80,10 +82,12 @@ def compute_budget_snapshot(
             ts = datetime.fromisoformat(record["timestamp"])
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            cost = float(record.get("cost_usd", 0.0))
-            tokens = int(record.get("input_tokens", 0)) + int(record.get("output_tokens", 0))
+            cost = float(record.get("cost_usd") or 0.0)
+            tokens = int(record.get("input_tokens") or 0) + int(record.get("output_tokens") or 0)
             if ts.date() == today:
                 cost_today += cost
+                if record.get("cost_usd") is None:
+                    unpriced_calls_today += 1
                 tokens_today += tokens
             if (ts.year, ts.month) == this_month:
                 cost_this_month += cost
@@ -95,6 +99,7 @@ def compute_budget_snapshot(
         tokens_today=tokens_today,
         cost_this_month_usd=round(cost_this_month, 6),
         timestamp=now,
+        unpriced_calls_today=unpriced_calls_today,
     )
 
 
@@ -152,6 +157,9 @@ class BudgetGuard:
             tokens_today=snapshot.tokens_today,
             token_limit=self._token_limit,
         )
+
+        if snapshot.unpriced_calls_today:
+            logger.warning("budget_cost_incomplete", unpriced_calls_today=snapshot.unpriced_calls_today)
 
         # --- Cost check ---
         if self._cost_limit is not None:

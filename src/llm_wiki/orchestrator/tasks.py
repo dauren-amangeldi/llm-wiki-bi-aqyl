@@ -17,6 +17,7 @@ celery_app = Celery(
     "llm_wiki",
     broker=settings.redis_url,
     backend=settings.redis_url,
+    task_cls="llm_wiki.orchestrator.observed_task:ObservedTask",
 )
 
 celery_app.conf.update(
@@ -34,6 +35,7 @@ celery_app.conf.update(
     # structlog writes straight to the real stderr (see logging_config) and the
     # failure reason + traceback are shipped as-is.
     worker_redirect_stdouts=False,
+    worker_hijack_root_logger=False,
     # Concurrency is set per-worker on the CLI (see docker-compose):
     #   worker-ingest    -Q ingest          --concurrency=2  (CPU-bound parsing)
     #   worker-artifacts -Q artifacts,light --concurrency=3  (LLM-bound, user waits)
@@ -233,6 +235,8 @@ def process_file_task(self: Any, file_id: str) -> None:
 
         if marked_failed:
             notify_file_failed_sync(file_id, msg)
+        from llm_wiki.observability import mark_outcome
+        mark_outcome("failed")
         log.error("ingest_delivery_cap_hit", attempts=attempts)
         structlog.contextvars.clear_contextvars()
         return

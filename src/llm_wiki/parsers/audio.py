@@ -12,6 +12,8 @@ from pathlib import Path
 import structlog
 
 from llm_wiki.config import settings
+from llm_wiki.llm.telemetry import media_call
+from llm_wiki.observability import error_fields
 
 logger = structlog.get_logger(__name__)
 
@@ -59,17 +61,18 @@ def transcribe_audio(path: Path, file_id: str = "ask") -> str:
         size_bytes=size,
     )
     try:
-        with path.open("rb") as handle:
-            result = client.audio.transcriptions.create(
-                model=settings.transcription_model,
-                file=handle,
-                response_format="text",
-            )
+        with media_call(settings.transcription_model, "transcription", file_id, size_bytes=size) as telemetry:
+            with path.open("rb") as handle:
+                result = client.audio.transcriptions.create(
+                    model=settings.transcription_model, file=handle,
+                    response_format="verbose_json" if settings.transcription_model == "whisper-1" else "json",
+                )
+                telemetry["response"] = result
     except Exception as exc:  # noqa: BLE001 - surface any OpenAI/transport error
-        logger.error("transcription_failed", file_id=file_id, error=str(exc))
-        raise TranscriptionError(f"Transcription failed: {exc}") from exc
+        logger.error("transcription_failed", file_id=file_id, **error_fields(exc))
+        raise TranscriptionError("Transcription failed") from exc
 
-    # response_format="text" makes the SDK return a plain string; guard anyway.
+    # Structured responses preserve usage/duration; tolerate legacy string responses.
     text = (result if isinstance(result, str) else getattr(result, "text", "")).strip()
     if not text:
         raise TranscriptionError(

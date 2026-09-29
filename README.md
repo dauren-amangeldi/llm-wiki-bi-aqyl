@@ -243,8 +243,12 @@ Log level controlled by the `LOG_LEVEL` env var (default `INFO`).
 
 ## Cost Tracking
 
-Every LLM call is logged to `data/usage.log` as JSON-lines with tokens and USD cost.
-View aggregate stats: `GET /api/v1/stats`.
+Successful text, embedding, OCR, audio and image calls emit `llm_usage` JSON to stderr
+and `data/usage.log`. Tokens come from provider usage; USD cost is estimated from
+`PRICE_TABLE`. Missing usage/prices are recorded as `null` with `cost_status`, not $0.
+View aggregate stats: `GET /api/v1/stats`; `unpriced_calls_today > 0` means the cost
+total is incomplete. Failed calls have terminal timing/error events but may have
+unknown provider charges. See [load-test logging and correlation](docs/load-test-observability.md).
 
 ## Rate limiting & budget (LW-19)
 
@@ -255,8 +259,11 @@ Configure in `.env`:
 | `INGESTION_ENABLED` | `true` | Kill switch — set `false` to return 503 on `POST /files` |
 | `INGESTION_RATE_LIMIT_PER_MIN` | `10` | Max uploads per minute per source IP |
 | `ASK_RATE_LIMIT_PER_MIN` | `30` | Max `/ask` requests per minute per source IP |
-| `DAILY_COST_LIMIT_USD` | _(empty = disabled)_ | Hard cap on total LLM spend per UTC day |
-| `DAILY_TOKEN_LIMIT` | _(empty = disabled)_ | Hard cap on total tokens per UTC day |
+| `DAILY_COST_LIMIT_USD` | _(empty = disabled)_ | Check recorded estimated spend per UTC day |
+| `DAILY_TOKEN_LIMIT` | _(empty = disabled)_ | Check recorded tokens per UTC day |
+
+These checks read the local usage ledger before each call. They are not an atomic
+spending reservation or a shared hard cap across independent replicas/workers.
 
 When a daily limit is exceeded, `LLMClient` raises `BudgetExceeded` before any API call is made. The ingestion task transitions to `FAILED`. A structured log event `budget_exceeded` at level `error` is emitted — this is the alerting mechanism until Slack/webhook integration is added.
 
