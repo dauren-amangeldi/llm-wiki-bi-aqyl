@@ -191,10 +191,10 @@ class AuthGateMiddleware(BaseHTTPMiddleware):
         email = claims_email(claims)
 
         from llm_wiki.api.deps import _SessionLocal
-        from llm_wiki.storage.metadata import access_for_email
+        from llm_wiki.api.load_test_auth import access_for_claims
 
         async with _SessionLocal() as session:
-            decision = await access_for_email(session, email)
+            decision = await access_for_claims(session, claims)
         if not decision.allowed:
             _logger.info("access_denied", email=email, reason=decision.reason)
             return JSONResponse(
