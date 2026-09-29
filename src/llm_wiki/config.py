@@ -19,6 +19,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # --- LLM provider ---
@@ -130,6 +131,37 @@ class Settings(BaseSettings):
     # how long that works without a fresh login. Keycloak still enforces the real
     # refresh-token / SSO-session lifetime — if it expires sooner, refresh 401s.
     keycloak_refresh_cookie_max_age_s: int = 43_200  # 12h
+
+    # Separate service identities for Locust; never a replacement for human SSO.
+    app_environment: Literal["production", "test", "development"] = "production"
+    load_test_auth_enabled: bool = False
+    load_test_login_secret: str = Field(default="", repr=False)
+    load_test_signing_secret: str = Field(default="", repr=False)
+    load_test_user_count: int = Field(default=1, ge=1, le=1000)
+    load_test_token_ttl_s: int = Field(default=900, ge=60, le=1800)
+
+    @property
+    def load_test_auth_active(self) -> bool:
+        # Read deployment configuration, never Host/X-Forwarded-Host from a caller.
+        return (
+            self.auth_enabled
+            and self.load_test_auth_enabled
+            and self.app_environment == "test"
+            and self.public_base_url.rstrip("/") == "https://aqyl.test.bi.group"
+            and len(self.load_test_login_secret) >= 32
+            and len(self.load_test_signing_secret) >= 32
+            and self.load_test_login_secret != self.load_test_signing_secret
+        )
+
+    @model_validator(mode="after")
+    def _validate_load_test_auth(self) -> "Settings":
+        if self.load_test_auth_enabled and not self.load_test_auth_active:
+            raise ValueError(
+                "Load-test auth requires AUTH_ENABLED, APP_ENVIRONMENT=test, "
+                "PUBLIC_BASE_URL=https://aqyl.test.bi.group and two distinct "
+                "load-test secrets of at least 32 characters"
+            )
+        return self
 
     @model_validator(mode="after")
     def _assemble_database_url(self) -> "Settings":

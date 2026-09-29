@@ -82,7 +82,7 @@ async def get_current_user(
     """
     if settings.auth_enabled:
         from llm_wiki.api.auth import bearer_token, claims_email, verify_access_token
-        from llm_wiki.storage.metadata import access_for_email
+        from llm_wiki.api.load_test_auth import access_for_claims
 
         token = bearer_token(request)
         if not token:
@@ -90,7 +90,7 @@ async def get_current_user(
         claims = verify_access_token(token)
         user_id = claims_email(claims)
         # Whitelist + role come from the DB (allowed_users), not Keycloak roles.
-        decision = await access_for_email(session, user_id)
+        decision = await access_for_claims(session, claims)
         if not decision.allowed:
             raise HTTPException(
                 status_code=403, detail="Access is not allowed for this account"
@@ -98,7 +98,9 @@ async def get_current_user(
         name = claims.get("name") or claims.get("preferred_username") or user_id
         role = "admin" if decision.is_admin else "employee"
         user = await get_or_create_user(session, user_id, name, role)
-        return CurrentUser(id=user.id, name=user.name, role=user.role)
+        # The access decision is authoritative, including forced employee role
+        # for load-test tokens. Never revive a stale admin role from users.
+        return CurrentUser(id=user.id, name=user.name, role=role)
 
     user_id = request.headers.get("X-User-Id", "dev-user")
     name = request.headers.get("X-User-Name", "Dev User")

@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         s3_secret_key_len=len(settings.s3_secret_key),
         openai_api_key_len=len(settings.openai_api_key),
         ops_token_set=bool(settings.ops_token),
+        load_test_auth_active=settings.load_test_auth_active,
     )
 
     # Ensure local data directories exist (no-op effect for S3-backed raw/wiki).
@@ -97,6 +98,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             seeded = await seed_allowed_users(session)
             if seeded:
                 logger.info("allowed_users_startup_seed", inserted=seeded)
+
+        from llm_wiki.api.load_test_auth import seed_load_test_users
+
+        test_users_seeded = await seed_load_test_users(session)
+        if test_users_seeded:
+            logger.info("load_test_users_seeded", inserted=test_users_seeded)
 
         # Seed/refresh Twins council personas + presets from the .md files.
         # seed_twin_personas upserts, so editing a persona file and restarting
