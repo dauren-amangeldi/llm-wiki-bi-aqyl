@@ -91,5 +91,7 @@ async def classify_case_tags(
         description = str(parsed.get("description") or "").strip()[:600]
         return clean_tags(parsed.get("tags", [])), description
     except Exception as exc:  # noqa: BLE001
-        logger.warning("autotag_classify_failed", file_id=file_id, error=str(exc))
+        from llm_wiki.observability import error_fields, mark_outcome
+        mark_outcome("degraded")
+        logger.warning("autotag_classify_failed", file_id=file_id, **error_fields(exc))
         return [], ""

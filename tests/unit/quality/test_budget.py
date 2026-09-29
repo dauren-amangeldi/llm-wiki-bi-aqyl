@@ -21,6 +21,15 @@ from llm_wiki.quality.budget import (
 
 _NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=timezone.utc)
 
+@pytest.fixture(autouse=True)
+def fixed_budget_clock(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _NOW if tz else _NOW.replace(tzinfo=None)
+    monkeypatch.setattr("llm_wiki.quality.budget.datetime", FixedDatetime)
+
+
 
 def _write_log(path: Path, entries: list[dict]) -> None:  # type: ignore[type-arg]
     with path.open("w", encoding="utf-8") as fh:

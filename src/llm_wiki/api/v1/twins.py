@@ -57,6 +57,9 @@ logger = structlog.get_logger(__name__)
 
 
 def _sse_line(payload: dict[str, object]) -> str:
+    from llm_wiki.observability import observe_sse
+
+    observe_sse(payload)
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -312,6 +315,8 @@ async def summarize_twin_session(
     try:
         saved = await db.get(TwinSummary, session_id)
         if saved and body.previous_revision != saved.revision:
+            from llm_wiki.observability import mark_outcome
+            mark_outcome("cached")
             return {"summary": _summary_payload(saved)}
         messages = await get_twin_session_messages(db, session_id)
         if saved:
@@ -418,6 +423,8 @@ async def twin_chat_endpoint(
             db, case_id=body.case_id, persona_ids=body.persona_ids, created_by=user_key
         )
 
+    from llm_wiki.observability import bind_entities
+    bind_entities(session_id=session_row.id, case_id=body.case_id)
     personas = [_to_persona_data(p) for p in personas_rows]
     real_name_by_id = {p.id: p.real_name for p in personas_rows}
     source_titles: dict[str, str] = {}
@@ -457,7 +464,9 @@ async def twin_chat_endpoint(
                     )
                     responder_ids, response_language = route.responders, route.language
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("twins_route_failed_fallback_first_persona", error=str(exc))
+                    from llm_wiki.observability import error_fields, mark_outcome
+                    mark_outcome("degraded")
+                    logger.warning("twins_route_failed_fallback_first_persona", **error_fields(exc))
                     responder_ids = [personas[0].id]
 
             personas_by_id = {p.id: p for p in personas}

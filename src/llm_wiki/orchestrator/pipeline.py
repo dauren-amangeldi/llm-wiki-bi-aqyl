@@ -556,7 +556,7 @@ def _sum_cost(usage_log_path: Path, file_id: str) -> float:
         try:
             record = json.loads(line)
             if record.get("file_id") == file_id:
-                total += float(record.get("cost_usd", 0.0))
+                total += float(record.get("cost_usd") or 0.0)
         except (json.JSONDecodeError, TypeError):
             continue
     return round(total, 6)

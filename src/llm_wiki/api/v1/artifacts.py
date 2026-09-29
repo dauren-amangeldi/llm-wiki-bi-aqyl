@@ -275,6 +275,9 @@ async def _start_generation(
             context = existing.generation_context or {}
             if context and (set(context.get("source_doc_ids", [])) != set(source_doc_ids) or context.get("language") != language):
                 raise HTTPException(status_code=409, detail="Артефакт уже создаётся по другому набору источников или языку. Дождитесь завершения.")
+            from llm_wiki.observability import bind_entities, mark_outcome
+            bind_entities(artifact_id=existing.artifact_id, document_id=document_id, generation_id=context.get("id"))
+            mark_outcome("duplicate")
             return {
                 "artifact_id": existing.artifact_id,
                 "kind": kind,
@@ -285,6 +288,8 @@ async def _start_generation(
     record = await artifacts_store.create_pending_artifact(
         session, document_id=document_id, kind=kind, requested_by=requested_by, generation_context=context
     )
+    from llm_wiki.observability import bind_entities
+    bind_entities(artifact_id=record.artifact_id, document_id=document_id, generation_id=context["id"])
     try:
         from llm_wiki.orchestrator.tasks import generate_artifact
 

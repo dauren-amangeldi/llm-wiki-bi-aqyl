@@ -16,6 +16,8 @@ from pathlib import Path
 import structlog
 
 from llm_wiki.config import settings
+from llm_wiki.llm.telemetry import media_call
+from llm_wiki.observability import error_fields
 
 logger = structlog.get_logger(__name__)
 
@@ -123,24 +125,26 @@ def _transcribe_images(images: list[tuple[str, bytes]], file_id: str) -> str:
     for idx, (mime, data) in enumerate(images, start=1):
         b64 = base64.b64encode(data).decode("ascii")
         try:
-            resp = client.chat.completions.create(
-                model=settings.ocr_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": _OCR_PROMPT},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{mime};base64,{b64}"},
-                            },
-                        ],
-                    }
-                ],
-            )
+            with media_call(settings.ocr_model, "ocr", file_id, page=idx) as telemetry:
+                resp = client.chat.completions.create(
+                    model=settings.ocr_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": _OCR_PROMPT},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                                },
+                            ],
+                        }
+                    ],
+                )
+                telemetry["response"] = resp
         except Exception as exc:  # noqa: BLE001 - surface any OpenAI/transport error
-            logger.error("ocr_page_failed", file_id=file_id, page=idx, error=str(exc))
-            raise OCRError(f"OCR failed on page {idx}: {exc}") from exc
+            logger.error("ocr_page_failed", file_id=file_id, page=idx, **error_fields(exc))
+            raise OCRError(f"OCR failed on page {idx}") from exc
         page_text = (resp.choices[0].message.content or "").strip()
         if page_text:
             texts.append(page_text)

@@ -12,14 +12,19 @@ end-to-end.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Awaitable, Callable
-from uuid import uuid4
 
 import structlog
 from fastapi import HTTPException
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from llm_wiki.observability import bind_entities, error_fields, new_id, safe_id, trace_scope
 
 _logger = structlog.get_logger(__name__)
 
@@ -53,48 +58,91 @@ _OPEN_EXACT = frozenset(
 _OPEN_PREFIXES = ("/api/v1/auth/", "/api/v1/ops/")
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    """Generate and propagate a per-request correlation ID.
+class RequestIDMiddleware:
+    """Measure the whole ASGI response, including streams and unexpected errors."""
 
-    For each incoming HTTP request:
-    1. Extract ``X-Request-ID`` from headers or generate a new 16-char hex ID.
-    2. Bind ``request_id``, ``method``, and ``path`` to structlog contextvars
-       so every log line emitted during request handling includes them.
-    3. Set the ``X-Request-ID`` response header.
-    4. Emit a single ``request_handled`` access-log record after the response.
-    5. Clear contextvars so the next request starts clean.
-    """
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        request_id = request.headers.get("X-Request-ID") or uuid4().hex[:16]
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        request_id = safe_id(headers.get("x-request-id")) or new_id()
+        fields = {"request_id": request_id,
+                  "operation_id": safe_id(headers.get("x-operation-id")) or request_id,
+                  "method": scope["method"], "path": scope["path"]}
+        for name in ("run_id", "scenario_id"):
+            value = safe_id(headers.get("x-" + name.replace("_", "-")))
+            if value:
+                fields[name] = value
+        scope.setdefault("state", {})["request_id"] = request_id
+        started = time.perf_counter()
+        status = 500
+        response_started = complete = disconnected = streaming = False
+        headers_ms = None
+        failure = {}
 
-        structlog.contextvars.clear_contextvars()
-        structlog.contextvars.bind_contextvars(
-            request_id=request_id,
-            method=request.method,
-            path=request.url.path,
-        )
+        async def observed_receive() -> Message:
+            nonlocal disconnected
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                disconnected = True
+            return message
 
-        try:
-            response = await call_next(request)
-        finally:
-            # Capture context before clearing so it appears on the access log.
-            ctx = structlog.contextvars.get_contextvars()
-            structlog.contextvars.clear_contextvars()
+        async def observed_send(message: Message) -> None:
+            nonlocal status, response_started, complete, headers_ms, streaming, disconnected
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                response_headers = MutableHeaders(scope=message)
+                response_headers["X-Request-ID"] = request_id
+                streaming = "text/event-stream" in response_headers.get("content-type", "")
+                headers_ms = round((time.perf_counter() - started) * 1000, 2)
+                response_started = True
+            try:
+                await send(message)
+            except OSError:
+                disconnected = True
+                raise
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                complete = True
 
-        response.headers["X-Request-ID"] = request_id
-
-        _logger.info(
-            "request_handled",
-            status_code=response.status_code,
-            **{k: v for k, v in ctx.items() if k != "request_id"},
-            request_id=request_id,
-        )
-        return response
+        with trace_scope(fields) as trace:
+            _logger.info("request_started", **fields)
+            try:
+                await self.app(scope, observed_receive, observed_send)
+            except asyncio.CancelledError:
+                disconnected = True
+                raise
+            except Exception as exc:
+                failure = error_fields(exc)
+                trace.outcome = "failed"
+                if not response_started:
+                    # Preserve the exception for the server while ensuring its
+                    # generic 500 has the same request ID as our terminal log.
+                    await JSONResponse({"detail": "Internal Server Error"}, status_code=500)(
+                        scope, observed_receive, observed_send)
+                raise
+            finally:
+                route = getattr(scope.get("route"), "path", None)
+                outcome = ("failed" if status >= 500 else "rejected" if status >= 400
+                           else trace.outcome or "success")
+                if disconnected and not complete:
+                    outcome = "cancelled"
+                elif not failure and streaming and not trace.stream_done and outcome == "success":
+                    outcome = "incomplete"
+                _logger.info(
+                    "request_handled", status_code=status, route=route,
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    response_headers_ms=headers_ms, response_complete=complete,
+                    streaming=streaming, outcome=outcome,
+                    stream_events=trace.stream_events if streaming else None,
+                    stream_done=trace.stream_done if streaming else None,
+                    first_event_ms=(round((trace.first_event_at - started) * 1000, 2)
+                                    if trace.first_event_at is not None else None),
+                    **trace.fields, **failure,
+                )
 
 
 class AuthGateMiddleware(BaseHTTPMiddleware):
@@ -157,3 +205,8 @@ class AuthGateMiddleware(BaseHTTPMiddleware):
         request.state.user_is_admin = decision.is_admin
         request.state.user_claims = claims
         return await call_next(request)
+
+
+async def bind_request_entities(request: Request) -> None:
+    """Runs after routing so nested AI calls inherit resource identifiers."""
+    bind_entities(**request.path_params)
