@@ -154,9 +154,15 @@ class Settings(BaseSettings):
             and self.load_test_login_secret != self.load_test_signing_secret
         )
 
-    # An incomplete optional load-test configuration must not prevent API,
-    # worker or beat startup. Token endpoints and account seeding still require
-    # load_test_auth_active, so invalid configurations remain disabled.
+    @model_validator(mode="after")
+    def _validate_load_test_auth(self) -> "Settings":
+        if self.load_test_auth_enabled and not self.load_test_auth_active:
+            raise ValueError(
+                "Load-test auth requires AUTH_ENABLED=true, "
+                "PUBLIC_BASE_URL=https://aqyl.test.bi.group and two distinct "
+                "load-test secrets of at least 32 characters"
+            )
+        return self
 
     @model_validator(mode="after")
     def _assemble_database_url(self) -> "Settings":

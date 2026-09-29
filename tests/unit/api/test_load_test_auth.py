@@ -6,6 +6,7 @@ import jwt
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.requests import Request
@@ -199,17 +200,15 @@ async def test_migration_existing_table_is_idempotent(db_engine):
     {"load_test_signing_secret": LOGIN_SECRET},
     {"load_test_login_secret": ""}, {"load_test_signing_secret": ""},
 ])
-def test_misconfigured_enabled_mode_starts_with_load_test_access_disabled(enabled, overrides, monkeypatch):
+def test_misconfigured_enabled_mode_fails_startup(enabled, overrides):
     values = {**enabled, **overrides}
     values["PUBLIC_BASE_URL"] = values.pop("public_base_url")
-    configured = Settings(_env_file=None, **values)
-    assert not configured.load_test_auth_active
-    monkeypatch.setattr(lt, "settings", configured)
-    with pytest.raises(HTTPException) as exc:
-        lt.require_load_test_login(LOGIN_SECRET)
-    assert exc.value.status_code == 404
-    with pytest.raises(HTTPException):
-        lt.issue_load_test_token(lt.account_email(1))
+    with pytest.raises(ValidationError) as exc:
+        Settings(_env_file=None, **values)
+    assert "Load-test auth requires" in str(exc.value)
+    assert "APP_ENVIRONMENT" not in str(exc.value)
+    assert LOGIN_SECRET not in str(exc.value)
+    assert SIGNING_SECRET not in str(exc.value)
 
 
 def test_disabled_default_and_valid_test_configuration(enabled):
