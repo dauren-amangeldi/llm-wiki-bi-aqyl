@@ -56,6 +56,7 @@ _DEV_USER_ROLE = "admin"
 # Index names match SQLAlchemy's default (``ix_<table>_<column>``) so a fresh
 # ``create_all`` and this backfill never create a duplicate.
 _COLUMN_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE allowed_users ADD COLUMN IF NOT EXISTS load_test_enabled boolean NOT NULL DEFAULT false",
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS finished_at timestamptz",
     "UPDATE files SET finished_at = updated_at WHERE finished_at IS NULL"
     " AND status IN ('DONE', 'FAILED', 'ROLLED_BACK')",
@@ -268,6 +269,9 @@ class AllowedUser(Base):
     email: Mapped[str] = mapped_column(String, primary_key=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    load_test_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     note: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

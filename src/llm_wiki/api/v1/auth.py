@@ -16,12 +16,14 @@ Inert unless ``settings.auth_enabled`` is true.
 from __future__ import annotations
 
 import secrets
+from typing import Annotated
 from urllib.parse import urlencode
 
 import httpx
 import structlog
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,9 +35,15 @@ from llm_wiki.api.auth import (
     verify_access_token,
 )
 from llm_wiki.api.deps import get_db
+from llm_wiki.api.load_test_auth import (
+    access_for_claims,
+    issue_load_test_token,
+    load_test_access,
+    require_load_test_login,
+)
 from llm_wiki.api.v1 import router
 from llm_wiki.config import settings
-from llm_wiki.storage.metadata import User, access_for_email
+from llm_wiki.storage.metadata import User
 
 logger = structlog.get_logger(__name__)
 
@@ -79,6 +87,29 @@ async def auth_config() -> JSONResponse:
     """Tell the frontend whether auth is enabled and where to start login."""
     return JSONResponse(
         {"enabled": settings.auth_enabled, "login_url": "/api/v1/auth/login"}
+    )
+
+
+class LoadTestLogin(BaseModel):
+    email: str = Field(min_length=1, max_length=100)
+
+
+@router.post("/auth/load-test/token", dependencies=[Depends(require_load_test_login)])
+async def load_test_login(
+    body: LoadTestLogin, session: Annotated[AsyncSession, Depends(get_db)],
+) -> JSONResponse:
+    email = body.email.strip().lower()
+    decision = await load_test_access(session, email)
+    if not decision.allowed:
+        logger.info("load_test_login_rejected", reason="account_not_allowed")
+        raise HTTPException(403, "Load-test account is not allowed")
+    token = issue_load_test_token(email)
+    logger.info("load_test_token_issued", test_account=email,
+                expires_in=settings.load_test_token_ttl_s)
+    return JSONResponse(
+        {"access_token": token, "token_type": "Bearer",
+         "expires_in": settings.load_test_token_ttl_s},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
     )
 
 
@@ -259,7 +290,7 @@ async def auth_me(
         raise HTTPException(status_code=401, detail="Missing bearer token")
     claims = verify_access_token(token)
     email = claims_email(claims)
-    decision = await access_for_email(session, email)
+    decision = await access_for_claims(session, claims)
     if not decision.allowed:
         raise HTTPException(
             status_code=403, detail="Access is not allowed for this account"

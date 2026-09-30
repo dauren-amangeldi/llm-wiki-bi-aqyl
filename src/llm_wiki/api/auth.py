@@ -43,6 +43,11 @@ def verify_access_token(token: str) -> dict[str, Any]:
         HTTPException 401: If the token is missing a key, forged, or expired.
     """
     try:
+        from llm_wiki.api.load_test_auth import TOKEN_KID, verify_load_test_token
+
+        # The untrusted header only selects a verifier; it never grants access.
+        if jwt.get_unverified_header(token).get("kid") == TOKEN_KID:
+            return verify_load_test_token(token)
         signing_key = _jwks().get_signing_key_from_jwt(token)
         return jwt.decode(
             token,

@@ -12,7 +12,7 @@ from llm_wiki.storage.metadata import AccessDecision, User
 async def test_verified_profile_upsert_keeps_role_and_updates_name(db_session, monkeypatch):
     claims = {"email": "alice@bi.group", "name": "Alice Example", "given_name": "Alice"}
     monkeypatch.setattr(auth, "verify_access_token", lambda _: claims)
-    monkeypatch.setattr(auth, "access_for_email", AsyncMock(return_value=AccessDecision(True, False, "ok")))
+    monkeypatch.setattr(auth, "access_for_claims", AsyncMock(return_value=AccessDecision(True, False, "ok")))
     request = Request({"type": "http", "headers": [(b"authorization", b"Bearer test-token")]})
     first = await auth.auth_me(request, db_session)
     assert json.loads(first.body)["role"] == "employee"
@@ -27,7 +27,7 @@ async def test_verified_profile_upsert_keeps_role_and_updates_name(db_session, m
 
 async def test_denied_identity_cannot_create_profile(db_session, monkeypatch):
     monkeypatch.setattr(auth, "verify_access_token", lambda _: {"email": "blocked@bi.group"})
-    monkeypatch.setattr(auth, "access_for_email", AsyncMock(return_value=AccessDecision(False, False, "blocked")))
+    monkeypatch.setattr(auth, "access_for_claims", AsyncMock(return_value=AccessDecision(False, False, "blocked")))
     request = Request({"type": "http", "headers": [(b"authorization", b"Bearer test-token")]})
     with pytest.raises(HTTPException) as exc:
         await auth.auth_me(request, db_session)
