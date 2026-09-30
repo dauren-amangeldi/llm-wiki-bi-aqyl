@@ -8,16 +8,20 @@ import asyncio
 import json
 import time
 import weakref
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 import openai
 import structlog
-from filelock import FileLock
+
+from llm_wiki.llm.telemetry import estimate_cost, media_call, response_usage, write_usage
+from llm_wiki.observability import context, error_fields, new_id
 
 logger = structlog.get_logger(__name__)
+_PROVIDER_USAGE: ContextVar[dict[str, Any] | None] = ContextVar("provider_usage", default=None)
 
 # Non-retryable OpenAI 4xx errors (429 = RateLimitError IS retried; these are not)
 _NON_RETRYABLE_OPENAI: tuple[type[Exception], ...] = (
@@ -63,6 +67,13 @@ class LLMUsage:
     cost_usd: float
     timestamp: datetime
     duration_ms: int
+    call_id: str = field(default_factory=new_id)
+    attempts: int = 1
+    semaphore_wait_ms: float = 0
+    provider_duration_ms: float = 0
+    backoff_ms: float = 0
+    reasoning_tokens: int | None = None
+    usage_known: bool = True
 
 
 class LLMClient:
@@ -246,28 +257,12 @@ class LLMClient:
                         batch_size=len(batch),
                         attempt=attempt + 1,
                     )
-                    response = sync_client.embeddings.create(
-                        model=model,
-                        input=batch,
-                        dimensions=settings.embedding_dimensions,
-                    )
+                    with media_call(model, "embed", file_id, usage_log_path=self._usage_log_path, batch_start=batch_start,
+                                    batch_size=len(batch), attempt=attempt + 1) as telemetry:
+                        response = sync_client.embeddings.create(
+                            model=model, input=batch, dimensions=settings.embedding_dimensions)
+                        telemetry["response"] = response
                     duration_ms = int((time.monotonic() - start) * 1000)
-                    input_tokens: int = (
-                        response.usage.total_tokens if response.usage else len(batch) * 5
-                    )
-                    cost = self._compute_cost(model, input_tokens, 0)
-                    usage = LLMUsage(
-                        file_id=file_id,
-                        agent_type="embed",
-                        model=model,
-                        input_tokens=input_tokens,
-                        output_tokens=0,
-                        cached_input_tokens=0,
-                        cost_usd=cost,
-                        timestamp=datetime.now(timezone.utc),
-                        duration_ms=duration_ms,
-                    )
-                    self._write_usage(usage)
                     all_vectors.extend(item.embedding for item in response.data)
                     logger.info(
                         "embed_batch_done",
@@ -288,7 +283,7 @@ class LLMClient:
                             batch_start=batch_start,
                             attempt=attempt + 1,
                             backoff_s=backoff,
-                            error=str(exc),
+                            **error_fields(exc),
                         )
                         time.sleep(backoff)
             else:
@@ -348,68 +343,81 @@ class LLMClient:
             Exception: Re-raises after ``_MAX_RETRIES`` failed attempts, or
                 immediately for non-retryable errors (auth, bad request, etc.).
         """
-        # Budget check — runs before any API call to avoid wasting tokens.
         from llm_wiki.quality.budget import BudgetExceeded
 
+        call_id = new_id()
+        fields = dict(call_id=call_id, model=self._model, agent_type=agent_type, file_id=file_id,
+                      provider=self._provider)
+        # SDK calls may internally retry; attempts below counts wrapper attempts.
+        sdk_retries = getattr(self._client, "max_retries", None)
+        fields["sdk_max_retries"] = sdk_retries if isinstance(sdk_retries, int) else None
+        started = time.perf_counter()
+        provider_ms = wait_ms = backoff_ms = 0.0
+        attempts = 0
+        outcome = "failed"
+        failure = {}
+        token = _PROVIDER_USAGE.set(None)
+        logger.info("ai_call_started", **fields)
         try:
             self._budget.check()
-        except BudgetExceeded as exc:
-            logger.error(
-                "llm_call_blocked_by_budget", agent_type=agent_type, error=str(exc)
-            )
-            raise
-
-        start = time.monotonic()
-        last_exc: Exception | None = None
-
-        for attempt in range(self._MAX_RETRIES):
-            try:
-                # Global (per-loop) cap on concurrent provider calls — held only
-                # for the call itself, released before backoff sleeps.
-                async with _llm_semaphore():
-                    text, input_tokens, output_tokens, cached = await self._call_provider(
-                        prompt, system, response_format, json_schema, schema_name
-                    )
-                duration_ms = int((time.monotonic() - start) * 1000)
-                cost = self._compute_cost(self._model, input_tokens, output_tokens)
+            for attempt in range(self._MAX_RETRIES):
+                wait_started = time.perf_counter()
+                provider_started = None
+                try:
+                    async with _llm_semaphore():
+                        wait_ms += (time.perf_counter() - wait_started) * 1000
+                        attempts += 1
+                        provider_started = time.perf_counter()
+                        try:
+                            text, incoming, outgoing, cached = await self._call_provider(
+                                prompt, system, response_format, json_schema, schema_name)
+                        finally:
+                            provider_ms += (time.perf_counter() - provider_started) * 1000
+                except Exception as exc:
+                    retry = not isinstance(exc, self._non_retryable) and attempt < self._MAX_RETRIES - 1
+                    logger.warning("ai_attempt_failed", **fields, attempt=attempts,
+                                   retrying=retry, **error_fields(exc))
+                    if not retry:
+                        raise
+                    backoff = 4**attempt
+                    logger.warning("llm_retry", **fields, attempt=attempts, backoff_s=backoff,
+                                   **error_fields(exc))
+                    backoff_started = time.perf_counter()
+                    await asyncio.sleep(backoff)
+                    backoff_ms += (time.perf_counter() - backoff_started) * 1000
+                    continue
+                details = _PROVIDER_USAGE.get()
                 usage = LLMUsage(
-                    file_id=file_id,
-                    agent_type=agent_type,
-                    model=self._model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cached_input_tokens=cached,
-                    cost_usd=cost,
-                    timestamp=datetime.now(timezone.utc),
-                    duration_ms=duration_ms,
+                    file_id=file_id, agent_type=agent_type, model=self._model,
+                    input_tokens=incoming, output_tokens=outgoing, cached_input_tokens=cached,
+                    cost_usd=self._compute_cost(self._model, incoming, outgoing, cached),
+                    timestamp=datetime.now(timezone.utc), duration_ms=int((time.perf_counter()-started)*1000),
+                    call_id=call_id, attempts=attempts, semaphore_wait_ms=round(wait_ms, 2),
+                    provider_duration_ms=round(provider_ms, 2), backoff_ms=round(backoff_ms, 2),
+                    reasoning_tokens=details.get("reasoning_tokens") if details else None,
+                    usage_known=details is None or (details.get("input_tokens") is not None and details.get("output_tokens") is not None),
                 )
                 self._write_usage(usage)
-                logger.info(
-                    "llm_call",
-                    file_id=file_id,
-                    agent_type=agent_type,
-                    model=self._model,
-                    cost_usd=cost,
-                    duration_ms=duration_ms,
-                )
+                outcome = "success"
                 return text, usage
-
-            except Exception as exc:  # noqa: BLE001
-                if isinstance(exc, self._non_retryable):
-                    raise
-                last_exc = exc
-                if attempt < self._MAX_RETRIES - 1:
-                    backoff = 4**attempt  # 1 s, 4 s, 16 s
-                    logger.warning(
-                        "llm_retry",
-                        file_id=file_id,
-                        attempt=attempt + 1,
-                        backoff_s=backoff,
-                        error=str(exc),
-                    )
-                    await asyncio.sleep(backoff)
-
-        raise last_exc or RuntimeError("LLM call failed after retries with no recorded exception")
+            raise RuntimeError("LLM call failed after retries")
+        except BudgetExceeded as exc:
+            outcome = "blocked"
+            failure = error_fields(exc)
+            logger.error("llm_call_blocked_by_budget", **fields, **failure)
+            raise
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except BaseException as exc:
+            failure = error_fields(exc)
+            raise
+        finally:
+            logger.info("ai_call_finished", **fields, outcome=outcome, attempts=attempts,
+                        duration_ms=round((time.perf_counter()-started)*1000, 2),
+                        provider_duration_ms=round(provider_ms, 2), semaphore_wait_ms=round(wait_ms, 2),
+                        backoff_ms=round(backoff_ms, 2), **failure)
+            _PROVIDER_USAGE.reset(token)
 
     # ------------------------------------------------------------------
     # Image generation (infographic artifact)
@@ -435,14 +443,18 @@ class LLMClient:
         if self._provider != "openai":
             raise RuntimeError("Image generation requires the OpenAI provider")
 
-        response = await self._client.images.generate(
-            model=settings.image_model,
-            prompt=prompt,
-            size=settings.image_size,
-            quality=settings.image_quality,
-            n=1,
-            timeout=max(settings.llm_timeout_s, 180),
-        )
+        with media_call(settings.image_model, "image", context().get("document_id", "image"),
+                        usage_log_path=self._usage_log_path,
+                        image_count=1, image_size=settings.image_size, image_quality=settings.image_quality) as telemetry:
+            response = await self._client.images.generate(
+                model=settings.image_model,
+                prompt=prompt,
+                size=settings.image_size,
+                quality=settings.image_quality,
+                n=1,
+                timeout=max(settings.llm_timeout_s, 180),
+            )
+            telemetry["response"] = response
         item = response.data[0] if response.data else None
         if item is None:
             raise RuntimeError("Image API returned no image")
@@ -538,6 +550,7 @@ class LLMClient:
             kwargs["response_format"] = {"type": "json_object"}
 
         response = await self._client.chat.completions.create(**kwargs)
+        _PROVIDER_USAGE.set(response_usage(response))
         text: str = response.choices[0].message.content or ""
         input_tokens: int = response.usage.prompt_tokens if response.usage else 0
         output_tokens: int = response.usage.completion_tokens if response.usage else 0
@@ -603,40 +616,23 @@ class LLMClient:
         Args:
             usage: The usage record to persist.
         """
-        record = {
-            "file_id": usage.file_id,
-            "agent_type": usage.agent_type,
-            "model": usage.model,
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "cached_input_tokens": usage.cached_input_tokens,
-            "cost_usd": usage.cost_usd,
-            "timestamp": usage.timestamp.isoformat(),
-            "duration_ms": usage.duration_ms,
-        }
-        lock_path = Path(str(self._usage_log_path) + ".lock")
-        with FileLock(str(lock_path)):
-            with self._usage_log_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
+        record = asdict(usage)
+        record["timestamp"] = usage.timestamp.isoformat()
+        record["provider"] = self._provider if usage.agent_type != "embed" else "openai"
+        record["outcome"] = "success"
+        if not usage.usage_known:
+            record["input_tokens"] = record["output_tokens"] = None
+        record["cost_usd"], record["cost_status"] = estimate_cost(usage.model, record)
+        write_usage(record, self._usage_log_path)
 
     # ------------------------------------------------------------------
     # Cost computation (not touched by LW-4 — preserved from skeleton)
     # ------------------------------------------------------------------
 
-    def _compute_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
-        """Compute USD cost using the price table from config.
-
-        Args:
-            model: Model identifier (must exist in settings.price_table).
-            input_tokens: Number of input tokens billed.
-            output_tokens: Number of output tokens billed.
-
-        Returns:
-            Cost in USD, rounded to 6 decimal places.
-        """
-        from llm_wiki.config import settings
-
-        # Unknown models fall back to zero cost rather than raising.
-        prices = settings.price_table.get(model, {"input": 0.0, "output": 0.0})
-        cost = (input_tokens * prices["input"] + output_tokens * prices["output"]) / 1_000_000
-        return round(cost, 6)
+    def _compute_cost(self, model: str, input_tokens: int, output_tokens: int, cached_input_tokens: int = 0) -> float:
+        # Legacy response DTOs require a float. The usage ledger separately
+        # reports null + cost_status for missing prices instead of implying $0.
+        cost, _ = estimate_cost(model, {"input_tokens": input_tokens,
+                                      "output_tokens": output_tokens,
+                                      "cached_input_tokens": cached_input_tokens})
+        return round(cost or 0.0, 6)

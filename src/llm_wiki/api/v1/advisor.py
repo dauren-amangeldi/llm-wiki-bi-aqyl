@@ -151,7 +151,10 @@ async def submit_answers(
         understanding = (
             str(json.loads(text).get("understanding", "")).strip() or row.situation
         )
-    except Exception:  # noqa: BLE001 — пересказ best-effort, ситуация как фолбэк
+    except Exception as exc:  # noqa: BLE001 — пересказ best-effort, ситуация как фолбэк
+        from llm_wiki.observability import error_fields, mark_outcome
+        mark_outcome("degraded")
+        logger.warning("advisor_understanding_fallback", consultation_id=consultation_id, **error_fields(exc))
         understanding = row.situation
     finally:
         await llm.aclose()

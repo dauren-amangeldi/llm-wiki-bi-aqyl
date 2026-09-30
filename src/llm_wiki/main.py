@@ -7,12 +7,12 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 import structlog
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from llm_wiki.api.deps import _engine
-from llm_wiki.api.middleware import AuthGateMiddleware, RequestIDMiddleware
+from llm_wiki.api.middleware import AuthGateMiddleware, RequestIDMiddleware, bind_request_entities
 from llm_wiki.api.routes import router
 from llm_wiki.api.v1 import router as v1_router
 from llm_wiki.config import settings
@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         s3_secret_key_len=len(settings.s3_secret_key),
         openai_api_key_len=len(settings.openai_api_key),
         ops_token_set=bool(settings.ops_token),
+        load_test_auth_active=settings.load_test_auth_active,
     )
 
     # Ensure local data directories exist (no-op effect for S3-backed raw/wiki).
@@ -98,6 +99,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if seeded:
                 logger.info("allowed_users_startup_seed", inserted=seeded)
 
+        from llm_wiki.api.load_test_auth import seed_load_test_users
+
+        test_users_seeded = await seed_load_test_users(session)
+        if test_users_seeded:
+            logger.info("load_test_users_seeded", inserted=test_users_seeded)
+
         # Seed/refresh Twins council personas + presets from the .md files.
         # seed_twin_personas upserts, so editing a persona file and restarting
         # applies the change without a migration.
@@ -134,10 +141,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     # Pagination total for GET /cases — readable by the SPA even cross-origin.
-    expose_headers=["X-Total-Count"],
+    expose_headers=["X-Total-Count", "X-Request-ID"],
 )
-app.include_router(router, prefix="/api/v1")
-app.include_router(v1_router, prefix="/api/v1")
+app.include_router(router, prefix="/api/v1", dependencies=[Depends(bind_request_entities)])
+app.include_router(v1_router, prefix="/api/v1", dependencies=[Depends(bind_request_entities)])
 
 
 @app.get("/health", tags=["system"])

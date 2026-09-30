@@ -160,6 +160,9 @@ async def upload_file(
     sha = sha256_stream(io.BytesIO(content))
     existing = await get_by_sha256(session, sha)
     if existing is not None:
+        from llm_wiki.observability import bind_entities, mark_outcome
+        bind_entities(file_id=existing.file_id)
+        mark_outcome("duplicate")
         logger.info(
             "dedup_hit",
             sha256=sha[:16] + "…",
@@ -812,6 +815,7 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
     # --- Usage log: cost aggregation ------------------------------------------
     cost_today = 0.0
     cost_this_month = 0.0
+    unpriced_calls_today = 0
     today = now.date()
 
     if settings.usage_log_path.exists():
@@ -824,9 +828,11 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
                 ts = datetime.fromisoformat(record["timestamp"])
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
-                cost = float(record.get("cost_usd", 0.0))
+                cost = float(record.get("cost_usd") or 0.0)
                 if ts.date() == today:
                     cost_today += cost
+                    if record.get("cost_usd") is None:
+                        unpriced_calls_today += 1
                 if (ts.year, ts.month) == (now.year, now.month):
                     cost_this_month += cost
             except (json.JSONDecodeError, KeyError, ValueError, TypeError):
@@ -847,6 +853,7 @@ async def get_stats(session: AsyncSession = Depends(get_db)) -> StatsResponse:
         total_files=total_files,
         total_wiki_pages=total_wiki_pages,
         cost_today_usd=round(cost_today, 4),
+        unpriced_calls_today=unpriced_calls_today,
         cost_this_month_usd=round(cost_this_month, 4),
         avg_cost_per_ingestion_usd=avg_cost,
         last_lint_run=last_lint_run,
@@ -956,6 +963,9 @@ async def ask_question(
 
 
 def _sse_line(payload: dict[str, object]) -> str:
+    from llm_wiki.observability import observe_sse
+
+    observe_sse(payload)
     """Format a single Server-Sent Event data line."""
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 

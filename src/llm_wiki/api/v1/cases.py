@@ -80,8 +80,10 @@ def _dispatch_autotag(case_id: str) -> None:
         from llm_wiki.orchestrator.tasks import autotag_case
 
         autotag_case.delay(case_id)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        from llm_wiki.observability import error_fields, mark_outcome
+        mark_outcome("degraded")
+        logger.warning("autotag_enqueue_failed", case_id=case_id, **error_fields(exc))
 
 
 @router.get("/cases")

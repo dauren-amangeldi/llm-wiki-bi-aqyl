@@ -159,6 +159,8 @@ class StatsResponse(BaseModel):
     # Budget fields (LW-19) — None when no daily limit is configured
     budget_cost_limit_usd: float | None = None
     budget_cost_used_pct: float | None = None
+    # Non-zero means displayed cost totals omit unpriced successful calls.
+    unpriced_calls_today: int = 0
 
 
 class AskRequest(BaseModel):
