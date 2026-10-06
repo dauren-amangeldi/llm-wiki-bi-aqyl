@@ -297,6 +297,11 @@ async def notify_artifact_event(
         if artifact and artifact.status != {"done": "ready", "failed": "failed"}.get(event):
             return  # The source has moved on; do not borrow its newer timestamp.
         at = artifact.finished_at if artifact else None
+        metadata = {"document_id": document_id, "kind": kind}
+        if artifact and kind == "presentation":
+            language = (artifact.generation_context or {}).get("language")
+            version = next((v for v in artifact.versions or [] if v.get("language") == language), {})
+            metadata.update(language=language, revision=version.get("revision"), generation_id=(artifact.generation_context or {}).get("id"))
         await upsert_event(
             session,
             section="artifacts",
@@ -306,7 +311,7 @@ async def notify_artifact_event(
             title=title,
             recipient=requested_by,
             detail=(detail or None) and detail[:500],
-            meta={"document_id": document_id, "kind": kind},
+            meta=metadata,
             occurred_at=at,
             occurrence_key=_identity(event, _utc(at)) if at else None,
         )

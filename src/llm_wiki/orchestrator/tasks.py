@@ -46,6 +46,8 @@ celery_app.conf.update(
     task_routes={
         "llm_wiki.orchestrator.tasks.process_file": {"queue": "ingest"},
         "llm_wiki.orchestrator.tasks.generate_artifact": {"queue": "artifacts"},
+        "llm_wiki.orchestrator.tasks.visual_unit": {"queue": "artifacts"},
+        "llm_wiki.orchestrator.tasks.dispatch_visual": {"queue": "light"},
         "llm_wiki.orchestrator.tasks.autotag_case": {"queue": "light"},
         "llm_wiki.orchestrator.tasks.backfill_case_tags": {"queue": "light"},
         "llm_wiki.orchestrator.tasks.run_weekly_audit": {"queue": "light"},
@@ -120,6 +122,14 @@ celery_app.conf.update(
     task_time_limit=600,
     broker_connection_retry_on_startup=True,
     beat_schedule={
+        "cleanup-visual-presentations": {
+            "task": "llm_wiki.orchestrator.tasks.cleanup_visual",
+            "schedule": 3600.0,
+        },
+        "dispatch-visual-presentations": {
+            "task": "llm_wiki.orchestrator.tasks.dispatch_visual",
+            "schedule": 10.0,
+        },
         # LW-15: weekly semantic audit via OpenAI Batch API (-50% cost, 24 h SLA)
         "weekly-audit": {
             "task": "llm_wiki.orchestrator.tasks.run_weekly_audit",
@@ -824,7 +834,7 @@ def sweep_stuck_generations() -> dict[str, int]:
         async with factory() as session:
             pending = (
                 await session.scalars(
-                    select(ArtifactRecord).where(ArtifactRecord.status == "pending")
+                    select(ArtifactRecord).where(ArtifactRecord.status == "pending", ArtifactRecord.kind != "presentation_visual")
                 )
             ).all()
             for art in pending:
@@ -914,3 +924,43 @@ def sweep_stuck_generations() -> dict[str, int]:
     if result["artifacts_swept"] or result["files_swept"]:
         logger.warning("sweep_stuck_generations_done", **result)
     return result
+
+
+@celery_app.task(name="llm_wiki.orchestrator.tasks.dispatch_visual", soft_time_limit=25, time_limit=30)
+def dispatch_visual() -> int:
+    from llm_wiki.orchestrator.visual_presentations import dispatch
+    factory = _worker_session_factory()
+
+    async def run():
+        try:
+            return await dispatch(factory)
+        finally:
+            await factory.kw["bind"].dispose()
+    return asyncio.run(run())
+
+
+@celery_app.task(name="llm_wiki.orchestrator.tasks.cleanup_visual", soft_time_limit=240, time_limit=300)
+def cleanup_visual() -> int:
+    from llm_wiki.orchestrator.visual_presentations import cleanup
+    factory = _worker_session_factory()
+
+    async def run():
+        try:
+            return await cleanup(factory)
+        finally:
+            await factory.kw["bind"].dispose()
+    return asyncio.run(run())
+
+
+@celery_app.task(name="llm_wiki.orchestrator.tasks.visual_unit", acks_late=False,
+                 reject_on_worker_lost=False, soft_time_limit=330, time_limit=360)
+def visual_unit(job_id: str, index: int, token: str) -> None:
+    from llm_wiki.orchestrator.visual_presentations import work
+    factory = _worker_session_factory()
+
+    async def run():
+        try:
+            await work(factory, job_id, index, token)
+        finally:
+            await factory.kw["bind"].dispose()
+    asyncio.run(run())

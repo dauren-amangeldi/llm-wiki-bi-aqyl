@@ -39,6 +39,7 @@ _FORMATS_BY_KIND: dict[str, set[str]] = {
     "test": {"pdf", "docx"},
     "card": {"pdf", "docx"},
     "presentation": {"pdf", "pptx"},
+    "presentation_visual": {"pdf", "pptx"},
 }
 
 
@@ -55,6 +56,8 @@ def export_artifact(kind: str, content: dict[str, Any], fmt: str) -> tuple[bytes
     """
     if fmt not in supported_formats(kind):
         raise ExportError(f"Cannot export kind={kind!r} as {fmt!r}")
+    if kind == "presentation_visual":
+        raise ExportError("Visual exports must be read from an authorized, completed revision")
     content = content or {}
     if fmt == "docx":
         return _build_docx(kind, content), MEDIA_TYPES["docx"]
