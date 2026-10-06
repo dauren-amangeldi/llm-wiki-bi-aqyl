@@ -178,6 +178,7 @@ def media_call(
                 "outcome": "success",
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                 **response_usage(result.get("response")),
+                "provider_request_id": _get(result.get("response"), "_request_id"),
                 **fields,
             },
             usage_log_path,

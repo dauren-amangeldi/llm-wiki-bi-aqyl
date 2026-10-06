@@ -119,6 +119,7 @@ async def test_detail_sends_only_requested_language_and_matching_preview_layout(
     assert [v["language"] for v in versions] == ["en"]
     assert versions[0]["content"]["layout"]["slides"][0]["title"] == "English"
     fallback = await http.get(f"/api/v1/artifacts/{record.artifact_id}?language=kk")
-    assert len(fallback.json()["versions"]) == 1
+    assert fallback.status_code == 404
+    assert fallback.json()["detail"]["reason"] == "version_not_found"
     all_versions = await http.get(f"/api/v1/artifacts/{record.artifact_id}")
     assert len(all_versions.json()["versions"]) == 2

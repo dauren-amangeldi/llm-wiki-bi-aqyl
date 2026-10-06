@@ -80,13 +80,21 @@ async def list_artifacts(
         return []
     await _check_document_access(session, document_id, caller)
     rows = await artifacts_store.list_artifacts(session, document_id)
-    return [artifacts_store.serialize_summary(r, language) for r in rows]
+    result = []
+    from llm_wiki.storage.visual_presentations import progress
+    for r in rows:
+        entry = artifacts_store.serialize_summary(r, language)
+        if r.kind == "presentation_visual":
+            entry["generation"] = await progress(session, r)
+        result.append(entry)
+    return result
 
 
 @router.get("/artifacts/{artifact_id}")
 async def get_artifact(
     artifact_id: str,
     language: str | None = None,
+    revision: int | None = None,
     session: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
 ) -> dict[str, Any]:
@@ -94,6 +102,19 @@ async def get_artifact(
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     await _check_document_access(session, record.document_id, caller)
+    if record.kind in {"presentation", "presentation_visual"} or revision is not None:
+        from llm_wiki.api.v1.visual_presentations import revision_detail
+        if record.kind == "presentation" and language is None and revision is None and record.versions:
+            # Existing consumers omit language to fetch all editable versions.
+            # Explicit language requests never substitute a different language.
+            result = None
+            combined = []
+            for lang in dict.fromkeys(v["language"] for v in record.versions if v.get("language")):
+                result = await revision_detail(session, record, lang, None, caller)
+                combined.extend(result["versions"])
+            if result is not None:
+                return {**result, "versions": combined}
+        return await revision_detail(session, record, language or "ru", revision, caller)
     # Font metrics for presentation layout run outside the event loop. Filtering
     # before layout also avoids transferring embedded images in other languages.
     return await run_in_threadpool(artifacts_store.serialize_detail, record, language=language)
@@ -105,6 +126,8 @@ def _version_content(record: Any, language: str) -> dict[str, Any]:
     for v in versions:
         if isinstance(v, dict) and v.get("language") == language:
             return v.get("content") or {}
+    if record.kind in {"presentation", "presentation_visual"}:
+        raise HTTPException(404, detail={"reason": "version_not_found"})
     for v in versions:
         if isinstance(v, dict):
             return v.get("content") or {}
@@ -116,6 +139,7 @@ async def export_artifact_file(
     artifact_id: str,
     format: str = "pdf",
     language: str = "ru",
+    revision: int | None = None,
     session: AsyncSession = Depends(get_db),
     caller: str = Depends(get_user_key),
 ) -> Response:
@@ -129,10 +153,16 @@ async def export_artifact_file(
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     await _check_document_access(session, record.document_id, caller)
+    if record.kind == "presentation_visual":
+        from llm_wiki.api.v1.visual_presentations import export_revision
+        return await export_revision(session, record, language, revision, format, caller)
     try:
-        data, media_type = export_artifact(
-            record.kind, _version_content(record, language), format
-        )
+        content = _version_content(record, language)
+        if revision is not None or record.kind == "presentation":
+            from llm_wiki.api.v1.visual_presentations import find_revision
+            content = (await find_revision(session, record, language, revision, caller)).content
+        await session.commit()
+        data, media_type = await run_in_threadpool(export_artifact, record.kind, content, format)
     except ExportError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filename = f"{record.kind}-{artifact_id[:8]}.{format}"
@@ -321,6 +351,11 @@ async def studio_generate(
     kind = str(body.get("kind") or "")
     document_id = str(body.get("document_id") or "")
     language = str(body.get("language") or "ru")
+    if kind == "presentation_visual":
+        from llm_wiki.storage.visual_presentations import start
+        ids = await _resolve_sources(session, document_id, _body_sources(body), caller)
+        await _reject_empty_source(session, document_id, ids)
+        return await start(session, document_id, ids, language, caller, body.get("request_key"), body.get("resume", False))
     if kind not in ("report", "test", "presentation"):
         raise HTTPException(status_code=400, detail=f"Unsupported kind for /studio/generate: {kind!r}")
     if not document_id:

@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     image_model: str = "gpt-image-2.5-flare"  # see docs/image-model-comparison-2026-09-10.md
     image_size: str = "1536x1024"  # landscape 3:2; preserve the benchmarked output size
     image_quality: str = "high"
+    # Limits for the durable visual-deck pipeline, shared across replicas.
+    visual_presentations_enabled: bool = False
+    visual_image_model: str = "gpt-image-2.5-flare"
+    visual_image_size: Literal["1536x864", "2048x1152"] = "1536x864"
+    visual_image_quality: Literal["low", "medium", "high"] = "medium"
+    visual_max_active: int = Field(default=2, ge=1, le=8)
+    visual_max_queued: int = Field(default=20, ge=1, le=100)
+    visual_unit_timeout_s: int = Field(default=240, ge=60, le=300)
+    visual_job_timeout_s: int = Field(default=1800, ge=600, le=3600)
+    visual_max_source_chars: int = Field(default=100_000, ge=1000, le=200_000)
+    # Shared across replicas and visual/infographic calls when visual is enabled.
+    image_global_concurrency: int = Field(default=2, ge=1, le=8)
+    image_daily_request_limit: int = Field(default=80, ge=1, le=1000)
     # Speech-to-text for audio uploads (mp3/ogg/wav/m4a/webm). OpenAI Whisper.
     transcription_model: str = "whisper-1"
     # OCR for scanned/photo PDFs with no text layer: render each page and read
@@ -143,11 +156,10 @@ class Settings(BaseSettings):
     @property
     def load_test_auth_active(self) -> bool:
         # Read deployment configuration, never Host/X-Forwarded-Host from a caller.
-        # TODO: Restore APP_ENVIRONMENT=test enforcement before stage/main release.
-        # Temporarily waived at user request; the test-only URL and secrets remain required.
         return (
             self.auth_enabled
             and self.load_test_auth_enabled
+            and self.app_environment == "test"
             and self.public_base_url.rstrip("/") == "https://aqyl.test.bi.group"
             and len(self.load_test_login_secret) >= 32
             and len(self.load_test_signing_secret) >= 32
@@ -158,7 +170,7 @@ class Settings(BaseSettings):
     def _validate_load_test_auth(self) -> "Settings":
         if self.load_test_auth_enabled and not self.load_test_auth_active:
             raise ValueError(
-                "Load-test auth requires AUTH_ENABLED=true, "
+                "Load-test auth requires AUTH_ENABLED=true, APP_ENVIRONMENT=test, "
                 "PUBLIC_BASE_URL=https://aqyl.test.bi.group and two distinct "
                 "load-test secrets of at least 32 characters"
             )
