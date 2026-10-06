@@ -60,12 +60,17 @@ async def upsert_artifact(
             artifact_id=uuid.uuid4().hex,
             document_id=document_id,
             kind=kind,
-            versions=[version],
+            versions=[],
             status="ready",
             finished_at=datetime.now(timezone.utc),
         )
         session.add(record)
         try:
+            if kind == "presentation":
+                await session.flush()
+                from llm_wiki.storage.visual_presentations import store_editable_revision
+                version["revision"] = await store_editable_revision(session, record, language, content, source_doc_ids)
+            record.versions = [version]
             await session.commit()
         except IntegrityError:
             # Lost a concurrent-insert race on uq_artifacts_document_kind —
@@ -74,6 +79,10 @@ async def upsert_artifact(
             record = await find_by_kind(session, document_id, kind)
             if record is None:  # pragma: no cover — winner vanished mid-race
                 raise
+            if kind == "presentation":
+                record = await session.get(ArtifactRecord, record.artifact_id, with_for_update=True, populate_existing=True)
+                from llm_wiki.storage.visual_presentations import store_editable_revision
+                version["revision"] = await store_editable_revision(session, record, language, content, source_doc_ids)
             others = [
                 v
                 for v in (record.versions or [])
@@ -84,6 +93,10 @@ async def upsert_artifact(
             record.finished_at = datetime.now(timezone.utc)
             await session.commit()
         return record
+    if kind == "presentation":
+        record = await session.get(ArtifactRecord, record.artifact_id, with_for_update=True, populate_existing=True)
+        from llm_wiki.storage.visual_presentations import store_editable_revision
+        version["revision"] = await store_editable_revision(session, record, language, content, source_doc_ids)
     others = [
         v
         for v in (record.versions or [])
@@ -180,7 +193,8 @@ def serialize_detail(record: ArtifactRecord, language: str | None = None) -> dic
         if isinstance(v, dict)
     ]
     if language and versions:
-        versions = [next((v for v in versions if v["language"] == language), versions[0])]
+        versions = ([v for v in versions if v["language"] == language] if record.kind == "presentation"
+                    else [next((v for v in versions if v["language"] == language), versions[0])])
     if record.kind == "presentation":
         from llm_wiki.agents.presentation_layout import presentation_layout
         for version in versions:
@@ -200,8 +214,14 @@ def serialize_summary(record: ArtifactRecord, language: str = "ru") -> dict[str,
     """Shape a record for GET /artifacts (list)."""
     versions = [v for v in (record.versions or []) if isinstance(v, dict)]
     version = next((v for v in versions if v.get("language") == language), versions[0] if versions else {})
+    if record.kind in {"presentation", "presentation_visual"}:
+        version = next((v for v in versions if v.get("language") == language), {})
     return {
-        "has_content": bool(versions),
+        "has_content": bool(version),
+        "slide_count": len((version.get("content") or {}).get("slides", [])),
+        "revision": version.get("revision"),
+        "languages": [{"language": v.get("language"), "revision": v.get("revision"),
+                       "slide_count": len((v.get("content") or {}).get("slides", []))} for v in versions],
         "source_doc_ids": version.get("source_doc_ids"),
         "artifact_id": record.artifact_id,
         "kind": record.kind,

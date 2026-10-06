@@ -72,6 +72,7 @@ async def test_login_real_gate_profile_and_read_routes(api):
 @pytest.mark.parametrize("field,value", [
     ("load_test_auth_enabled", False), ("public_base_url", "https://aqyl.bi.group"),
     ("public_base_url", ""), ("auth_enabled", False),
+    ("app_environment", "production"), ("app_environment", "development"),
     ("load_test_login_secret", ""), ("load_test_signing_secret", ""),
 ])
 async def test_disabled_environment_never_issues_or_verifies(api, monkeypatch, field, value):
@@ -206,7 +207,7 @@ def test_misconfigured_enabled_mode_fails_startup(enabled, overrides):
     with pytest.raises(ValidationError) as exc:
         Settings(_env_file=None, **values)
     assert "Load-test auth requires" in str(exc.value)
-    assert "APP_ENVIRONMENT" not in str(exc.value)
+    assert "APP_ENVIRONMENT=test" in str(exc.value)
     assert LOGIN_SECRET not in str(exc.value)
     assert SIGNING_SECRET not in str(exc.value)
 
@@ -218,13 +219,36 @@ def test_disabled_default_and_valid_test_configuration(enabled):
     assert Settings(_env_file=None, **values).load_test_auth_active
 
 
-@pytest.mark.parametrize("environment", [None, "production", "development", "test"])
-def test_temporary_environment_waiver_keeps_test_domain_required(enabled, monkeypatch, environment):
+@pytest.mark.parametrize("environment", [None, "production", "development"])
+def test_enabled_mode_requires_explicit_test_environment(enabled, monkeypatch, environment):
     monkeypatch.delenv("APP_ENVIRONMENT", raising=False)
     values = {**enabled}
     values.pop("app_environment")
     if environment is not None:
         values["app_environment"] = environment
+    values["PUBLIC_BASE_URL"] = values.pop("public_base_url")
+    with pytest.raises(ValidationError) as exc:
+        Settings(_env_file=None, **values)
+    assert "APP_ENVIRONMENT=test" in str(exc.value)
+    assert LOGIN_SECRET not in str(exc.value)
+    assert SIGNING_SECRET not in str(exc.value)
+
+
+@pytest.mark.parametrize("environment", ["production", "development", "test"])
+def test_disabled_mode_starts_in_every_environment(environment):
+    configured = Settings(
+        _env_file=None, app_environment=environment, load_test_auth_enabled=False,
+    )
+    assert not configured.load_test_auth_active
+
+
+@pytest.mark.parametrize("override", [
+    {"app_environment": "production"},
+    {"app_environment": "development"},
+    {"public_base_url": "https://aqyl.bi.group"},
+])
+def test_leaving_test_configuration_rejects_existing_tokens_and_new_login(enabled, monkeypatch, override):
+    values = {**enabled}
     values["PUBLIC_BASE_URL"] = values.pop("public_base_url")
     configured = Settings(_env_file=None, **values)
     monkeypatch.setattr(lt, "settings", configured)
@@ -232,7 +256,15 @@ def test_temporary_environment_waiver_keeps_test_domain_required(enabled, monkey
     lt.require_load_test_login(LOGIN_SECRET)
     token = lt.issue_load_test_token(lt.account_email(1))
     assert lt.verify_load_test_token(token)["email"] == lt.account_email(1)
-    configured.public_base_url = "https://aqyl.bi.group"
+    for key, value in override.items():
+        setattr(configured, key, value)
     assert not configured.load_test_auth_active
-    with pytest.raises(HTTPException):
+    with pytest.raises(HTTPException) as exc:
+        lt.require_load_test_login(LOGIN_SECRET)
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc:
+        lt.issue_load_test_token(lt.account_email(1))
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc:
         lt.verify_load_test_token(token)
+    assert exc.value.status_code == 401

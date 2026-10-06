@@ -412,6 +412,49 @@ class ArtifactRecord(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ArtifactRevision(Base):
+    """Immutable presentation manifest, including private object-store keys."""
+
+    __tablename__ = "artifact_revisions"
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.artifact_id", ondelete="CASCADE"), primary_key=True)
+    language: Mapped[str] = mapped_column(String, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content: Mapped[dict] = mapped_column(JSON, nullable=False)
+    sources: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    requested_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class VisualJob(Base):
+    """Durable attempt. Queued units are a transactional dispatch outbox."""
+
+    __tablename__ = "visual_jobs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.artifact_id", ondelete="CASCADE"), index=True)
+    language: Mapped[str] = mapped_column(String)
+    requested_by: Mapped[str] = mapped_column(String, index=True)
+    request_key: Mapped[str] = mapped_column(String, unique=True)
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class VisualUnit(Base):
+    """One delivery token owns a unit; paid results survive failed attempts."""
+
+    __tablename__ = "visual_units"
+    job_id: Mapped[str] = mapped_column(ForeignKey("visual_jobs.id", ondelete="CASCADE"), primary_key=True)
+    index: Mapped[int] = mapped_column(Integer, primary_key=True)  # 0 plan, 1..8 slides, 9 export
+    status: Mapped[str] = mapped_column(String, default="queued", index=True)
+    token: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class ChatScopeRecord(Base):
     """A revision per user's chat prevents cleared conversations from reappearing."""
 

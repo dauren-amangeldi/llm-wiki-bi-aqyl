@@ -6,7 +6,7 @@ from typing import Any, Literal
 import structlog
 from fastapi import Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-from sqlalchemy import and_, cast, func, or_, select, update as sa_update
+from sqlalchemy import and_, case as sa_case, cast, func, or_, select, update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -143,7 +143,8 @@ async def list_cases(
 
     art_rows = (
         await db.execute(
-            select(ArtifactRecord.document_id, func.count()).group_by(
+            select(ArtifactRecord.document_id, func.count(func.distinct(sa_case(
+                (ArtifactRecord.kind == "presentation_visual", "presentation"), else_=ArtifactRecord.kind)))).group_by(
                 ArtifactRecord.document_id
             )
         )

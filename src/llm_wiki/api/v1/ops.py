@@ -203,6 +203,7 @@ def _celery_snapshot() -> dict[str, Any]:
 @router.get("/ops/celery")
 async def celery_state(
     _access: None = Depends(_require_ops_access),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Что происходит ВНУТРИ Celery прямо сейчас (по каждому воркеру).
 
@@ -211,6 +212,13 @@ async def celery_state(
     """
     snapshot = await asyncio.to_thread(_celery_snapshot)
     snapshot["queues"] = await asyncio.to_thread(_queue_depths)
+    from llm_wiki.storage.metadata import VisualJob, VisualUnit
+    rows = (await db.execute(select(VisualUnit.status, func.count()).join(VisualJob).where(
+        VisualJob.status == "pending").group_by(VisualUnit.status))).all()
+    oldest = await db.scalar(select(func.min(VisualJob.created_at)).where(VisualJob.status == "pending"))
+    snapshot["visual"] = {"units": dict(rows), "oldest_pending_at": oldest.isoformat() if oldest else None,
+        "enabled": settings.visual_presentations_enabled, "max_active_units": settings.visual_max_active,
+        "image_concurrency": settings.image_global_concurrency, "image_daily_request_limit": settings.image_daily_request_limit}
     snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
     return snapshot
 

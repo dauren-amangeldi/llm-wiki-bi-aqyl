@@ -155,6 +155,10 @@ async def _live_rows(db: AsyncSession, caller: str) -> list[dict[str, object]]:
     ).all()
     for art in artifacts:
         title = await notif_store.document_title(db, art.document_id)
+        generation = None
+        if art.kind == "presentation_visual":
+            from llm_wiki.storage.visual_presentations import progress
+            generation = await progress(db, art)
         live.append(
             {
                 "section": "artifacts",
@@ -164,6 +168,7 @@ async def _live_rows(db: AsyncSession, caller: str) -> list[dict[str, object]]:
                 "state": "running" if art.started_at else "queued",
                 "kind": art.kind,
                 "document_id": art.document_id,
+                **({"generation": generation} if generation else {}),
             }
         )
 
